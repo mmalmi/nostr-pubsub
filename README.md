@@ -25,6 +25,11 @@ as a multiplexed transport. FIPS should own connection liveness, peer admission,
 link backpressure, and framing. Pubsub should own subscription/filter,
 inventory/want, source selection, and policy/scoring semantics.
 
+Source routing defaults prefer local indexes, then FIPS-carried endpoint routes,
+then generic peer routes, with actual Nostr relay routes last. Product code can
+override route priority per source, but relay fallback should be explicit rather
+than the first peerfinding path.
+
 ## Crates
 
 - `nostr-pubsub`: core `EventBus`, route, source, query, policy, and inv/want

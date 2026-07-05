@@ -375,7 +375,7 @@ fn author_pubkey_for_source_policy(context: &SourcePolicyContext<'_>) -> Option<
         EventSourceKind::Peer | EventSourceKind::FipsEndpoint => {
             parse_pubkey(&context.candidate.source.id.0)
         }
-        EventSourceKind::Relay => None,
+        EventSourceKind::LocalIndex | EventSourceKind::Relay => None,
     }
 }
 

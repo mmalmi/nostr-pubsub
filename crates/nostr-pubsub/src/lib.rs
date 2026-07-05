@@ -54,10 +54,28 @@ impl SourceId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventSourceKind {
+    LocalIndex,
     Peer,
     FipsEndpoint,
     Relay,
 }
+
+impl EventSourceKind {
+    #[must_use]
+    pub fn default_priority(self) -> i32 {
+        match self {
+            Self::LocalIndex => SOURCE_PRIORITY_LOCAL_INDEX,
+            Self::FipsEndpoint => SOURCE_PRIORITY_FIPS_ENDPOINT,
+            Self::Peer => SOURCE_PRIORITY_PEER,
+            Self::Relay => SOURCE_PRIORITY_RELAY,
+        }
+    }
+}
+
+pub const SOURCE_PRIORITY_LOCAL_INDEX: i32 = 300;
+pub const SOURCE_PRIORITY_FIPS_ENDPOINT: i32 = 200;
+pub const SOURCE_PRIORITY_PEER: i32 = 100;
+pub const SOURCE_PRIORITY_RELAY: i32 = -100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EventSource {
@@ -68,10 +86,28 @@ pub struct EventSource {
 
 impl EventSource {
     #[must_use]
+    pub fn local_index(id: impl Into<String>) -> Self {
+        Self {
+            id: SourceId::new(id),
+            kind: EventSourceKind::LocalIndex,
+            url: None,
+        }
+    }
+
+    #[must_use]
     pub fn peer(id: impl Into<String>) -> Self {
         Self {
             id: SourceId::new(id),
             kind: EventSourceKind::Peer,
+            url: None,
+        }
+    }
+
+    #[must_use]
+    pub fn fips_endpoint(id: impl Into<String>) -> Self {
+        Self {
+            id: SourceId::new(id),
+            kind: EventSourceKind::FipsEndpoint,
             url: None,
         }
     }
@@ -407,19 +443,69 @@ pub struct SourceRoute {
 }
 
 impl SourceRoute {
-    pub fn fips_peer(id: impl Into<String>, priority: i32) -> Self {
-        let id = id.into();
+    #[must_use]
+    pub fn from_source(source: EventSource) -> Self {
+        let id = source.id.as_str().to_string();
         Self {
-            id: id.clone(),
-            source: EventSource {
-                id: SourceId::new(id.clone()),
-                kind: EventSourceKind::FipsEndpoint,
-                url: None,
-            },
-            priority,
+            id,
+            priority: source.kind.default_priority(),
+            source,
             reason: None,
             capabilities: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn local_index(id: impl Into<String>) -> Self {
+        Self::from_source(EventSource::local_index(id))
+    }
+
+    #[must_use]
+    pub fn peer(id: impl Into<String>) -> Self {
+        Self::from_source(EventSource::peer(id))
+    }
+
+    #[must_use]
+    pub fn fips_peer_default(id: impl Into<String>) -> Self {
+        Self::from_source(EventSource::fips_endpoint(id))
+    }
+
+    #[must_use]
+    pub fn fips_peer(id: impl Into<String>, priority: i32) -> Self {
+        Self::fips_peer_default(id).with_priority(priority)
+    }
+
+    #[must_use]
+    pub fn relay(url: impl Into<String>) -> Self {
+        Self::from_source(EventSource::relay(url))
+    }
+
+    #[must_use]
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    #[must_use]
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_capability(mut self, capability: impl Into<String>) -> Self {
+        self.capabilities.push(capability.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_capabilities(
+        mut self,
+        capabilities: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.capabilities
+            .extend(capabilities.into_iter().map(Into::into));
+        self
     }
 }
 
@@ -607,5 +693,54 @@ mod tests {
 
         assert!(req.is_req());
         assert!(close.is_close());
+    }
+
+    #[test]
+    fn source_route_defaults_put_relay_after_local_sources() {
+        let local = SourceRoute::local_index("hashtree:events");
+        let fips = SourceRoute::fips_peer_default("npub1fips");
+        let peer = SourceRoute::peer("npub1peer");
+        let relay = SourceRoute::relay("wss://relay.example");
+
+        assert_eq!(local.priority, SOURCE_PRIORITY_LOCAL_INDEX);
+        assert_eq!(fips.priority, SOURCE_PRIORITY_FIPS_ENDPOINT);
+        assert_eq!(peer.priority, SOURCE_PRIORITY_PEER);
+        assert_eq!(relay.priority, SOURCE_PRIORITY_RELAY);
+        assert!(local.priority > fips.priority);
+        assert!(fips.priority > peer.priority);
+        assert!(peer.priority > relay.priority);
+    }
+
+    #[test]
+    fn route_defaults_sort_relay_last_by_priority() {
+        let mut routes = [
+            SourceRoute::relay("wss://relay.example"),
+            SourceRoute::peer("npub1peer"),
+            SourceRoute::local_index("hashtree:events"),
+            SourceRoute::fips_peer_default("npub1fips"),
+        ];
+        routes.sort_by_key(|route| std::cmp::Reverse(route.priority));
+
+        let attempted = routes
+            .iter()
+            .map(|route| route.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempted,
+            vec![
+                "hashtree:events",
+                "npub1fips",
+                "npub1peer",
+                "wss://relay.example"
+            ]
+        );
+    }
+
+    #[test]
+    fn route_priority_can_be_overridden_explicitly() {
+        let relay = SourceRoute::relay("wss://relay.example").with_priority(400);
+
+        assert_eq!(relay.priority, 400);
+        assert_eq!(relay.source.kind, EventSourceKind::Relay);
     }
 }
