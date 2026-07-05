@@ -738,7 +738,28 @@ fn filter_matches(filter: &Filter, event: &Event) -> bool {
     if filter.until.is_some_and(|until| event.created_at > until) {
         return false;
     }
+    if !filter.generic_tags.is_empty() && !filter_generic_tags_match(filter, event) {
+        return false;
+    }
     true
+}
+
+fn filter_generic_tags_match(filter: &Filter, event: &Event) -> bool {
+    filter
+        .generic_tags
+        .iter()
+        .all(|(tag_name, accepted_values)| {
+            let tag_name = tag_name.as_char().to_string();
+            event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts
+                    .first()
+                    .is_some_and(|candidate| candidate == &tag_name)
+                    && parts
+                        .get(1)
+                        .is_some_and(|value| accepted_values.contains(value))
+            })
+        })
 }
 
 fn filter_limit(filters: &[Filter]) -> Option<usize> {
@@ -748,7 +769,7 @@ fn filter_limit(filters: &[Filter]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind};
+    use nostr::{EventBuilder, Keys, Kind, Tag};
 
     #[test]
     fn retention_policy_accepts_matching_events_only() {
@@ -759,6 +780,34 @@ mod tests {
 
         assert!(policy.accepts(&note));
         assert!(!policy.accepts(&metadata));
+    }
+
+    #[test]
+    fn retention_policy_matches_generic_tag_filters() {
+        let keys = Keys::generate();
+        let matching = signed_event_with_tags(
+            &keys,
+            Kind::Custom(37195),
+            "advert",
+            [Tag::identifier("fips-test")],
+        );
+        let other_app = signed_event_with_tags(
+            &keys,
+            Kind::Custom(37195),
+            "advert",
+            [Tag::identifier("other-app")],
+        );
+        let policy = EventRetentionPolicy::new(
+            8,
+            vec![
+                Filter::new()
+                    .kind(Kind::Custom(37195))
+                    .identifier("fips-test"),
+            ],
+        );
+
+        assert!(policy.accepts(&matching));
+        assert!(!policy.accepts(&other_app));
     }
 
     #[test]
@@ -916,6 +965,17 @@ mod tests {
 
     fn signed_event(keys: &Keys, kind: Kind, content: &str) -> VerifiedEvent {
         let event = EventBuilder::new(kind, content)
+            .sign_with_keys(keys)
+            .unwrap();
+        VerifiedEvent::try_from(event).unwrap()
+    }
+
+    fn signed_event_with_tags<I>(keys: &Keys, kind: Kind, content: &str, tags: I) -> VerifiedEvent
+    where
+        I: IntoIterator<Item = Tag>,
+    {
+        let event = EventBuilder::new(kind, content)
+            .tags(tags)
             .sign_with_keys(keys)
             .unwrap();
         VerifiedEvent::try_from(event).unwrap()
