@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use nostr::Event;
-pub use nostr::{Filter, PublicKey};
+pub use nostr::{ClientMessage, Filter, PublicKey, RelayMessage, SubscriptionId};
 
 pub const CAP_HASHTREE_FETCH: &str = "hashtree.fetch";
 
@@ -41,8 +41,14 @@ impl TryFrom<Event> for VerifiedEvent {
 pub struct SourceId(pub String);
 
 impl SourceId {
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -61,6 +67,7 @@ pub struct EventSource {
 }
 
 impl EventSource {
+    #[must_use]
     pub fn peer(id: impl Into<String>) -> Self {
         Self {
             id: SourceId::new(id),
@@ -69,6 +76,7 @@ impl EventSource {
         }
     }
 
+    #[must_use]
     pub fn relay(url: impl Into<String>) -> Self {
         let url = url.into();
         Self {
@@ -163,6 +171,150 @@ pub struct QueryOptions {
 pub trait EventBus: Send + Sync {
     async fn publish(&self, event: VerifiedEvent, source: EventSource) -> Result<PublishReport>;
     async fn query(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport>;
+}
+
+pub const DEFAULT_INV_WANT_HOP_LIMIT: u8 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubsubDeliveryStrategy {
+    PushSubscribed,
+    InventoryFirst,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PubsubStreamId(pub String);
+
+impl PubsubStreamId {
+    #[must_use]
+    pub fn new(stream_id: impl Into<String>) -> Self {
+        Self(stream_id.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PubsubContentKey {
+    pub stream_id: PubsubStreamId,
+    pub origin: SourceId,
+    pub seq: u64,
+}
+
+impl PubsubContentKey {
+    #[must_use]
+    pub fn new(stream_id: impl Into<String>, origin: impl Into<String>, seq: u64) -> Self {
+        Self {
+            stream_id: PubsubStreamId::new(stream_id),
+            origin: SourceId::new(origin),
+            seq,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubsubInventory {
+    pub key: PubsubContentKey,
+    pub payload_bytes: u64,
+    pub hop_limit: u8,
+}
+
+impl PubsubInventory {
+    #[must_use]
+    pub fn new(key: PubsubContentKey, payload_bytes: u64, hop_limit: u8) -> Self {
+        Self {
+            key,
+            payload_bytes,
+            hop_limit,
+        }
+    }
+
+    #[must_use]
+    pub fn want(&self) -> PubsubWant {
+        PubsubWant::new(self.key.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubsubWant {
+    pub key: PubsubContentKey,
+}
+
+impl PubsubWant {
+    #[must_use]
+    pub fn new(key: PubsubContentKey) -> Self {
+        Self { key }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubsubFrame {
+    pub key: PubsubContentKey,
+    pub payload: Vec<u8>,
+    pub hop_limit: u8,
+}
+
+impl PubsubFrame {
+    #[must_use]
+    pub fn new(key: PubsubContentKey, payload: impl Into<Vec<u8>>, hop_limit: u8) -> Self {
+        Self {
+            key,
+            payload: payload.into(),
+            hop_limit,
+        }
+    }
+
+    #[must_use]
+    pub fn inventory(&self) -> PubsubInventory {
+        PubsubInventory::new(
+            self.key.clone(),
+            u64::try_from(self.payload.len()).unwrap_or(u64::MAX),
+            self.hop_limit,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvWantMessage {
+    Inventory(PubsubInventory),
+    Want(PubsubWant),
+    Frame(PubsubFrame),
+}
+
+impl InvWantMessage {
+    #[must_use]
+    pub fn key(&self) -> &PubsubContentKey {
+        match self {
+            Self::Inventory(inventory) => &inventory.key,
+            Self::Want(want) => &want.key,
+            Self::Frame(frame) => &frame.key,
+        }
+    }
+
+    #[must_use]
+    pub fn stream_id(&self) -> &PubsubStreamId {
+        match self {
+            Self::Inventory(inventory) => &inventory.key.stream_id,
+            Self::Want(want) => &want.key.stream_id,
+            Self::Frame(frame) => &frame.key.stream_id,
+        }
+    }
+}
+
+#[async_trait]
+pub trait InvWantBus: Send + Sync {
+    async fn announce_inventory(
+        &self,
+        inventory: PubsubInventory,
+        source: EventSource,
+    ) -> Result<PublishReport>;
+
+    async fn request_want(&self, want: PubsubWant, source: EventSource) -> Result<()>;
+
+    async fn publish_frame(&self, frame: PubsubFrame, source: EventSource)
+    -> Result<PublishReport>;
 }
 
 #[derive(Clone)]
@@ -415,4 +567,45 @@ fn filter_matches(filter: &Filter, event: &Event) -> bool {
 
 fn filter_limit(filters: &[Filter]) -> Option<usize> {
     filters.iter().filter_map(|filter| filter.limit).min()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_inventory_and_want_share_content_key() {
+        let key = PubsubContentKey::new("author:alice", "publisher-a", 7);
+        let frame = PubsubFrame::new(key.clone(), b"hello".to_vec(), 4);
+
+        let inventory = frame.inventory();
+        assert_eq!(inventory.key, key);
+        assert_eq!(inventory.payload_bytes, 5);
+        assert_eq!(inventory.hop_limit, 4);
+
+        let want = inventory.want();
+        assert_eq!(want.key, frame.key);
+    }
+
+    #[test]
+    fn protocol_messages_expose_their_content_key() {
+        let key = PubsubContentKey::new("ratings:exit", "peer-a", 42);
+        let inventory = PubsubInventory::new(key.clone(), 512, DEFAULT_INV_WANT_HOP_LIMIT);
+        let want = PubsubWant::new(key.clone());
+        let frame = PubsubFrame::new(key.clone(), vec![1, 2, 3], DEFAULT_INV_WANT_HOP_LIMIT);
+
+        assert_eq!(InvWantMessage::Inventory(inventory).key(), &key);
+        assert_eq!(InvWantMessage::Want(want).key(), &key);
+        assert_eq!(InvWantMessage::Frame(frame).key(), &key);
+    }
+
+    #[test]
+    fn standard_subscriptions_use_nostr_protocol_messages() {
+        let subscription_id = SubscriptionId::new("author-alice");
+        let req = ClientMessage::req(subscription_id.clone(), vec![Filter::new()]);
+        let close = ClientMessage::close(subscription_id);
+
+        assert!(req.is_req());
+        assert!(close.is_close());
+    }
 }
