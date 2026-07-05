@@ -1,0 +1,23 @@
+[package]
+name = "nostr-pubsub-social-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Social graph policy adapter for nostr-pubsub"
+
+[dependencies]
+async-trait.workspace = true
+nostr-pubsub.workspace = true
+nostr-social-graph.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+nostr.workspace = true
+nostr-social-graph-hashtree.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "nostr-pubsub-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Actual Nostr relay backend for nostr-pubsub"
+
+[dependencies]
+async-trait.workspace = true
+nostr-pubsub.workspace = true
+nostr-sdk.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true

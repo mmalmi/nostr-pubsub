@@ -1,0 +1,35 @@
+[workspace]
+members = [
+  "crates/nostr-pubsub",
+  "crates/nostr-pubsub-relay",
+  "crates/nostr-pubsub-social-graph",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "htree://self/nostr-pubsub"
+authors = ["Nostr Pubsub contributors"]
+
+[workspace.dependencies]
+async-trait = "0.1"
+nostr = { version = "0.44.3", features = ["nip44"] }
+nostr-sdk = "0.44.1"
+nostr-pubsub = { version = "0.1.0", path = "crates/nostr-pubsub" }
+nostr-social-graph = { version = "0.1.2", path = "../nostr-social-graph/rust/crates/nostr-social-graph" }
+nostr-social-graph-hashtree = { version = "0.1.0", path = "../nostr-social-graph/rust/crates/nostr-social-graph-hashtree" }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1.50", features = ["full"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

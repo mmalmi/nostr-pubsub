@@ -1,0 +1,16 @@
+[package]
+name = "nostr-pubsub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Neutral Nostr event and source routing primitives"
+
+[dependencies]
+async-trait.workspace = true
+nostr.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
