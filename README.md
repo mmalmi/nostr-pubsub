@@ -18,7 +18,8 @@ subscription messages.
 `nostr-pubsub` only adds the missing transport-neutral extension for
 inventory-first delivery: content keys, inventory announcements, wants, and
 frames. A backend can push full events only to subscribed peers, use inv/want for
-larger or costed payloads, or combine both per stream.
+larger or costed payloads, or combine both per stream. Inventory is still gated
+by matching Nostr subscriptions before any inv/want announcement is sent.
 
 The core crate also defines the retention contract for bounded event caches:
 which Nostr filters a local store should retain and how many matching events it
@@ -29,7 +30,8 @@ VPN, and Iris Drive choose the small event sets they need.
 FIPS connections can carry pubsub beside VPN tunnel traffic and hashtree traffic
 as a multiplexed transport. FIPS should own connection liveness, peer admission,
 link backpressure, and framing. Pubsub should own subscription/filter,
-inventory/want, source selection, and policy/scoring semantics.
+bounded peer subscription records, inventory/want, source selection, and
+policy/scoring semantics.
 
 Source routing defaults prefer local indexes, then FIPS-carried endpoint routes,
 then generic peer routes, with actual Nostr relay routes last. Product code can

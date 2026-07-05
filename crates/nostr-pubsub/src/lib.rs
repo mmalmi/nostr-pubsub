@@ -1,9 +1,13 @@
 //! Minimal in-process pubsub primitives for Nostr event routing.
 
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, RwLock},
+};
 
 use async_trait::async_trait;
 use nostr::Event;
+pub use nostr::filter::MatchEventOptions;
 pub use nostr::{ClientMessage, Filter, PublicKey, RelayMessage, SubscriptionId};
 
 pub const CAP_HASHTREE_FETCH: &str = "hashtree.fetch";
@@ -250,6 +254,17 @@ pub enum PubsubPeerInterest {
     Unknown,
 }
 
+impl PubsubPeerInterest {
+    #[must_use]
+    pub fn from_filters(filters: &[Filter], event: &VerifiedEvent) -> Self {
+        if subscription_filters_match(filters, event.as_event()) {
+            Self::Subscribed
+        } else {
+            Self::Unsubscribed
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubsubDeliveryAction {
     PushFrame,
@@ -260,7 +275,6 @@ pub enum PubsubDeliveryAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PubsubDeliveryPolicy {
     pub strategy: PubsubDeliveryStrategy,
-    pub announce_inventory_without_subscription: bool,
 }
 
 impl PubsubDeliveryPolicy {
@@ -268,7 +282,6 @@ impl PubsubDeliveryPolicy {
     pub const fn push_subscribed() -> Self {
         Self {
             strategy: PubsubDeliveryStrategy::PushSubscribed,
-            announce_inventory_without_subscription: false,
         }
     }
 
@@ -276,33 +289,343 @@ impl PubsubDeliveryPolicy {
     pub const fn inventory_to_subscribers() -> Self {
         Self {
             strategy: PubsubDeliveryStrategy::InventoryFirst,
-            announce_inventory_without_subscription: false,
         }
     }
 
+    /// Inventory-first delivery to peers with matching subscriptions.
+    ///
+    /// This is kept as a mesh-oriented constructor, but inventory is still
+    /// gated by Nostr subscription/filter interest.
     #[must_use]
     pub const fn inventory_to_peers() -> Self {
         Self {
             strategy: PubsubDeliveryStrategy::InventoryFirst,
-            announce_inventory_without_subscription: true,
         }
     }
 
     #[must_use]
     pub fn action_for_peer(self, interest: PubsubPeerInterest) -> PubsubDeliveryAction {
-        match (
-            self.strategy,
-            interest,
-            self.announce_inventory_without_subscription,
-        ) {
-            (PubsubDeliveryStrategy::PushSubscribed, PubsubPeerInterest::Subscribed, _) => {
+        match (self.strategy, interest) {
+            (PubsubDeliveryStrategy::PushSubscribed, PubsubPeerInterest::Subscribed) => {
                 PubsubDeliveryAction::PushFrame
             }
-            (PubsubDeliveryStrategy::InventoryFirst, PubsubPeerInterest::Subscribed, _)
-            | (PubsubDeliveryStrategy::InventoryFirst, _, true) => {
+            (PubsubDeliveryStrategy::InventoryFirst, PubsubPeerInterest::Subscribed) => {
                 PubsubDeliveryAction::AnnounceInventory
             }
             _ => PubsubDeliveryAction::Skip,
+        }
+    }
+
+    #[must_use]
+    pub fn action_for_event(
+        self,
+        subscriptions: &PubsubPeerSubscriptionStore,
+        peer_id: &SourceId,
+        event: &VerifiedEvent,
+    ) -> PubsubDeliveryAction {
+        self.action_for_peer(subscriptions.peer_interest(peer_id, event))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PubsubSubscriptionLimits {
+    pub max_peers: usize,
+    pub max_subscriptions_per_peer: usize,
+    pub max_filters_per_subscription: usize,
+}
+
+impl Default for PubsubSubscriptionLimits {
+    fn default() -> Self {
+        Self {
+            max_peers: 1024,
+            max_subscriptions_per_peer: 64,
+            max_filters_per_subscription: 16,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubsubPeerSubscription {
+    pub subscription_id: String,
+    pub filters: Vec<Filter>,
+}
+
+impl PubsubPeerSubscription {
+    #[must_use]
+    pub fn new(subscription_id: impl Into<String>, filters: Vec<Filter>) -> Self {
+        Self {
+            subscription_id: subscription_id.into(),
+            filters,
+        }
+    }
+
+    #[must_use]
+    pub fn matches(&self, event: &VerifiedEvent) -> bool {
+        self.matches_event(event.as_event())
+    }
+
+    #[must_use]
+    pub fn matches_event(&self, event: &Event) -> bool {
+        subscription_filters_match(&self.filters, event)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PubsubSubscriptionUpdate {
+    Subscribed,
+    Closed,
+    Ignored,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PeerSubscriptionSet {
+    subscriptions: BTreeMap<String, PubsubPeerSubscription>,
+    order: VecDeque<String>,
+}
+
+impl PeerSubscriptionSet {
+    fn upsert(
+        &mut self,
+        subscription: PubsubPeerSubscription,
+        limits: PubsubSubscriptionLimits,
+    ) -> Option<PubsubPeerSubscription> {
+        let subscription_id = subscription.subscription_id.clone();
+        self.order.retain(|id| id != &subscription_id);
+        self.order.push_back(subscription_id.clone());
+        let replaced = self
+            .subscriptions
+            .insert(subscription_id.clone(), subscription);
+        if replaced.is_none() {
+            self.evict_oldest_over_limit(limits.max_subscriptions_per_peer)
+        } else {
+            None
+        }
+    }
+
+    fn remove(&mut self, subscription_id: &str) -> Option<PubsubPeerSubscription> {
+        self.order.retain(|id| id != subscription_id);
+        self.subscriptions.remove(subscription_id)
+    }
+
+    fn evict_oldest_over_limit(&mut self, limit: usize) -> Option<PubsubPeerSubscription> {
+        while self.subscriptions.len() > limit {
+            let Some(subscription_id) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.subscriptions.remove(&subscription_id) {
+                return Some(removed);
+            }
+        }
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.subscriptions.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PubsubPeerSubscriptionStore {
+    limits: PubsubSubscriptionLimits,
+    peers: BTreeMap<SourceId, PeerSubscriptionSet>,
+    peer_order: VecDeque<SourceId>,
+}
+
+impl Default for PubsubPeerSubscriptionStore {
+    fn default() -> Self {
+        Self::new(PubsubSubscriptionLimits::default())
+    }
+}
+
+impl PubsubPeerSubscriptionStore {
+    #[must_use]
+    pub fn new(limits: PubsubSubscriptionLimits) -> Self {
+        Self {
+            limits,
+            peers: BTreeMap::new(),
+            peer_order: VecDeque::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn limits(&self) -> PubsubSubscriptionLimits {
+        self.limits
+    }
+
+    #[must_use]
+    pub fn peer_count(&self) -> usize {
+        self.peers.len()
+    }
+
+    #[must_use]
+    pub fn subscription_count(&self) -> usize {
+        self.peers
+            .values()
+            .map(|peer| peer.subscriptions.len())
+            .sum()
+    }
+
+    #[must_use]
+    pub fn peer_subscription_count(&self, peer_id: &SourceId) -> usize {
+        self.peers
+            .get(peer_id)
+            .map_or(0, |peer| peer.subscriptions.len())
+    }
+
+    pub fn apply_client_message(
+        &mut self,
+        peer_id: SourceId,
+        message: ClientMessage<'_>,
+    ) -> Result<PubsubSubscriptionUpdate> {
+        match message {
+            ClientMessage::Req {
+                subscription_id,
+                filters,
+            } => {
+                let subscription_id = subscription_id.into_owned().to_string();
+                let filters = filters
+                    .into_iter()
+                    .map(std::borrow::Cow::into_owned)
+                    .collect::<Vec<_>>();
+                self.upsert_filters(peer_id, subscription_id, filters)?;
+                Ok(PubsubSubscriptionUpdate::Subscribed)
+            }
+            ClientMessage::Close(subscription_id) => {
+                let subscription_id = subscription_id.into_owned().to_string();
+                self.remove(&peer_id, &subscription_id);
+                Ok(PubsubSubscriptionUpdate::Closed)
+            }
+            _ => Ok(PubsubSubscriptionUpdate::Ignored),
+        }
+    }
+
+    pub fn upsert_filters(
+        &mut self,
+        peer_id: SourceId,
+        subscription_id: impl Into<String>,
+        filters: Vec<Filter>,
+    ) -> Result<Option<PubsubPeerSubscription>> {
+        let subscription = PubsubPeerSubscription::new(subscription_id, filters);
+        self.upsert(peer_id, subscription)
+    }
+
+    pub fn upsert(
+        &mut self,
+        peer_id: SourceId,
+        subscription: PubsubPeerSubscription,
+    ) -> Result<Option<PubsubPeerSubscription>> {
+        if self.limits.max_peers == 0 {
+            return Err(PubsubError::Validation(
+                "peer subscription store max_peers must be greater than zero".to_string(),
+            ));
+        }
+        if self.limits.max_subscriptions_per_peer == 0 {
+            return Err(PubsubError::Validation(
+                "peer subscription store max_subscriptions_per_peer must be greater than zero"
+                    .to_string(),
+            ));
+        }
+        if subscription.filters.len() > self.limits.max_filters_per_subscription {
+            return Err(PubsubError::Validation(format!(
+                "subscription {} has {} filters, limit is {}",
+                subscription.subscription_id,
+                subscription.filters.len(),
+                self.limits.max_filters_per_subscription
+            )));
+        }
+
+        let is_new_peer = !self.peers.contains_key(&peer_id);
+        self.touch_peer(peer_id.clone());
+        if is_new_peer {
+            self.evict_peers_over_limit();
+        }
+        let peer = self.peers.entry(peer_id).or_default();
+        Ok(peer.upsert(subscription, self.limits))
+    }
+
+    pub fn remove(
+        &mut self,
+        peer_id: &SourceId,
+        subscription_id: &str,
+    ) -> Option<PubsubPeerSubscription> {
+        let removed = self
+            .peers
+            .get_mut(peer_id)
+            .and_then(|peer| peer.remove(subscription_id));
+        if self
+            .peers
+            .get(peer_id)
+            .is_some_and(PeerSubscriptionSet::is_empty)
+        {
+            self.remove_peer(peer_id);
+        }
+        removed
+    }
+
+    pub fn remove_peer(&mut self, peer_id: &SourceId) -> Vec<PubsubPeerSubscription> {
+        self.peer_order.retain(|candidate| candidate != peer_id);
+        self.peers
+            .remove(peer_id)
+            .map(|peer| peer.subscriptions.into_values().collect())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn peer_interest(&self, peer_id: &SourceId, event: &VerifiedEvent) -> PubsubPeerInterest {
+        let Some(peer) = self.peers.get(peer_id) else {
+            return PubsubPeerInterest::Unknown;
+        };
+        if peer
+            .subscriptions
+            .values()
+            .any(|subscription| subscription.matches(event))
+        {
+            PubsubPeerInterest::Subscribed
+        } else {
+            PubsubPeerInterest::Unsubscribed
+        }
+    }
+
+    #[must_use]
+    pub fn matching_subscriptions<'a>(
+        &'a self,
+        peer_id: &SourceId,
+        event: &VerifiedEvent,
+    ) -> Vec<&'a PubsubPeerSubscription> {
+        self.peers
+            .get(peer_id)
+            .into_iter()
+            .flat_map(|peer| peer.subscriptions.values())
+            .filter(|subscription| subscription.matches(event))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn interested_peers(&self, event: &VerifiedEvent) -> Vec<SourceId> {
+        self.peers
+            .iter()
+            .filter(|(_, peer)| {
+                peer.subscriptions
+                    .values()
+                    .any(|subscription| subscription.matches(event))
+            })
+            .map(|(peer_id, _)| peer_id.clone())
+            .collect()
+    }
+
+    fn touch_peer(&mut self, peer_id: SourceId) {
+        self.peer_order.retain(|candidate| candidate != &peer_id);
+        self.peer_order.push_back(peer_id);
+    }
+
+    fn evict_peers_over_limit(&mut self) {
+        while self.peers.len() >= self.limits.max_peers {
+            let Some(peer_id) = self.peer_order.pop_front() else {
+                break;
+            };
+            if self.peers.remove(&peer_id).is_some() {
+                break;
+            }
         }
     }
 }
@@ -707,59 +1030,14 @@ fn decision_priority(decision: &PolicyDecision) -> i32 {
 }
 
 fn filters_match(filters: &[Filter], event: &Event) -> bool {
-    filters.is_empty() || filters.iter().any(|filter| filter_matches(filter, event))
+    filters.is_empty() || subscription_filters_match(filters, event)
 }
 
-fn filter_matches(filter: &Filter, event: &Event) -> bool {
-    if filter
-        .ids
-        .as_ref()
-        .is_some_and(|ids| !ids.contains(&event.id))
-    {
-        return false;
-    }
-    if filter
-        .authors
-        .as_ref()
-        .is_some_and(|authors| !authors.contains(&event.pubkey))
-    {
-        return false;
-    }
-    if filter
-        .kinds
-        .as_ref()
-        .is_some_and(|kinds| !kinds.contains(&event.kind))
-    {
-        return false;
-    }
-    if filter.since.is_some_and(|since| event.created_at < since) {
-        return false;
-    }
-    if filter.until.is_some_and(|until| event.created_at > until) {
-        return false;
-    }
-    if !filter.generic_tags.is_empty() && !filter_generic_tags_match(filter, event) {
-        return false;
-    }
-    true
-}
-
-fn filter_generic_tags_match(filter: &Filter, event: &Event) -> bool {
-    filter
-        .generic_tags
-        .iter()
-        .all(|(tag_name, accepted_values)| {
-            let tag_name = tag_name.as_char().to_string();
-            event.tags.iter().any(|tag| {
-                let parts = tag.as_slice();
-                parts
-                    .first()
-                    .is_some_and(|candidate| candidate == &tag_name)
-                    && parts
-                        .get(1)
-                        .is_some_and(|value| accepted_values.contains(value))
-            })
-        })
+fn subscription_filters_match(filters: &[Filter], event: &Event) -> bool {
+    !filters.is_empty()
+        && filters
+            .iter()
+            .any(|filter| filter.match_event(event, MatchEventOptions::new()))
 }
 
 fn filter_limit(filters: &[Filter]) -> Option<usize> {
@@ -861,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_policy_can_inventory_unknown_peers_for_mesh_relaying() {
+    fn delivery_policy_requires_subscription_match_before_inventory() {
         let policy = PubsubDeliveryPolicy::inventory_to_peers();
 
         assert_eq!(
@@ -870,11 +1148,257 @@ mod tests {
         );
         assert_eq!(
             policy.action_for_peer(PubsubPeerInterest::Unsubscribed),
-            PubsubDeliveryAction::AnnounceInventory
+            PubsubDeliveryAction::Skip
         );
         assert_eq!(
             policy.action_for_peer(PubsubPeerInterest::Unknown),
+            PubsubDeliveryAction::Skip
+        );
+    }
+
+    #[test]
+    fn peer_subscription_store_records_bounded_peer_subscriptions() {
+        let mut subscriptions = PubsubPeerSubscriptionStore::new(PubsubSubscriptionLimits {
+            max_peers: 2,
+            max_subscriptions_per_peer: 2,
+            max_filters_per_subscription: 2,
+        });
+        let peer_a = SourceId::new("peer-a");
+        let peer_b = SourceId::new("peer-b");
+        let peer_c = SourceId::new("peer-c");
+
+        subscriptions
+            .upsert_filters(
+                peer_a.clone(),
+                "sub-1",
+                vec![Filter::new().kind(Kind::TextNote)],
+            )
+            .unwrap();
+        subscriptions
+            .upsert_filters(
+                peer_a.clone(),
+                "sub-2",
+                vec![Filter::new().kind(Kind::Metadata)],
+            )
+            .unwrap();
+        let evicted = subscriptions
+            .upsert_filters(
+                peer_a.clone(),
+                "sub-3",
+                vec![Filter::new().kind(Kind::EncryptedDirectMessage)],
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(evicted.subscription_id, "sub-1");
+        assert_eq!(subscriptions.peer_subscription_count(&peer_a), 2);
+
+        subscriptions
+            .upsert_filters(
+                peer_b.clone(),
+                "sub-1",
+                vec![Filter::new().kind(Kind::TextNote)],
+            )
+            .unwrap();
+        subscriptions
+            .upsert_filters(
+                peer_c.clone(),
+                "sub-1",
+                vec![Filter::new().kind(Kind::TextNote)],
+            )
+            .unwrap();
+
+        assert_eq!(subscriptions.peer_count(), 2);
+        assert_eq!(
+            subscriptions.peer_interest(
+                &peer_a,
+                &signed_event(&Keys::generate(), Kind::TextNote, "hello")
+            ),
+            PubsubPeerInterest::Unknown
+        );
+        assert_eq!(subscriptions.peer_subscription_count(&peer_b), 1);
+        assert_eq!(subscriptions.peer_subscription_count(&peer_c), 1);
+    }
+
+    #[test]
+    fn peer_subscription_store_rejects_filter_spam() {
+        let mut subscriptions = PubsubPeerSubscriptionStore::new(PubsubSubscriptionLimits {
+            max_peers: 8,
+            max_subscriptions_per_peer: 8,
+            max_filters_per_subscription: 1,
+        });
+        let result = subscriptions.upsert_filters(
+            SourceId::new("peer-a"),
+            "sub-1",
+            vec![
+                Filter::new().kind(Kind::TextNote),
+                Filter::new().kind(Kind::Metadata),
+            ],
+        );
+
+        assert!(matches!(result, Err(PubsubError::Validation(_))));
+    }
+
+    #[test]
+    fn peer_subscriptions_use_nostr_filter_matching() {
+        let keys = Keys::generate();
+        let matching = signed_event_with_tags(
+            &keys,
+            Kind::Custom(37195),
+            "advert",
+            [Tag::identifier("fips-test")],
+        );
+        let other = signed_event_with_tags(
+            &keys,
+            Kind::Custom(37195),
+            "advert",
+            [Tag::identifier("other-app")],
+        );
+        let peer_id = SourceId::new("peer-a");
+        let mut subscriptions = PubsubPeerSubscriptionStore::default();
+        subscriptions
+            .upsert_filters(
+                peer_id.clone(),
+                "fips",
+                vec![
+                    Filter::new()
+                        .kind(Kind::Custom(37195))
+                        .identifier("fips-test"),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            subscriptions.peer_interest(&peer_id, &matching),
+            PubsubPeerInterest::Subscribed
+        );
+        assert_eq!(
+            subscriptions.peer_interest(&peer_id, &other),
+            PubsubPeerInterest::Unsubscribed
+        );
+    }
+
+    #[test]
+    fn nostr_client_messages_update_peer_subscriptions() {
+        let mut subscriptions = PubsubPeerSubscriptionStore::default();
+        let peer_id = SourceId::new("peer-a");
+        let subscription_id = SubscriptionId::new("sub-1");
+        let req = ClientMessage::req(
+            subscription_id.clone(),
+            vec![Filter::new().kind(Kind::TextNote)],
+        );
+        let close = ClientMessage::close(subscription_id);
+
+        assert_eq!(
+            subscriptions
+                .apply_client_message(peer_id.clone(), req)
+                .unwrap(),
+            PubsubSubscriptionUpdate::Subscribed
+        );
+        assert_eq!(subscriptions.peer_subscription_count(&peer_id), 1);
+        assert_eq!(
+            subscriptions
+                .apply_client_message(peer_id.clone(), close)
+                .unwrap(),
+            PubsubSubscriptionUpdate::Closed
+        );
+        assert_eq!(
+            subscriptions.peer_interest(
+                &peer_id,
+                &signed_event(&Keys::generate(), Kind::TextNote, "hello")
+            ),
+            PubsubPeerInterest::Unknown
+        );
+    }
+
+    #[test]
+    fn inventory_delivery_simulation_matches_peer_subscriptions_before_invwant() {
+        let keys = Keys::generate();
+        let fips_event = signed_event_with_tags(
+            &keys,
+            Kind::Custom(37195),
+            "fips advert",
+            [Tag::identifier("fips.peer")],
+        );
+        let hashtree_event = signed_event_with_tags(
+            &keys,
+            Kind::Custom(30078),
+            "hashtree root",
+            [Tag::identifier("hashtree.root")],
+        );
+        let social_event = signed_event(&keys, Kind::TextNote, "trusted status");
+        let fips_peer = SourceId::new("fips-node");
+        let hashtree_peer = SourceId::new("hashtree-node");
+        let social_peer = SourceId::new("social-graph-node");
+        let unrelated_peer = SourceId::new("unrelated-node");
+        let unknown_peer = SourceId::new("unknown-node");
+        let mut subscriptions = PubsubPeerSubscriptionStore::default();
+        let policy = PubsubDeliveryPolicy::inventory_to_peers();
+
+        subscriptions
+            .upsert_filters(
+                fips_peer.clone(),
+                "fips-adverts",
+                vec![
+                    Filter::new()
+                        .kind(Kind::Custom(37195))
+                        .identifier("fips.peer"),
+                ],
+            )
+            .unwrap();
+        subscriptions
+            .upsert_filters(
+                hashtree_peer.clone(),
+                "hashtree-roots",
+                vec![
+                    Filter::new()
+                        .kind(Kind::Custom(30078))
+                        .identifier("hashtree.root"),
+                ],
+            )
+            .unwrap();
+        subscriptions
+            .upsert_filters(
+                social_peer.clone(),
+                "trusted-notes",
+                vec![Filter::new().kind(Kind::TextNote).author(keys.public_key())],
+            )
+            .unwrap();
+        subscriptions
+            .upsert_filters(
+                unrelated_peer.clone(),
+                "cashu",
+                vec![
+                    Filter::new()
+                        .kind(Kind::Custom(37195))
+                        .identifier("cashu.mint"),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            subscriptions.interested_peers(&fips_event),
+            vec![fips_peer.clone()]
+        );
+        assert_eq!(
+            subscriptions.interested_peers(&hashtree_event),
+            vec![hashtree_peer.clone()]
+        );
+        assert_eq!(
+            subscriptions.interested_peers(&social_event),
+            vec![social_peer.clone()]
+        );
+        assert_eq!(
+            policy.action_for_event(&subscriptions, &fips_peer, &fips_event),
             PubsubDeliveryAction::AnnounceInventory
+        );
+        assert_eq!(
+            policy.action_for_event(&subscriptions, &hashtree_peer, &fips_event),
+            PubsubDeliveryAction::Skip
+        );
+        assert_eq!(
+            policy.action_for_event(&subscriptions, &unknown_peer, &fips_event),
+            PubsubDeliveryAction::Skip
         );
     }
 
