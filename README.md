@@ -20,6 +20,12 @@ inventory-first delivery: content keys, inventory announcements, wants, and
 frames. A backend can push full events only to subscribed peers, use inv/want for
 larger or costed payloads, or combine both per stream.
 
+The core crate also defines the retention contract for bounded event caches:
+which Nostr filters a local store should retain and how many matching events it
+may keep. Durable implementations belong in adapter repos. For example, a
+hashtree-backed local index can implement the bounded cache while FIPS, Nostr
+VPN, and Iris Drive choose the small event sets they need.
+
 FIPS connections can carry pubsub beside VPN tunnel traffic and hashtree traffic
 as a multiplexed transport. FIPS should own connection liveness, peer admission,
 link backpressure, and framing. Pubsub should own subscription/filter,
@@ -32,8 +38,8 @@ than the first peerfinding path.
 
 ## Crates
 
-- `nostr-pubsub`: core `EventBus`, route, source, query, policy, and inv/want
-  types.
+- `nostr-pubsub`: core `EventBus`, route, source, query, policy, retention, and
+  inv/want types.
 - `nostr-pubsub-relay`: optional `nostr-sdk` backend for actual Nostr relays.
 - `nostr-pubsub-social-graph`: social-graph policy adapter for filtering and
   prioritizing event authors or sources.

@@ -203,6 +203,32 @@ pub struct QueryOptions {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventRetentionPolicy {
+    pub filters: Vec<Filter>,
+    pub max_events: usize,
+}
+
+impl EventRetentionPolicy {
+    #[must_use]
+    pub fn new(max_events: usize, filters: Vec<Filter>) -> Self {
+        Self {
+            filters,
+            max_events,
+        }
+    }
+
+    #[must_use]
+    pub fn accepts(&self, event: &VerifiedEvent) -> bool {
+        self.accepts_event(event.as_event())
+    }
+
+    #[must_use]
+    pub fn accepts_event(&self, event: &Event) -> bool {
+        self.max_events > 0 && filters_match(&self.filters, event)
+    }
+}
+
 #[async_trait]
 pub trait EventBus: Send + Sync {
     async fn publish(&self, event: VerifiedEvent, source: EventSource) -> Result<PublishReport>;
@@ -215,6 +241,70 @@ pub const DEFAULT_INV_WANT_HOP_LIMIT: u8 = 16;
 pub enum PubsubDeliveryStrategy {
     PushSubscribed,
     InventoryFirst,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubsubPeerInterest {
+    Subscribed,
+    Unsubscribed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubsubDeliveryAction {
+    PushFrame,
+    AnnounceInventory,
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PubsubDeliveryPolicy {
+    pub strategy: PubsubDeliveryStrategy,
+    pub announce_inventory_without_subscription: bool,
+}
+
+impl PubsubDeliveryPolicy {
+    #[must_use]
+    pub const fn push_subscribed() -> Self {
+        Self {
+            strategy: PubsubDeliveryStrategy::PushSubscribed,
+            announce_inventory_without_subscription: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn inventory_to_subscribers() -> Self {
+        Self {
+            strategy: PubsubDeliveryStrategy::InventoryFirst,
+            announce_inventory_without_subscription: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn inventory_to_peers() -> Self {
+        Self {
+            strategy: PubsubDeliveryStrategy::InventoryFirst,
+            announce_inventory_without_subscription: true,
+        }
+    }
+
+    #[must_use]
+    pub fn action_for_peer(self, interest: PubsubPeerInterest) -> PubsubDeliveryAction {
+        match (
+            self.strategy,
+            interest,
+            self.announce_inventory_without_subscription,
+        ) {
+            (PubsubDeliveryStrategy::PushSubscribed, PubsubPeerInterest::Subscribed, _) => {
+                PubsubDeliveryAction::PushFrame
+            }
+            (PubsubDeliveryStrategy::InventoryFirst, PubsubPeerInterest::Subscribed, _)
+            | (PubsubDeliveryStrategy::InventoryFirst, _, true) => {
+                PubsubDeliveryAction::AnnounceInventory
+            }
+            _ => PubsubDeliveryAction::Skip,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -658,6 +748,86 @@ fn filter_limit(filters: &[Filter]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    #[test]
+    fn retention_policy_accepts_matching_events_only() {
+        let keys = Keys::generate();
+        let note = signed_event(&keys, Kind::TextNote, "hello");
+        let metadata = signed_event(&keys, Kind::Metadata, "{}");
+        let policy = EventRetentionPolicy::new(8, vec![Filter::new().kind(Kind::TextNote)]);
+
+        assert!(policy.accepts(&note));
+        assert!(!policy.accepts(&metadata));
+    }
+
+    #[test]
+    fn retention_policy_with_zero_capacity_stores_nothing() {
+        let keys = Keys::generate();
+        let event = signed_event(&keys, Kind::TextNote, "hello");
+        let policy = EventRetentionPolicy::new(0, vec![Filter::new()]);
+
+        assert!(!policy.accepts(&event));
+    }
+
+    #[test]
+    fn retention_policy_without_filters_accepts_any_event_when_capacity_exists() {
+        let keys = Keys::generate();
+        let event = signed_event(&keys, Kind::TextNote, "hello");
+        let policy = EventRetentionPolicy::new(8, Vec::new());
+
+        assert!(policy.accepts(&event));
+    }
+
+    #[test]
+    fn delivery_policy_pushes_only_to_subscribed_peers() {
+        let policy = PubsubDeliveryPolicy::push_subscribed();
+
+        assert_eq!(
+            policy.action_for_peer(PubsubPeerInterest::Subscribed),
+            PubsubDeliveryAction::PushFrame
+        );
+        assert_eq!(
+            policy.action_for_peer(PubsubPeerInterest::Unsubscribed),
+            PubsubDeliveryAction::Skip
+        );
+        assert_eq!(
+            policy.action_for_peer(PubsubPeerInterest::Unknown),
+            PubsubDeliveryAction::Skip
+        );
+    }
+
+    #[test]
+    fn delivery_policy_can_inventory_only_subscribers() {
+        let policy = PubsubDeliveryPolicy::inventory_to_subscribers();
+
+        assert_eq!(
+            policy.action_for_peer(PubsubPeerInterest::Subscribed),
+            PubsubDeliveryAction::AnnounceInventory
+        );
+        assert_eq!(
+            policy.action_for_peer(PubsubPeerInterest::Unsubscribed),
+            PubsubDeliveryAction::Skip
+        );
+    }
+
+    #[test]
+    fn delivery_policy_can_inventory_unknown_peers_for_mesh_relaying() {
+        let policy = PubsubDeliveryPolicy::inventory_to_peers();
+
+        assert_eq!(
+            policy.action_for_peer(PubsubPeerInterest::Subscribed),
+            PubsubDeliveryAction::AnnounceInventory
+        );
+        assert_eq!(
+            policy.action_for_peer(PubsubPeerInterest::Unsubscribed),
+            PubsubDeliveryAction::AnnounceInventory
+        );
+        assert_eq!(
+            policy.action_for_peer(PubsubPeerInterest::Unknown),
+            PubsubDeliveryAction::AnnounceInventory
+        );
+    }
 
     #[test]
     fn frame_inventory_and_want_share_content_key() {
@@ -742,5 +912,12 @@ mod tests {
 
         assert_eq!(relay.priority, 400);
         assert_eq!(relay.source.kind, EventSourceKind::Relay);
+    }
+
+    fn signed_event(keys: &Keys, kind: Kind, content: &str) -> VerifiedEvent {
+        let event = EventBuilder::new(kind, content)
+            .sign_with_keys(keys)
+            .unwrap();
+        VerifiedEvent::try_from(event).unwrap()
     }
 }
