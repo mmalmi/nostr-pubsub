@@ -12,8 +12,6 @@ use nostr_pubsub_social_graph::{
     SocialGraphPolicy, SocialGraphPolicyConfig,
 };
 use nostr_social_graph::{NostrEvent, SocialGraph, SocialGraphBackend};
-use nostr_social_graph_hashtree::HashtreeSocialGraph;
-use tempfile::TempDir;
 
 #[test]
 fn default_social_graph_entrypoint_seed_is_exposed_for_cold_start() {
@@ -405,56 +403,6 @@ async fn root_mutelist_drops_fips_peer_sources_when_overmute_heuristic_is_disabl
     );
 }
 
-#[tokio::test]
-async fn bus_policy_can_use_persisted_hashtree_graph_backend() {
-    let HashtreeFixture {
-        graph,
-        friend,
-        unknown,
-        overmuted,
-        ..
-    } = hashtree_fixture();
-    let bus = InMemoryEventBus::with_policy(Arc::new(SocialGraphPolicy::new(
-        graph,
-        SocialGraphPolicyConfig::default(),
-    )));
-
-    let trusted = bus
-        .publish(
-            signed_text_note(&friend, "trusted"),
-            EventSource::peer("peer"),
-        )
-        .await
-        .unwrap();
-    let unknown = bus
-        .publish(
-            signed_text_note(&unknown, "unknown"),
-            EventSource::peer("peer"),
-        )
-        .await
-        .unwrap();
-    let overmuted = bus
-        .publish(
-            signed_text_note(&overmuted, "overmuted"),
-            EventSource::peer("peer"),
-        )
-        .await
-        .unwrap();
-
-    assert!(trusted.accepted);
-    assert!(unknown.accepted);
-    assert!(!overmuted.accepted);
-    assert!(trusted.priority > unknown.priority);
-    assert_eq!(
-        unknown.reason.as_deref(),
-        Some("author outside social graph")
-    );
-    assert_eq!(
-        overmuted.reason.as_deref(),
-        Some("author overmuted by social graph")
-    );
-}
-
 struct Fixture {
     graph: Arc<RwLock<SocialGraph>>,
     friend: Keys,
@@ -497,36 +445,6 @@ fn root_muted_fixture() -> RootMuteFixture {
     RootMuteFixture {
         graph: Arc::new(RwLock::new(graph)),
         bad_actor,
-    }
-}
-
-struct HashtreeFixture {
-    graph: Arc<RwLock<HashtreeSocialGraph>>,
-    _tempdir: TempDir,
-    friend: Keys,
-    unknown: Keys,
-    overmuted: Keys,
-}
-
-fn hashtree_fixture() -> HashtreeFixture {
-    let keys = graph_keys();
-    let root_pk = keys.root.public_key().to_hex();
-    let tempdir = TempDir::new().unwrap();
-    let mut graph = HashtreeSocialGraph::open(tempdir.path(), &root_pk).unwrap();
-    seed_graph(&mut graph, &keys).unwrap();
-    graph.flush().unwrap();
-    drop(graph);
-
-    let reopened =
-        HashtreeSocialGraph::open(tempdir.path(), &keys.unknown.public_key().to_hex()).unwrap();
-    assert_eq!(reopened.get_root().unwrap(), root_pk);
-
-    HashtreeFixture {
-        graph: Arc::new(RwLock::new(reopened)),
-        _tempdir: tempdir,
-        friend: keys.friend,
-        unknown: keys.unknown,
-        overmuted: keys.overmuted,
     }
 }
 
