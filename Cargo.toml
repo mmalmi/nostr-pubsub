@@ -10,7 +10,6 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "htree://self/nostr-pubsub"
 authors = ["Nostr Pubsub contributors"]
 
 [workspace.dependencies]

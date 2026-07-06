@@ -3,9 +3,10 @@ name = "nostr-pubsub-social-graph"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 authors.workspace = true
 description = "Social graph policy adapter for nostr-pubsub"
+documentation = "https://docs.rs/nostr-pubsub-social-graph"
+exclude = ["Cargo.lock"]
 
 [dependencies]
 async-trait.workspace = true

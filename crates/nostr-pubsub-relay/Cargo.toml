@@ -3,9 +3,10 @@ name = "nostr-pubsub-relay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 authors.workspace = true
 description = "Actual Nostr relay backend for nostr-pubsub"
+documentation = "https://docs.rs/nostr-pubsub-relay"
+exclude = ["Cargo.lock"]
 
 [dependencies]
 async-trait.workspace = true
