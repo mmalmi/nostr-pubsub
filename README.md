@@ -50,9 +50,31 @@ Hashtree mesh/local-relay adapters should live in the hashtree repo because
 they depend on hashtree internals. FIPS, Nostr VPN, and Iris Drive should keep
 their product-specific event interpretation in their own repos.
 
+## TypeScript
+
+The browser-ready TypeScript core lives in `ts/packages/nostr-pubsub` and builds
+as an ESM package named `nostr-pubsub`. It mirrors the Rust core primitives that
+browser apps need before wiring real transports: source route defaults, Nostr
+filter retention, bounded peer subscriptions, delivery policy, inv/want frames,
+in-memory event buses, and routed queries with source policy.
+
+Iris browser apps can later consume it with a local dependency such as:
+
+```json
+"nostr-pubsub": "link:../nostr-pubsub/ts/packages/nostr-pubsub"
+```
+
+Interop vectors live in `ts/packages/nostr-pubsub/test-data/interop-vectors.json`
+and are read by both Vitest and Rust integration tests. Update the shared vector
+file when changing behavior that must remain compatible across Rust/FIPS peers
+and browser callers.
+
 ## Checks
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+pnpm --dir ts --filter nostr-pubsub build
+pnpm --dir ts --filter nostr-pubsub test
+cargo test -p nostr-pubsub --test typescript_interop
 ```

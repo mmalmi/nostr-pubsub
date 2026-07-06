@@ -1,0 +1,13 @@
+{
+  "name": "nostr-pubsub-ts-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build": "pnpm --filter nostr-pubsub build",
+    "test": "pnpm --filter nostr-pubsub test",
+    "check": "pnpm --filter nostr-pubsub check"
+  }
+}

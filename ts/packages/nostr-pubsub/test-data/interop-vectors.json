@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "events": {
+    "fipsAdvert": {
+      "kind": 37195,
+      "tags": [["d", "fips.peer"]],
+      "content": "fips advert",
+      "created_at": 1700000001,
+      "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "id": "59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6",
+      "sig": "474b0e4a07f6d0b4f583c6b881017d1c7f081335b62ad318d07d07522289543a0f520e12f5b1ecc0dbe5242bca30a134ebe4ea96c201940684c838e799def653"
+    },
+    "hashtreeRoot": {
+      "kind": 30078,
+      "tags": [["d", "hashtree.root"]],
+      "content": "hashtree root",
+      "created_at": 1700000002,
+      "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "id": "b732189a09c8a218cd95f62c22d8474538bb4d9f9a8249b4baae3f7be2447707",
+      "sig": "864744280a125712647a9e93a46e76a97e5a9eeb4dc6ebef25ec5447c460d7b51e649ba8f79f2afa32496868b8592113b2440931b4c7e2ca99f65795f67efac2"
+    },
+    "socialNote": {
+      "kind": 1,
+      "tags": [],
+      "content": "trusted status",
+      "created_at": 1700000003,
+      "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "id": "1583f5457229bdd2cccad8eebdd2669ac76354882dabcf3d1c4b673fea3aeae5",
+      "sig": "0e74da9fb200f02817d0d052b27789ba223d13589998a3b00c5729e4420aaeca21b635599839efa6a4c2b320321459463f0f8f9c7fc82a2413eb64610aa70b63"
+    },
+    "relayNote": {
+      "kind": 1,
+      "tags": [],
+      "content": "relay fallback",
+      "created_at": 1700000004,
+      "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "id": "0b8c187f6a222a810feda18b311baa7700a87867d443048ffae2d11abe80901e",
+      "sig": "53f7988c62c453e34af896aa19e15458c8f7c2901d557c51f2e458a7020d3be014d409f0065c953f9f79fbddea75bd058637e71aac532e676eb7e141c0529bcd"
+    }
+  },
+  "routeDefaults": {
+    "expectedPriorities": {
+      "localIndex": 300,
+      "fipsEndpoint": 200,
+      "peer": 100,
+      "relay": -100
+    },
+    "expectedOrder": ["hashtree:events", "npub1fips", "npub1peer", "wss://relay.example"]
+  },
+  "retentionCases": [
+    {
+      "name": "fips advert identifier",
+      "policy": {
+        "maxEvents": 8,
+        "filters": [{ "kinds": [37195], "#d": ["fips.peer"] }]
+      },
+      "event": "fipsAdvert",
+      "accepts": true
+    },
+    {
+      "name": "fips policy rejects other d tag",
+      "policy": {
+        "maxEvents": 8,
+        "filters": [{ "kinds": [37195], "#d": ["fips.peer"] }]
+      },
+      "event": "hashtreeRoot",
+      "accepts": false
+    },
+    {
+      "name": "zero capacity rejects matching event",
+      "policy": {
+        "maxEvents": 0,
+        "filters": [{ "kinds": [37195], "#d": ["fips.peer"] }]
+      },
+      "event": "fipsAdvert",
+      "accepts": false
+    },
+    {
+      "name": "empty filters accept with capacity",
+      "policy": {
+        "maxEvents": 4,
+        "filters": []
+      },
+      "event": "socialNote",
+      "accepts": true
+    }
+  ],
+  "peerSubscriptionCase": {
+    "limits": {
+      "maxPeers": 4,
+      "maxSubscriptionsPerPeer": 2,
+      "maxFiltersPerSubscription": 2
+    },
+    "operations": [
+      {
+        "peerId": "fips-node",
+        "subscriptionId": "fips-adverts",
+        "filters": [{ "kinds": [37195], "#d": ["fips.peer"] }]
+      },
+      {
+        "peerId": "hashtree-node",
+        "subscriptionId": "hashtree-roots",
+        "filters": [{ "kinds": [30078], "#d": ["hashtree.root"] }]
+      },
+      {
+        "peerId": "social-graph-node",
+        "subscriptionId": "trusted-notes",
+        "filters": [
+          {
+            "kinds": [1],
+            "authors": ["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]
+          }
+        ]
+      },
+      {
+        "peerId": "unrelated-node",
+        "subscriptionId": "cashu",
+        "filters": [{ "kinds": [37195], "#d": ["cashu.mint"] }]
+      }
+    ],
+    "expectedPeerCount": 4,
+    "expectedSubscriptionCount": 4,
+    "interests": [
+      { "peerId": "fips-node", "event": "fipsAdvert", "interest": "subscribed" },
+      { "peerId": "hashtree-node", "event": "fipsAdvert", "interest": "unsubscribed" },
+      { "peerId": "unknown-node", "event": "fipsAdvert", "interest": "unknown" }
+    ],
+    "interestedPeers": [
+      { "event": "fipsAdvert", "peers": ["fips-node"] },
+      { "event": "hashtreeRoot", "peers": ["hashtree-node"] },
+      { "event": "socialNote", "peers": ["social-graph-node"] }
+    ],
+    "deliveryActions": [
+      { "peerId": "fips-node", "event": "fipsAdvert", "action": "announce-inventory" },
+      { "peerId": "hashtree-node", "event": "fipsAdvert", "action": "skip" },
+      { "peerId": "unknown-node", "event": "fipsAdvert", "action": "skip" }
+    ]
+  },
+  "invWantCase": {
+    "key": { "streamId": "author:alice", "origin": "publisher-a", "seq": 7 },
+    "payload": [104, 101, 108, 108, 111],
+    "hopLimit": 4,
+    "expectedPayloadBytes": 5
+  },
+  "routedQueryCase": {
+    "filters": [{ "kinds": [1] }],
+    "limit": 1,
+    "routes": [
+      {
+        "route": { "kind": "relay", "id": "wss://relay.example" },
+        "events": ["relayNote"],
+        "policyDecision": { "type": "allow", "priority": 0 }
+      },
+      {
+        "route": { "kind": "fips", "id": "npub1fips", "priority": 0 },
+        "events": ["socialNote"],
+        "policyDecision": { "type": "allow", "priority": 250 }
+      },
+      {
+        "route": { "kind": "peer", "id": "npub1slow" },
+        "events": ["socialNote"],
+        "policyDecision": { "type": "throttle", "priority": -50, "reason": "stale inventory" }
+      }
+    ],
+    "expectedAttempts": ["npub1fips"],
+    "expectedEvents": ["1583f5457229bdd2cccad8eebdd2669ac76354882dabcf3d1c4b673fea3aeae5"]
+  }
+}
