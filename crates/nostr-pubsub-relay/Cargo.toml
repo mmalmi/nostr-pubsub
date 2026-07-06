@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 description = "Actual Nostr relay backend for nostr-pubsub"
 documentation = "https://docs.rs/nostr-pubsub-relay"
+readme = "README.md"
 exclude = ["Cargo.lock"]
 
 [dependencies]

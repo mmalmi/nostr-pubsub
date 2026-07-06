@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 description = "Neutral Nostr event and source routing primitives"
 documentation = "https://docs.rs/nostr-pubsub"
+readme = "README.md"
 exclude = ["Cargo.lock"]
 
 [dependencies]
