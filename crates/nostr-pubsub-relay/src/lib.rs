@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nostr_pubsub::{
-    EventBus, EventSource, PublishReport, PubsubError, QueryEvent, QueryOptions, QueryReport,
-    Result, VerifiedEvent,
+    EventBus, EventSource, PublishReport, PubsubError, PubsubProvider, PubsubProviderMode,
+    QueryEvent, QueryOptions, QueryReport, Result, VerifiedEvent,
 };
 use nostr_sdk::{Client, Filter, Keys};
 
@@ -101,5 +101,11 @@ impl EventBus for RelayEventBus {
             }
         }
         Ok(QueryReport { events })
+    }
+}
+
+impl PubsubProvider for RelayEventBus {
+    fn mode(&self) -> PubsubProviderMode {
+        PubsubProviderMode::DirectRelay
     }
 }

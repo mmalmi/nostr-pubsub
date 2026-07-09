@@ -1,0 +1,24 @@
+[package]
+name = "nostr-pubsub-fips"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local Ethernet FIPS provider for nostr-pubsub"
+documentation = "https://docs.rs/nostr-pubsub-fips"
+readme = "README.md"
+exclude = ["Cargo.lock"]
+
+[dependencies]
+async-trait.workspace = true
+fips-core.workspace = true
+nostr-pubsub.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+fips-core = { workspace = true, features = ["sim-transport"] }
+hex = "0.4"
+nostr.workspace = true
+
+[lints]
+workspace = true

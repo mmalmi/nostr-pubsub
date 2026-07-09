@@ -48,7 +48,10 @@ than the first peerfinding path.
 ## Crates
 
 - `nostr-pubsub`: core `EventBus`, route, source, query, policy, retention, and
-  inv/want types.
+  inv/want types, plus the transport-blind provider interface and explicit
+  `local-only` / `direct-relay` modes.
+- `nostr-pubsub-fips`: local-only `FipsEndpoint` provider over authenticated
+  Ethernet peers and FIPS service port 7368.
 - `nostr-pubsub-relay`: optional `nostr-sdk` backend for actual Nostr relays.
 - `nostr-pubsub-social-graph`: social-graph policy adapter for filtering and
   prioritizing event authors or sources.

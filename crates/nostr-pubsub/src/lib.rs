@@ -2,6 +2,8 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    fmt,
+    str::FromStr,
     sync::{Arc, RwLock},
 };
 
@@ -249,6 +251,51 @@ impl EventRetentionPolicy {
 pub trait EventBus: Send + Sync {
     async fn publish(&self, event: VerifiedEvent, source: EventSource) -> Result<PublishReport>;
     async fn query(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport>;
+}
+
+/// The explicitly selected provider class for a pubsub consumer.
+///
+/// Provider construction belongs to the application. The base crate does not
+/// open sockets, combine providers, or fall back from one mode to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PubsubProviderMode {
+    LocalOnly,
+    DirectRelay,
+}
+
+impl PubsubProviderMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalOnly => "local-only",
+            Self::DirectRelay => "direct-relay",
+        }
+    }
+}
+
+impl fmt::Display for PubsubProviderMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PubsubProviderMode {
+    type Err = PubsubError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "local-only" => Ok(Self::LocalOnly),
+            "direct-relay" => Ok(Self::DirectRelay),
+            _ => Err(PubsubError::Validation(format!(
+                "unknown pubsub provider mode {value:?}; expected local-only or direct-relay"
+            ))),
+        }
+    }
+}
+
+/// A selected pubsub provider presented to transport-blind consumers.
+pub trait PubsubProvider: EventBus {
+    fn mode(&self) -> PubsubProviderMode;
 }
 
 pub const DEFAULT_INV_WANT_HOP_LIMIT: u8 = 16;
@@ -1070,6 +1117,20 @@ mod tests {
 
         assert!(policy.accepts(&note));
         assert!(!policy.accepts(&metadata));
+    }
+
+    #[test]
+    fn provider_modes_parse_without_implicit_fallback() {
+        assert_eq!(
+            "local-only".parse::<PubsubProviderMode>().unwrap(),
+            PubsubProviderMode::LocalOnly
+        );
+        assert_eq!(
+            "direct-relay".parse::<PubsubProviderMode>().unwrap(),
+            PubsubProviderMode::DirectRelay
+        );
+        assert!("relay".parse::<PubsubProviderMode>().is_err());
+        assert!("".parse::<PubsubProviderMode>().is_err());
     }
 
     #[test]

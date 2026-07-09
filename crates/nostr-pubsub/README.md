@@ -20,3 +20,7 @@ liveness, and backpressure.
 
 Product crates keep their own app-specific event meanings. This crate provides
 the shared pubsub vocabulary.
+
+Consumers select exactly one `PubsubProvider`: `local-only` for a local peer
+provider or `direct-relay` for direct relay sockets. Provider construction is
+explicit and the core never falls back between the two modes at runtime.

@@ -1,22 +1,24 @@
 [workspace]
 members = [
   "crates/nostr-pubsub",
+  "crates/nostr-pubsub-fips",
   "crates/nostr-pubsub-relay",
   "crates/nostr-pubsub-social-graph",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "MIT"
 authors = ["Nostr Pubsub contributors"]
 
 [workspace.dependencies]
 async-trait = "0.1"
+fips-core = { version = "0.3.81", path = "../fips/crates/fips-core" }
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
-nostr-pubsub = { version = "0.1.2", path = "crates/nostr-pubsub" }
+nostr-pubsub = { version = "0.1.3", path = "crates/nostr-pubsub" }
 nostr-social-graph = { version = "0.1.2", path = "../nostr-social-graph/rust/crates/nostr-social-graph" }
 nostr-social-graph-hashtree = { version = "0.1.0", path = "../nostr-social-graph/rust/crates/nostr-social-graph-hashtree" }
 tempfile = "3"
