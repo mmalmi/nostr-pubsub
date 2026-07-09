@@ -120,3 +120,19 @@ export {
   type FipsPubsubInbound,
   type FipsPubsubWireMessage,
 } from './wire.js';
+
+export {
+  FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS,
+  FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+  FipsNostrRelayService,
+  defaultFipsNostrRelayServiceLimits,
+  type FipsNostrRelayServiceErrorContext,
+  type FipsNostrRelayServiceLimits,
+  type FipsNostrRelayServiceOptions,
+  type FipsPubsubServiceContext,
+  type FipsPubsubServiceHandler,
+  type FipsPubsubServiceNode,
+  type NostrRelaySubscription,
+  type NostrRelayTransport,
+  type NostrRelayTransportHandlers,
+} from './fips-relay-service.js';

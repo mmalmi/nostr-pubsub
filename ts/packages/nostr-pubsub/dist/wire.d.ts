@@ -29,6 +29,7 @@ export declare class FipsPubsubWireAdapter {
     readonly subscriptions: PubsubPeerSubscriptionStore;
     constructor(codec?: FipsPubsubWireCodec, subscriptions?: PubsubPeerSubscriptionStore);
     decodeInbound(peerId: SourceId, frame: Uint8Array): FipsPubsubInbound;
+    applyInbound(peerId: SourceId, message: FipsPubsubWireMessage): FipsPubsubInbound;
     encodeOutbound(message: FipsPubsubWireMessage): Uint8Array;
 }
 //# sourceMappingURL=wire.d.ts.map

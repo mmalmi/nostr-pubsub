@@ -8,4 +8,5 @@ export { DEFAULT_INV_WANT_HOP_LIMIT, createContentKey, createFrame, createInvent
 export { InMemoryEventBus, } from './event-bus.js';
 export { fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRoutePriority, withRouteReason, } from './routing.js';
 export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FipsPubsubWireAdapter, FipsPubsubWireCodec, } from './wire.js';
+export { FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS, FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsNostrRelayService, defaultFipsNostrRelayServiceLimits, } from './fips-relay-service.js';
 //# sourceMappingURL=index.js.map

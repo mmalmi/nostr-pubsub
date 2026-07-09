@@ -43,7 +43,9 @@ export class FipsPubsubWireAdapter {
         this.subscriptions = subscriptions;
     }
     decodeInbound(peerId, frame) {
-        const message = this.codec.decodeFrame(frame);
+        return this.applyInbound(peerId, this.codec.decodeFrame(frame));
+    }
+    applyInbound(peerId, message) {
         let subscriptionUpdate = 'ignored';
         if (message.type === 'req') {
             this.subscriptions.upsertFilters(peerId, message.subscriptionId, message.filters);
