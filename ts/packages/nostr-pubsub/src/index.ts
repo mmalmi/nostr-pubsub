@@ -5,7 +5,7 @@ export type {
   QueryOptions,
   SourceId,
 } from './types.js';
-export { PubsubError } from './types.js';
+export { PubsubError, verifyNostrEvent } from './types.js';
 
 export {
   CAP_HASHTREE_FETCH,
@@ -112,3 +112,11 @@ export {
   type RoutedQueryReport,
   type SourceRoute,
 } from './routing.js';
+
+export {
+  DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES,
+  FipsPubsubWireAdapter,
+  FipsPubsubWireCodec,
+  type FipsPubsubInbound,
+  type FipsPubsubWireMessage,
+} from './wire.js';

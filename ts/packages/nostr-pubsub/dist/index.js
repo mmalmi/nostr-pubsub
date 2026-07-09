@@ -1,4 +1,4 @@
-export { PubsubError } from './types.js';
+export { PubsubError, verifyNostrEvent } from './types.js';
 export { CAP_HASHTREE_FETCH, EventSourceKind, SOURCE_PRIORITY_FIPS_ENDPOINT, SOURCE_PRIORITY_LOCAL_INDEX, SOURCE_PRIORITY_PEER, SOURCE_PRIORITY_RELAY, fipsEndpointSource, localIndexSource, peerSource, relaySource, sourceKindDefaultPriority, } from './source.js';
 export { allowWithPriority, decisionPriority, drop, reportParts, throttle, } from './policy.js';
 export { cloneFilter, createEventRetentionPolicy, filterLimit, filtersMatch, retentionAcceptsEvent, subscriptionFiltersMatch, } from './filter.js';
@@ -7,4 +7,5 @@ export { deliveryActionForEvent, deliveryActionForPeer, inventoryToPeersDelivery
 export { DEFAULT_INV_WANT_HOP_LIMIT, createContentKey, createFrame, createInventory, createWant, inventoryFromFrame, invWantMessageKey, invWantMessageStreamId, wantFromInventory, } from './invwant.js';
 export { InMemoryEventBus, } from './event-bus.js';
 export { fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRoutePriority, withRouteReason, } from './routing.js';
+export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FipsPubsubWireAdapter, FipsPubsubWireCodec, } from './wire.js';
 //# sourceMappingURL=index.js.map

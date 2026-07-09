@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { Event } from 'nostr-tools/core';
+import type { Event, VerifiedEvent } from 'nostr-tools/core';
 import type { Filter } from 'nostr-tools/filter';
 import vectors from '../test-data/interop-vectors.json';
 import {
   DEFAULT_INV_WANT_HOP_LIMIT,
+  FipsPubsubWireAdapter,
+  FipsPubsubWireCodec,
   InMemoryEventBus,
   PubsubPeerSubscriptionStore,
   allowWithPriority,
@@ -20,16 +22,78 @@ import {
   queryRoutesWithPolicy,
   relayRoute,
   retentionAcceptsEvent,
+  verifyNostrEvent,
   wantFromInventory,
   type EventSource,
   type PolicyDecision,
   type PubsubPolicy,
   type SourceRoute,
+  type FipsPubsubWireMessage,
 } from '../src/index.js';
 
-const events = vectors.events as Record<string, Event>;
+const rawEvents = vectors.events as Record<string, Event>;
+const events = Object.fromEntries(
+  Object.entries(rawEvents).map(([name, event]) => [name, verifyNostrEvent(event)]),
+) as Record<string, VerifiedEvent>;
 
 describe('Rust/TypeScript interop vectors', () => {
+  it('encodes and decodes the shared FIPS wire frames exactly', () => {
+    for (const testCase of vectors.wireCases) {
+      const codec = new FipsPubsubWireCodec(new TextEncoder().encode(testCase.json).byteLength);
+      const expected = wireMessageFromVector(testCase.message);
+
+      expect(new TextDecoder().decode(codec.encodeFrame(expected)), testCase.name).toBe(
+        testCase.json,
+      );
+      expect(wireMessageSummary(codec.decodeFrame(new TextEncoder().encode(testCase.json)))).toEqual(
+        wireMessageSummary(expected),
+      );
+    }
+  });
+
+  it('rejects invalid signatures, stale verification brands, and oversized frames', async () => {
+    const codec = new FipsPubsubWireCodec();
+    for (const testCase of vectors.invalidWireCases) {
+      expect(() => codec.decodeFrame(new TextEncoder().encode(testCase.json)), testCase.name).toThrow(
+        /invalid Nostr event/,
+      );
+    }
+
+    const forged = { ...events.fipsAdvert, content: 'tampered advert' };
+    expect(() => verifyNostrEvent(forged)).toThrow(/invalid Nostr event/);
+    const malformedTags = { ...rawEvents.fipsAdvert, tags: ['d'] as unknown as string[][] };
+    expect(() => verifyNostrEvent(malformedTags)).toThrow(/invalid Nostr event/);
+
+    const eventCase = vectors.wireCases.find((testCase) => testCase.message.type === 'event');
+    if (eventCase === undefined) throw new Error('missing event wire vector');
+    const frame = new TextEncoder().encode(eventCase.json);
+    expect(() => new FipsPubsubWireCodec(frame.byteLength - 1).decodeFrame(frame)).toThrow(
+      /limit/,
+    );
+
+    const bus = new InMemoryEventBus();
+    await expect(bus.publish(forged, fipsEndpointSourceForTest())).rejects.toThrow(
+      /invalid Nostr event/,
+    );
+  });
+
+  it('applies standard REQ and CLOSE frames to peer subscriptions', () => {
+    const request = vectors.wireCases.find((testCase) => testCase.message.type === 'req');
+    const close = vectors.wireCases.find((testCase) => testCase.message.type === 'close');
+    if (request === undefined || close === undefined) throw new Error('missing subscription vectors');
+    const adapter = new FipsPubsubWireAdapter();
+    const peerId = 'browser-fips-peer';
+
+    expect(adapter.decodeInbound(peerId, new TextEncoder().encode(request.json)).subscriptionUpdate).toBe(
+      'subscribed',
+    );
+    expect(adapter.subscriptions.peerSubscriptionCount(peerId)).toBe(1);
+    expect(adapter.decodeInbound(peerId, new TextEncoder().encode(close.json)).subscriptionUpdate).toBe(
+      'closed',
+    );
+    expect(adapter.subscriptions.peerSubscriptionCount(peerId)).toBe(0);
+  });
+
   it('keeps source route priorities and relay-last ordering compatible', () => {
     const local = localIndexRoute('hashtree:events');
     const fips = fipsPeerDefaultRoute('npub1fips');
@@ -124,6 +188,45 @@ describe('Rust/TypeScript interop vectors', () => {
     expect(report.events.map((event) => event.event.id)).toEqual(testCase.expectedEvents);
   });
 });
+
+function wireMessageFromVector(message: (typeof vectors.wireCases)[number]['message']): FipsPubsubWireMessage {
+  switch (message.type) {
+    case 'req':
+      return { type: 'req', subscriptionId: message.subscriptionId, filters: message.filters };
+    case 'close':
+      return { type: 'close', subscriptionId: message.subscriptionId };
+    case 'event':
+      return message.subscriptionId === undefined
+        ? { type: 'event', event: events[message.event] }
+        : {
+            type: 'event',
+            subscriptionId: message.subscriptionId,
+            event: events[message.event],
+          };
+  }
+}
+
+function wireMessageSummary(message: FipsPubsubWireMessage): unknown {
+  switch (message.type) {
+    case 'req':
+      return message;
+    case 'close':
+      return message;
+    case 'event':
+      return {
+        type: message.type,
+        subscriptionId: message.subscriptionId,
+        eventId: message.event.id,
+      };
+  }
+}
+
+function fipsEndpointSourceForTest(): EventSource {
+  return {
+    id: 'browser-fips-peer',
+    kind: 'fips-endpoint',
+  };
+}
 
 class VectorPolicy implements PubsubPolicy {
   constructor(private readonly decisions: Map<string, PolicyDecision>) {}

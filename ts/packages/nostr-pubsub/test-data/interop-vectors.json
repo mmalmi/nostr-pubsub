@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "events": {
     "fipsAdvert": {
       "kind": 37195,
@@ -38,6 +38,48 @@
       "sig": "53f7988c62c453e34af896aa19e15458c8f7c2901d557c51f2e458a7020d3be014d409f0065c953f9f79fbddea75bd058637e71aac532e676eb7e141c0529bcd"
     }
   },
+  "wireCases": [
+    {
+      "name": "targeted approval request",
+      "message": {
+        "type": "req",
+        "subscriptionId": "fips-approval",
+        "filters": [{ "kinds": [37195], "#d": ["fips.peer"] }]
+      },
+      "json": "[\"REQ\",\"fips-approval\",{\"#d\":[\"fips.peer\"],\"kinds\":[37195]}]"
+    },
+    {
+      "name": "targeted approval close",
+      "message": {
+        "type": "close",
+        "subscriptionId": "fips-approval"
+      },
+      "json": "[\"CLOSE\",\"fips-approval\"]"
+    },
+    {
+      "name": "client event publish",
+      "message": {
+        "type": "event",
+        "event": "fipsAdvert"
+      },
+      "json": "[\"EVENT\",{\"content\":\"fips advert\",\"created_at\":1700000001,\"id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",\"kind\":37195,\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"sig\":\"474b0e4a07f6d0b4f583c6b881017d1c7f081335b62ad318d07d07522289543a0f520e12f5b1ecc0dbe5242bca30a134ebe4ea96c201940684c838e799def653\",\"tags\":[[\"d\",\"fips.peer\"]]}]"
+    },
+    {
+      "name": "subscription event delivery",
+      "message": {
+        "type": "event",
+        "subscriptionId": "fips-approval",
+        "event": "fipsAdvert"
+      },
+      "json": "[\"EVENT\",\"fips-approval\",{\"content\":\"fips advert\",\"created_at\":1700000001,\"id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",\"kind\":37195,\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"sig\":\"474b0e4a07f6d0b4f583c6b881017d1c7f081335b62ad318d07d07522289543a0f520e12f5b1ecc0dbe5242bca30a134ebe4ea96c201940684c838e799def653\",\"tags\":[[\"d\",\"fips.peer\"]]}]"
+    }
+  ],
+  "invalidWireCases": [
+    {
+      "name": "tampered event content",
+      "json": "[\"EVENT\",{\"id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"created_at\":1700000001,\"kind\":37195,\"tags\":[[\"d\",\"fips.peer\"]],\"content\":\"tampered advert\",\"sig\":\"474b0e4a07f6d0b4f583c6b881017d1c7f081335b62ad318d07d07522289543a0f520e12f5b1ecc0dbe5242bca30a134ebe4ea96c201940684c838e799def653\"}]"
+    }
+  ],
   "routeDefaults": {
     "expectedPriorities": {
       "localIndex": 300,

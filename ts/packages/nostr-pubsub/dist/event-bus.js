@@ -1,5 +1,6 @@
 import { filterLimit, filtersMatch } from './filter.js';
 import { allowWithPriority, reportParts } from './policy.js';
+import { verifyNostrEvent, } from './types.js';
 export class InMemoryEventBus {
     policy;
     events = [];
@@ -7,12 +8,13 @@ export class InMemoryEventBus {
         this.policy = policy;
     }
     async publish(event, source) {
+        const verifiedEvent = verifyNostrEvent(event);
         const decision = this.policy === undefined
             ? allowWithPriority(0)
-            : await this.policy.checkEvent({ event, source });
+            : await this.policy.checkEvent({ event: verifiedEvent, source });
         const report = reportParts(decision);
         if (report.accepted) {
-            this.events.push({ event, source, priority: report.priority });
+            this.events.push({ event: verifiedEvent, source, priority: report.priority });
         }
         return report;
     }

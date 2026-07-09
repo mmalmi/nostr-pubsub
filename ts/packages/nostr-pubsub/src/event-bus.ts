@@ -1,7 +1,13 @@
 import { filterLimit, filtersMatch } from './filter.js';
 import { allowWithPriority, reportParts, type PubsubPolicy } from './policy.js';
 import type { EventSource } from './source.js';
-import type { NostrFilter, NostrVerifiedEvent, QueryOptions } from './types.js';
+import {
+  verifyNostrEvent,
+  type NostrEvent,
+  type NostrFilter,
+  type NostrVerifiedEvent,
+  type QueryOptions,
+} from './types.js';
 
 export interface PublishReport {
   accepted: boolean;
@@ -20,7 +26,7 @@ export interface QueryReport {
 }
 
 export interface EventBus {
-  publish(event: NostrVerifiedEvent, source: EventSource): Promise<PublishReport>;
+  publish(event: NostrEvent, source: EventSource): Promise<PublishReport>;
   query(filters: NostrFilter[], options?: QueryOptions): Promise<QueryReport>;
 }
 
@@ -35,14 +41,15 @@ export class InMemoryEventBus implements EventBus {
 
   constructor(private readonly policy?: PubsubPolicy) {}
 
-  async publish(event: NostrVerifiedEvent, source: EventSource): Promise<PublishReport> {
+  async publish(event: NostrEvent, source: EventSource): Promise<PublishReport> {
+    const verifiedEvent = verifyNostrEvent(event);
     const decision =
       this.policy === undefined
         ? allowWithPriority(0)
-        : await this.policy.checkEvent({ event, source });
+        : await this.policy.checkEvent({ event: verifiedEvent, source });
     const report = reportParts(decision);
     if (report.accepted) {
-      this.events.push({ event, source, priority: report.priority });
+      this.events.push({ event: verifiedEvent, source, priority: report.priority });
     }
     return report;
   }

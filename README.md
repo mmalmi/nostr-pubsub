@@ -33,6 +33,13 @@ link backpressure, and framing. Pubsub should own subscription/filter,
 bounded peer subscription records, inventory/want, source selection, and
 policy/scoring semantics.
 
+The Rust and TypeScript cores expose matching `FipsPubsubWireCodec` and
+`FipsPubsubWireAdapter` boundaries. Each codec consumes one payload frame
+provided by FIPS, enforces a configurable byte limit, and carries ordinary
+Nostr `REQ`, `CLOSE`, client `EVENT`, and subscription `EVENT` JSON arrays.
+Decoded events are accepted only after their IDs and Schnorr signatures verify.
+The codec does not define stream framing or peer admission.
+
 Source routing defaults prefer local indexes, then FIPS-carried endpoint routes,
 then generic peer routes, with actual Nostr relay routes last. Product code can
 override route priority per source, but relay fallback should be explicit rather
@@ -56,7 +63,8 @@ The browser-ready TypeScript core lives in `ts/packages/nostr-pubsub` and builds
 as an ESM package named `nostr-pubsub`. It mirrors the Rust core primitives that
 browser apps need before wiring real transports: source route defaults, Nostr
 filter retention, bounded peer subscriptions, delivery policy, inv/want frames,
-in-memory event buses, and routed queries with source policy.
+in-memory event buses, routed queries with source policy, and the bounded FIPS
+wire boundary.
 
 Iris browser apps can later consume it with a local dependency such as:
 

@@ -10,6 +10,10 @@ use nostr::Event;
 pub use nostr::filter::MatchEventOptions;
 pub use nostr::{ClientMessage, Filter, PublicKey, RelayMessage, SubscriptionId};
 
+mod wire;
+
+pub use wire::*;
+
 pub const CAP_HASHTREE_FETCH: &str = "hashtree.fetch";
 
 pub type Result<T> = std::result::Result<T, PubsubError>;
@@ -22,7 +26,7 @@ pub enum PubsubError {
     Storage(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedEvent {
     event: Event,
 }
@@ -31,12 +35,20 @@ impl VerifiedEvent {
     pub fn as_event(&self) -> &Event {
         &self.event
     }
+
+    #[must_use]
+    pub fn into_event(self) -> Event {
+        self.event
+    }
 }
 
 impl TryFrom<Event> for VerifiedEvent {
     type Error = PubsubError;
 
     fn try_from(event: Event) -> Result<Self> {
+        event
+            .verify()
+            .map_err(|error| PubsubError::Validation(format!("invalid Nostr event: {error}")))?;
         Ok(Self { event })
     }
 }
@@ -1436,6 +1448,17 @@ mod tests {
 
         assert!(req.is_req());
         assert!(close.is_close());
+    }
+
+    #[test]
+    fn verified_event_rejects_tampered_content() {
+        let keys = Keys::generate();
+        let mut event = EventBuilder::new(Kind::TextNote, "signed")
+            .sign_with_keys(&keys)
+            .unwrap();
+        event.content = "tampered".to_string();
+
+        assert!(VerifiedEvent::try_from(event).is_err());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 export type { NostrEvent, NostrFilter, NostrVerifiedEvent, QueryOptions, SourceId, } from './types.js';
-export { PubsubError } from './types.js';
+export { PubsubError, verifyNostrEvent } from './types.js';
 export { CAP_HASHTREE_FETCH, EventSourceKind, SOURCE_PRIORITY_FIPS_ENDPOINT, SOURCE_PRIORITY_LOCAL_INDEX, SOURCE_PRIORITY_PEER, SOURCE_PRIORITY_RELAY, fipsEndpointSource, localIndexSource, peerSource, relaySource, sourceKindDefaultPriority, type EventSource, type EventSourceKind as EventSourceKindType, } from './source.js';
 export { allowWithPriority, decisionPriority, drop, reportParts, throttle, type EventPolicyContext, type PolicyDecision, type PubsubPolicy, type SourceCandidate, type SourceHealth, type SourcePolicyContext, } from './policy.js';
 export { cloneFilter, createEventRetentionPolicy, filterLimit, filtersMatch, retentionAcceptsEvent, subscriptionFiltersMatch, type EventRetentionPolicy, } from './filter.js';
@@ -8,4 +8,5 @@ export { deliveryActionForEvent, deliveryActionForPeer, inventoryToPeersDelivery
 export { DEFAULT_INV_WANT_HOP_LIMIT, createContentKey, createFrame, createInventory, createWant, inventoryFromFrame, invWantMessageKey, invWantMessageStreamId, wantFromInventory, type InvWantMessage, type PubsubContentKey, type PubsubFrame, type PubsubInventory, type PubsubWant, } from './invwant.js';
 export { InMemoryEventBus, type EventBus, type PublishReport, type QueryEvent, type QueryReport, } from './event-bus.js';
 export { fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRoutePriority, withRouteReason, type RouteAttempt, type RouteQuerySource, type RoutedQueryOptions, type RoutedQueryReport, type SourceRoute, } from './routing.js';
+export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FipsPubsubWireAdapter, FipsPubsubWireCodec, type FipsPubsubInbound, type FipsPubsubWireMessage, } from './wire.js';
 //# sourceMappingURL=index.d.ts.map

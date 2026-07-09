@@ -4,10 +4,12 @@ use async_trait::async_trait;
 use nostr::Event;
 use nostr_pubsub::{
     DEFAULT_INV_WANT_HOP_LIMIT, EventBus, EventPolicyContext, EventRetentionPolicy, Filter,
-    InMemoryEventBus, InvWantMessage, PolicyDecision, PubsubContentKey, PubsubDeliveryAction,
-    PubsubDeliveryPolicy, PubsubFrame, PubsubPeerInterest, PubsubPeerSubscriptionStore,
-    PubsubPolicy, PubsubSubscriptionLimits, QueryOptions, RouteQuerySource, RoutedQueryOptions,
-    SourcePolicyContext, SourceRoute, VerifiedEvent, query_routes_with_policy,
+    FipsPubsubWireAdapter, FipsPubsubWireCodec, FipsPubsubWireMessage, InMemoryEventBus,
+    InvWantMessage, PolicyDecision, PubsubContentKey, PubsubDeliveryAction, PubsubDeliveryPolicy,
+    PubsubFrame, PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy,
+    PubsubSubscriptionLimits, PubsubSubscriptionUpdate, QueryOptions, RouteQuerySource,
+    RoutedQueryOptions, SourceId, SourcePolicyContext, SourceRoute, SubscriptionId, VerifiedEvent,
+    query_routes_with_policy,
 };
 use serde::Deserialize;
 
@@ -15,11 +17,49 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 struct InteropVectors {
     events: BTreeMap<String, Event>,
+    wire_cases: Vec<WireCase>,
+    invalid_wire_cases: Vec<InvalidWireCase>,
     route_defaults: RouteDefaults,
     retention_cases: Vec<RetentionCase>,
     peer_subscription_case: PeerSubscriptionCase,
     inv_want_case: InvWantCase,
     routed_query_case: RoutedQueryCase,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireCase {
+    name: String,
+    message: WireMessageVector,
+    json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+enum WireMessageVector {
+    #[serde(rename = "req")]
+    Req {
+        #[serde(rename = "subscriptionId")]
+        subscription_id: String,
+        filters: Vec<Filter>,
+    },
+    #[serde(rename = "close")]
+    Close {
+        #[serde(rename = "subscriptionId")]
+        subscription_id: String,
+    },
+    #[serde(rename = "event")]
+    Event {
+        #[serde(default, rename = "subscriptionId")]
+        subscription_id: Option<String>,
+        event: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct InvalidWireCase {
+    name: String,
+    json: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +247,86 @@ fn source_route_defaults_match_typescript_vectors() {
         .map(|route| route.id.clone())
         .collect::<Vec<_>>();
     assert_eq!(attempted, vectors.route_defaults.expected_order);
+}
+
+#[test]
+fn fips_wire_codec_matches_typescript_vectors() {
+    let vectors = load_vectors();
+    for test_case in &vectors.wire_cases {
+        let expected = wire_message_from_vector(&vectors, &test_case.message);
+        let codec = FipsPubsubWireCodec::new(test_case.json.len()).unwrap();
+
+        assert_eq!(
+            codec.encode_frame(&expected).unwrap(),
+            test_case.json.as_bytes(),
+            "{}",
+            test_case.name
+        );
+        assert_eq!(
+            codec.decode_frame(test_case.json.as_bytes()).unwrap(),
+            expected,
+            "{}",
+            test_case.name
+        );
+    }
+}
+
+#[test]
+fn fips_wire_codec_rejects_unverified_and_oversized_frames() {
+    let vectors = load_vectors();
+    let codec = FipsPubsubWireCodec::default();
+    for test_case in &vectors.invalid_wire_cases {
+        assert!(
+            codec.decode_frame(test_case.json.as_bytes()).is_err(),
+            "{}",
+            test_case.name
+        );
+    }
+
+    let frame = vectors
+        .wire_cases
+        .iter()
+        .find(|test_case| matches!(test_case.message, WireMessageVector::Event { .. }))
+        .unwrap()
+        .json
+        .as_bytes();
+    let bounded = FipsPubsubWireCodec::new(frame.len() - 1).unwrap();
+    assert!(bounded.decode_frame(frame).is_err());
+}
+
+#[test]
+fn fips_wire_adapter_applies_req_and_close_to_peer_subscriptions() {
+    let vectors = load_vectors();
+    let request = vectors
+        .wire_cases
+        .iter()
+        .find(|test_case| matches!(test_case.message, WireMessageVector::Req { .. }))
+        .unwrap();
+    let close = vectors
+        .wire_cases
+        .iter()
+        .find(|test_case| matches!(test_case.message, WireMessageVector::Close { .. }))
+        .unwrap();
+    let peer_id = SourceId::new("browser-fips-peer");
+    let mut adapter = FipsPubsubWireAdapter::default();
+
+    let request_result = adapter
+        .decode_inbound(peer_id.clone(), request.json.as_bytes())
+        .unwrap();
+    assert_eq!(
+        request_result.subscription_update,
+        PubsubSubscriptionUpdate::Subscribed
+    );
+    assert_eq!(adapter.subscriptions().peer_subscription_count(&peer_id), 1);
+
+    let close_result = adapter
+        .decode_inbound(peer_id.clone(), close.json.as_bytes())
+        .unwrap();
+    assert_eq!(
+        close_result.subscription_update,
+        PubsubSubscriptionUpdate::Closed
+    );
+    assert_eq!(adapter.subscriptions().peer_subscription_count(&peer_id), 0);
 }
 
 #[test]
@@ -406,6 +526,36 @@ fn route_from_vector(route: &RouteVector) -> SourceRoute {
         "peer" => SourceRoute::peer(&route.id),
         "local" => SourceRoute::local_index(&route.id),
         other => panic!("unknown route kind: {other}"),
+    }
+}
+
+fn wire_message_from_vector(
+    vectors: &InteropVectors,
+    message: &WireMessageVector,
+) -> FipsPubsubWireMessage {
+    match message {
+        WireMessageVector::Req {
+            subscription_id,
+            filters,
+        } => FipsPubsubWireMessage::req(SubscriptionId::new(subscription_id), filters.clone()),
+        WireMessageVector::Close { subscription_id } => {
+            FipsPubsubWireMessage::close(SubscriptionId::new(subscription_id))
+        }
+        WireMessageVector::Event {
+            subscription_id,
+            event,
+        } => {
+            let event = verified_event(vectors, event);
+            subscription_id.as_ref().map_or_else(
+                || FipsPubsubWireMessage::publish(event.clone()),
+                |subscription_id| {
+                    FipsPubsubWireMessage::deliver(
+                        SubscriptionId::new(subscription_id),
+                        event.clone(),
+                    )
+                },
+            )
+        }
     }
 }
 
