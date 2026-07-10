@@ -48,26 +48,15 @@ fn production_mesh_delivers_once_across_three_hops() {
         )
         .unwrap();
     let want_for_alice = message_for(&bob_actions, "alice");
-    let inventory_for_carol = message_for(&bob_actions, "carol");
-
-    let carol_actions = carol
-        .receive("bob", inventory_for_carol, &[MeshPeer::new("bob")], 3)
-        .unwrap();
-    let want_for_bob = message_for(&carol_actions, "bob");
-    assert!(
-        bob.receive(
-            "carol",
-            want_for_bob,
-            &[MeshPeer::new("alice"), MeshPeer::new("carol")],
-            4,
-        )
-        .unwrap()
-        .is_empty()
+    assert_eq!(
+        bob_actions.len(),
+        1,
+        "inventory is not forwarded before proof"
     );
 
     let frame_for_bob = only_message(
         alice
-            .receive("bob", want_for_alice, &[MeshPeer::new("bob")], 5)
+            .receive("bob", want_for_alice, &[MeshPeer::new("bob")], 3)
             .unwrap(),
     );
     let bob_frame_actions = bob
@@ -75,12 +64,27 @@ fn production_mesh_delivers_once_across_three_hops() {
             "alice",
             frame_for_bob,
             &[MeshPeer::new("alice"), MeshPeer::new("carol")],
-            6,
+            4,
         )
         .unwrap();
     assert_eq!(delivered_ids(&bob_frame_actions), vec![event_id.clone()]);
+    let inventory_for_carol = message_for(&bob_frame_actions, "carol");
 
-    let frame_for_carol = message_for(&bob_frame_actions, "carol");
+    let carol_actions = carol
+        .receive("bob", inventory_for_carol, &[MeshPeer::new("bob")], 5)
+        .unwrap();
+    assert_eq!(carol_actions.len(), 1, "Carol wants before forwarding");
+    let want_for_bob = message_for(&carol_actions, "bob");
+    let frame_for_carol = only_message(
+        bob.receive(
+            "carol",
+            want_for_bob,
+            &[MeshPeer::new("alice"), MeshPeer::new("carol")],
+            6,
+        )
+        .unwrap(),
+    );
+
     let carol_frame_actions = carol
         .receive("bob", frame_for_carol.clone(), &[MeshPeer::new("bob")], 7)
         .unwrap();
@@ -90,6 +94,37 @@ fn production_mesh_delivers_once_across_three_hops() {
             .receive("bob", frame_for_carol, &[MeshPeer::new("bob")], 8,)
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn unproven_inventory_is_never_amplified() {
+    let mut mesh = mesh();
+    let event_id = "ab".repeat(32);
+    let actions = mesh
+        .receive(
+            "attacker",
+            InvWantWireMessage::Inventory {
+                event_id: event_id.clone(),
+                event_kind: 37_195,
+                payload_bytes: 512,
+                hop_limit: 4,
+            },
+            &[
+                MeshPeer::new("attacker"),
+                MeshPeer::new("honest-a"),
+                MeshPeer::new("honest-b"),
+            ],
+            1,
+        )
+        .unwrap();
+
+    assert_eq!(
+        actions,
+        vec![InvWantAction::Send {
+            peer_id: "attacker".to_string(),
+            message: InvWantWireMessage::Want { event_id },
+        }]
     );
 }
 

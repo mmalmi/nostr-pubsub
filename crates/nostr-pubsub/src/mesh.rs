@@ -207,6 +207,9 @@ struct CachedEvent {
 #[derive(Debug, Clone)]
 struct UpstreamRoute {
     peer_id: String,
+    event_kind: u16,
+    payload_bytes: u32,
+    hop_limit: u8,
     expires_at_ms: u64,
 }
 
@@ -307,7 +310,6 @@ impl InvWantMesh {
                 hop_limit,
             } => self.receive_inventory(
                 source_peer,
-                peers,
                 ReceivedInventory {
                     event_id,
                     event_kind,
@@ -320,7 +322,7 @@ impl InvWantMesh {
                 self.receive_want(source_peer, event_id, now_ms)
             }
             InvWantWireMessage::Frame { event_id, event } => {
-                self.receive_frame(source_peer, &event_id, &event, now_ms)
+                self.receive_frame(source_peer, &event_id, &event, peers, now_ms)
             }
         }
     }
@@ -328,7 +330,6 @@ impl InvWantMesh {
     fn receive_inventory(
         &mut self,
         source_peer: &str,
-        peers: &[MeshPeer],
         inventory: ReceivedInventory,
         now_ms: u64,
     ) -> Result<Vec<InvWantAction>> {
@@ -350,29 +351,17 @@ impl InvWantMesh {
             .entry(event_id.clone())
             .or_insert_with(|| UpstreamRoute {
                 peer_id: source_peer.to_string(),
+                event_kind,
+                payload_bytes,
+                hop_limit,
                 expires_at_ms: route_expiry,
             });
         self.want_forwarded.insert(event_id.clone(), route_expiry);
 
-        let mut actions = vec![InvWantAction::Send {
+        Ok(vec![InvWantAction::Send {
             peer_id: source_peer.to_string(),
-            message: InvWantWireMessage::Want {
-                event_id: event_id.clone(),
-            },
-        }];
-        if hop_limit > 1 {
-            actions.extend(self.send_to_selected_peers(
-                peers,
-                Some(source_peer),
-                &InvWantWireMessage::Inventory {
-                    event_id,
-                    event_kind,
-                    payload_bytes,
-                    hop_limit: hop_limit - 1,
-                },
-            ));
-        }
-        Ok(actions)
+            message: InvWantWireMessage::Want { event_id },
+        }])
     }
 
     fn receive_want(
@@ -426,13 +415,22 @@ impl InvWantMesh {
         source_peer: &str,
         event_id: &str,
         event: &Event,
+        peers: &[MeshPeer],
         now_ms: u64,
     ) -> Result<Vec<InvWantAction>> {
         validate_event_id(event_id)?;
-        let (verified_id, _) = self.validate_event(event)?;
+        let (verified_id, payload_bytes) = self.validate_event(event)?;
         if verified_id != event_id {
             return Err(validation(
                 "inv/want frame id does not match signed event id",
+            ));
+        }
+        let route = self.upstream_routes.get(event_id).cloned();
+        if let Some(route) = route.as_ref()
+            && (route.event_kind != u16::from(event.kind) || route.payload_bytes != payload_bytes)
+        {
+            return Err(validation(
+                "inv/want frame does not match announced kind or payload size",
             ));
         }
         self.store_event(event.clone(), now_ms);
@@ -457,6 +455,22 @@ impl InvWantMesh {
                         },
                     }),
             );
+        }
+        self.upstream_routes.remove(event_id);
+        self.want_forwarded.remove(event_id);
+        if let Some(route) = route
+            && route.hop_limit > 1
+        {
+            actions.extend(self.send_to_selected_peers(
+                peers,
+                Some(source_peer),
+                &InvWantWireMessage::Inventory {
+                    event_id: event_id.to_string(),
+                    event_kind: u16::from(event.kind),
+                    payload_bytes,
+                    hop_limit: route.hop_limit - 1,
+                },
+            ));
         }
         Ok(actions)
     }
