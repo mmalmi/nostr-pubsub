@@ -16,7 +16,7 @@ authors = ["Nostr Pubsub contributors"]
 
 [workspace.dependencies]
 async-trait = "0.1"
-fips-core = { version = "0.3.81", path = "../fips/crates/fips-core" }
+fips-core = { version = "0.3.83", path = "../fips/crates/fips-core" }
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
 nostr-pubsub = { version = "0.1.6", path = "crates/nostr-pubsub" }
