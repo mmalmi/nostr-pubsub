@@ -12,8 +12,10 @@ use nostr::Event;
 pub use nostr::filter::MatchEventOptions;
 pub use nostr::{ClientMessage, Filter, PublicKey, RelayMessage, SubscriptionId};
 
+mod mesh;
 mod wire;
 
+pub use mesh::*;
 pub use wire::*;
 
 pub const CAP_HASHTREE_FETCH: &str = "hashtree.fetch";

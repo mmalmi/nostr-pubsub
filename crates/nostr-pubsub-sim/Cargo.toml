@@ -1,0 +1,17 @@
+[package]
+name = "nostr-pubsub-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Deterministic adversarial simulations for the nostr-pubsub production mesh"
+publish = false
+readme = "README.md"
+
+[dependencies]
+nostr.workspace = true
+nostr-pubsub.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

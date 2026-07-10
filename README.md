@@ -21,6 +21,20 @@ frames. A backend can push full events only to subscribed peers, use inv/want fo
 larger or costed payloads, or combine both per stream. Inventory is still gated
 by matching Nostr subscriptions before any inv/want announcement is sent.
 
+The Rust core also contains `InvWantMesh`, the bounded production state machine
+for signed Nostr-event inventory/want/frame propagation. It verifies complete
+frames, deduplicates inventories and deliveries, caches events for downstream
+wants, expires reverse routes, and limits fanout, hop count, event size, cache
+size, and pending peers. The transport supplies its protocol namespace and
+connected peer set; applications remain responsible for choosing which peer
+subscriptions or coarse streams should see an inventory.
+
+Mesh peer selection accepts optional locally observed quality scores. Unknown
+peers are represented separately from low-quality peers, and fanout reserves
+configurable exploration capacity for them. The core does not infer social
+identity, ingest third-party ratings, or make an admission decision from these
+scores.
+
 The core crate also defines the retention contract for bounded event caches:
 which Nostr filters a local store should retain and how many matching events it
 may keep. Durable implementations belong in adapter repos. For example, a
@@ -53,6 +67,8 @@ than the first peerfinding path.
 - `nostr-pubsub-fips`: local-only `FipsEndpoint` provider over authenticated
   Ethernet peers and FIPS service port 7368.
 - `nostr-pubsub-relay`: optional `nostr-sdk` backend for actual Nostr relays.
+- `nostr-pubsub-sim`: deterministic adversarial simulations that execute the
+  production `InvWantMesh` and codec across up to thousands of virtual peers.
 - `nostr-pubsub-social-graph`: social-graph policy adapter for filtering and
   prioritizing event authors or sources.
 
@@ -88,4 +104,5 @@ cargo clippy --workspace --all-targets -- -D warnings
 pnpm --dir ts --filter nostr-pubsub build
 pnpm --dir ts --filter nostr-pubsub test
 cargo test -p nostr-pubsub --test typescript_interop
+cargo run -p nostr-pubsub-sim -- --nodes 1000 --attackers 200
 ```
