@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "MIT"
 authors = ["Nostr Pubsub contributors"]
@@ -19,7 +19,7 @@ async-trait = "0.1"
 fips-core = { version = "0.3.81", path = "../fips/crates/fips-core" }
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
-nostr-pubsub = { version = "0.1.4", path = "crates/nostr-pubsub" }
+nostr-pubsub = { version = "0.1.5", path = "crates/nostr-pubsub" }
 nostr-social-graph = { version = "0.1.2", path = "../nostr-social-graph/rust/crates/nostr-social-graph" }
 nostr-social-graph-hashtree = { version = "0.1.0", path = "../nostr-social-graph/rust/crates/nostr-social-graph-hashtree" }
 serde = { version = "1", features = ["derive"] }
