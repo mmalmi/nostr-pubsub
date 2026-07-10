@@ -101,30 +101,30 @@ fn production_mesh_delivers_once_across_three_hops() {
 fn unproven_inventory_is_never_amplified() {
     let mut mesh = mesh();
     let event_id = "ab".repeat(32);
+    let inventory = InvWantWireMessage::Inventory {
+        event_id: event_id.clone(),
+        event_kind: 37_195,
+        payload_bytes: 512,
+        hop_limit: 4,
+    };
+    let peers = [
+        MeshPeer::new("attacker"),
+        MeshPeer::new("honest-a"),
+        MeshPeer::new("honest-b"),
+    ];
     let actions = mesh
-        .receive(
-            "attacker",
-            InvWantWireMessage::Inventory {
-                event_id: event_id.clone(),
-                event_kind: 37_195,
-                payload_bytes: 512,
-                hop_limit: 4,
-            },
-            &[
-                MeshPeer::new("attacker"),
-                MeshPeer::new("honest-a"),
-                MeshPeer::new("honest-b"),
-            ],
-            1,
-        )
+        .receive("attacker", inventory.clone(), &peers, 1)
         .unwrap();
 
+    let want = vec![InvWantAction::Send {
+        peer_id: "attacker".to_string(),
+        message: InvWantWireMessage::Want { event_id },
+    }];
+    assert_eq!(actions, want);
     assert_eq!(
-        actions,
-        vec![InvWantAction::Send {
-            peer_id: "attacker".to_string(),
-            message: InvWantWireMessage::Want { event_id },
-        }]
+        mesh.receive("attacker", inventory, &peers, 2).unwrap(),
+        want,
+        "an inventory retry must regenerate a lost WANT without fanout"
     );
 }
 

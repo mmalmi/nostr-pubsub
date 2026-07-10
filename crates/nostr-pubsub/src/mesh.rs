@@ -342,8 +342,28 @@ impl InvWantMesh {
         validate_event_id(&event_id)?;
         self.validate_kind(event_kind)?;
         self.validate_event_len(payload_bytes as usize)?;
-        if hop_limit == 0 || !self.remember_inventory(&event_id, now_ms) {
+        if hop_limit == 0 {
             return Ok(Vec::new());
+        }
+        if !self.remember_inventory(&event_id, now_ms) {
+            let Some(route) = self.upstream_routes.get(&event_id) else {
+                return Ok(Vec::new());
+            };
+            if route.peer_id != source_peer || self.cached_events.contains_key(&event_id) {
+                return Ok(Vec::new());
+            }
+            if route.event_kind != event_kind
+                || route.payload_bytes != payload_bytes
+                || route.hop_limit != hop_limit
+            {
+                return Err(validation(
+                    "retried inv/want inventory changed kind, size, or hop limit",
+                ));
+            }
+            return Ok(vec![InvWantAction::Send {
+                peer_id: source_peer.to_string(),
+                message: InvWantWireMessage::Want { event_id },
+            }]);
         }
 
         let route_expiry = now_ms.saturating_add(self.options.route_ttl_ms);
