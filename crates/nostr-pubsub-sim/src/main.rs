@@ -5,7 +5,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "mode,nodes,attackers,honest_delivered,delivery_bps,processed,inventory,want,frame,wire_bytes,dropped_at_attackers,rejected_malformed,unknown_sends"
     );
-    for mode in [PeerSelectionMode::Neutral, PeerSelectionMode::LocalBehavior] {
+    for mode in [
+        PeerSelectionMode::Neutral,
+        PeerSelectionMode::LocalBehavior,
+        PeerSelectionMode::SharedReputation,
+    ] {
         let report = run_simulation(config.clone(), mode)?;
         println!(
             "{},{},{},{},{},{},{},{},{},{},{},{},{}",

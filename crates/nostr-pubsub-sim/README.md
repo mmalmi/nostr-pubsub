@@ -9,13 +9,17 @@ fanout order, send malformed payloads, and advertise syntactically valid event
 IDs without answering wants. The simulator compares:
 
 - `neutral`: no local peer observations
-- `local-behavior`: successful peers have positive local scores, observed
-  blackholes have negative scores, and one fanout slot remains available to an
-  unknown peer
+- `local-behavior`: local successful-peer history is combined with scores the
+  production mesh learns from malformed messages and protocol outcomes
+- `shared-reputation`: signed local ratings feed
+  `nostr-pubsub-social-graph` and combine with local pubsub behavior, while one
+  honest and one potentially malicious peer remain unknown so exploration is
+  still exercised
 
 It reports honest delivery, inventory/want/frame counts, bytes, malformed
 rejections, blackhole drops, and sends using unknown-peer exploration slots.
-Shared ratings and social identities are intentionally outside this model.
+The transport-neutral simulation belongs here; the Nostr VPN repository keeps
+the smaller full-stack FIPS/runtime scenario.
 
 Run the default comparison:
 
@@ -37,5 +41,5 @@ cargo run -p nostr-pubsub-sim -- \
 
 The simulation has an explicit message budget and fails rather than running
 without a bound. Valid fake inventories remain an intentionally visible source
-of amplification: quality-aware fanout improves eclipse resistance, but this
-first slice does not convert reputation into an inbound trust gate.
+of amplification. Known-bad peers can be omitted by shared reputation, while
+unknown peers are admitted and receive a reserved exploration slot.

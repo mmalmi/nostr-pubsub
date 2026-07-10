@@ -1,15 +1,19 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use nostr::{Event, EventBuilder, Keys, Kind, Timestamp};
 use nostr_pubsub::{
     DEFAULT_INV_WANT_MAX_WIRE_BYTES, InvWantAction, InvWantCodec, InvWantMesh, InvWantMeshOptions,
     InvWantWireMessage, MeshPeer,
 };
+use nostr_pubsub_social_graph::{PeerReputation, PeerReputationConfig};
+use nostr_social_graph::Rating;
+use nostr_social_memory::RatingEventExt;
 
 const SIM_PROTOCOL: &str = "nostr.pubsub.sim";
 const SIM_VERSION: u8 = 1;
 const SIM_EVENT_KIND: u16 = 37_195;
 const ATTACK_PEERS_PER_HONEST_NODE: usize = 4;
+const MALFORMED_SAMPLES_PER_ATTACK_LINK: usize = 3;
 
 pub type Result<T> = std::result::Result<T, SimulationError>;
 
@@ -27,6 +31,7 @@ pub enum SimulationError {
 pub enum PeerSelectionMode {
     Neutral,
     LocalBehavior,
+    SharedReputation,
 }
 
 impl PeerSelectionMode {
@@ -35,6 +40,7 @@ impl PeerSelectionMode {
         match self {
             Self::Neutral => "neutral",
             Self::LocalBehavior => "local-behavior",
+            Self::SharedReputation => "shared-reputation",
         }
     }
 }
@@ -97,8 +103,11 @@ struct Packet {
 
 struct Simulation {
     config: SimulationConfig,
+    mode: PeerSelectionMode,
     codec: InvWantCodec,
     nodes: Vec<SimNode>,
+    peer_ids: Vec<String>,
+    peer_indices: HashMap<String, usize>,
     queue: VecDeque<Packet>,
     delivered: BTreeSet<usize>,
     report: SimulationReport,
@@ -116,11 +125,22 @@ impl Simulation {
     fn new(config: SimulationConfig, mode: PeerSelectionMode) -> Result<Self> {
         validate_config(&config)?;
         let honest_node_count = config.node_count - config.attacker_count;
+        let keys = simulation_keys(config.node_count)?;
+        let peer_ids = keys
+            .iter()
+            .map(|keys| keys.public_key().to_hex())
+            .collect::<Vec<_>>();
+        let peer_indices = peer_ids
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, peer_id)| (peer_id, index))
+            .collect();
         let mut nodes = Vec::with_capacity(config.node_count);
         for node_index in 0..config.node_count {
             nodes.push(SimNode {
                 mesh: InvWantMesh::new(mesh_options(&config)),
-                peers: peers_for_node(&config, mode, node_index),
+                peers: peers_for_node(&config, mode, node_index, &peer_ids, &keys)?,
                 attacker: node_index < config.attacker_count,
             });
         }
@@ -145,15 +165,30 @@ impl Simulation {
                 dropped_at_attackers: 0,
                 sends_to_unknown_peers: 0,
             },
+            mode,
             config,
             nodes,
+            peer_ids,
+            peer_indices,
             now_ms: 1,
         })
     }
 
     fn run(mut self) -> Result<SimulationReport> {
         self.inject_attacker_pressure()?;
+        self.drain_queue()?;
         self.publish_real_event()?;
+        self.drain_queue()?;
+
+        self.report.delivered_honest_nodes = self.delivered.len();
+        self.report.delivery_basis_points = basis_points(
+            self.report.delivered_honest_nodes,
+            self.report.honest_node_count,
+        );
+        Ok(self.report)
+    }
+
+    fn drain_queue(&mut self) -> Result<()> {
         while let Some(packet) = self.queue.pop_front() {
             if self.report.processed_messages >= self.config.max_processed_messages {
                 return Err(SimulationError::MessageBudgetExceeded(
@@ -164,13 +199,7 @@ impl Simulation {
             self.now_ms = self.now_ms.saturating_add(1);
             self.process_packet(&packet)?;
         }
-
-        self.report.delivered_honest_nodes = self.delivered.len();
-        self.report.delivery_basis_points = basis_points(
-            self.report.delivered_honest_nodes,
-            self.report.honest_node_count,
-        );
-        Ok(self.report)
+        Ok(())
     }
 
     fn inject_attacker_pressure(&mut self) -> Result<()> {
@@ -201,13 +230,20 @@ impl Simulation {
             }
         }
 
-        for source in 0..self.config.attacker_count {
-            let destination = honest_start + source % self.report.honest_node_count;
-            self.queue.push_back(Packet {
-                source,
-                destination,
-                payload: br#"{"protocol":"wrong","version":1,"message":{}}"#.to_vec(),
-            });
+        let attack_peer_count = ATTACK_PEERS_PER_HONEST_NODE.min(self.config.attacker_count);
+        for honest_position in 0..self.report.honest_node_count {
+            let destination = honest_start + honest_position;
+            for sequence in 0..attack_peer_count {
+                let source =
+                    attack_peer_index(honest_position, sequence, self.config.attacker_count);
+                for _ in 0..MALFORMED_SAMPLES_PER_ATTACK_LINK {
+                    self.queue.push_back(Packet {
+                        source,
+                        destination,
+                        payload: br#"{"protocol":"wrong","version":1,"message":{}}"#.to_vec(),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -228,11 +264,16 @@ impl Simulation {
             self.report.dropped_at_attackers += 1;
             return Ok(());
         }
+        let source_id = self.peer_ids[packet.source].clone();
         let Ok(message) = self.codec.decode(&packet.payload) else {
             self.report.rejected_malformed_messages += 1;
+            if self.mode != PeerSelectionMode::Neutral {
+                self.nodes[packet.destination]
+                    .mesh
+                    .record_invalid_message(&source_id);
+            }
             return Ok(());
         };
-        let source_id = peer_id(packet.source);
         let peers = self.nodes[packet.destination].peers.clone();
         let actions = self.nodes[packet.destination]
             .mesh
@@ -250,7 +291,7 @@ impl Simulation {
                     }
                 }
                 InvWantAction::Send { peer_id, message } => {
-                    let destination = parse_peer_id(&peer_id)?;
+                    let destination = self.peer_index(&peer_id)?;
                     if self.nodes[source]
                         .peers
                         .iter()
@@ -288,6 +329,13 @@ impl Simulation {
             payload,
         });
         Ok(())
+    }
+
+    fn peer_index(&self, peer_id: &str) -> Result<usize> {
+        self.peer_indices
+            .get(peer_id)
+            .copied()
+            .ok_or_else(|| SimulationError::Pubsub(format!("invalid simulated peer id {peer_id}")))
     }
 }
 
@@ -334,43 +382,118 @@ fn peers_for_node(
     config: &SimulationConfig,
     mode: PeerSelectionMode,
     node_index: usize,
-) -> Vec<MeshPeer> {
+    peer_ids: &[String],
+    keys: &[Keys],
+) -> Result<Vec<MeshPeer>> {
     if node_index < config.attacker_count {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let honest_count = config.node_count - config.attacker_count;
     let honest_position = node_index - config.attacker_count;
-    let mut peer_indices = honest_neighbors(honest_position, honest_count)
+    let mut candidates = honest_neighbors(honest_position, honest_count)
         .into_iter()
         .map(|position| config.attacker_count + position)
         .collect::<Vec<_>>();
     let attack_peer_count = ATTACK_PEERS_PER_HONEST_NODE.min(config.attacker_count);
-    peer_indices.extend(
+    candidates.extend(
         (0..attack_peer_count)
             .map(|sequence| attack_peer_index(honest_position, sequence, config.attacker_count)),
     );
-    peer_indices.sort_unstable();
-    peer_indices.dedup();
+    candidates.sort_unstable();
+    candidates.dedup();
 
-    let first_attack_peer = peer_indices
+    match mode {
+        PeerSelectionMode::Neutral => Ok(candidates
+            .into_iter()
+            .map(|peer| MeshPeer::new(&peer_ids[peer]))
+            .collect()),
+        PeerSelectionMode::LocalBehavior => {
+            let first_honest_unknown = candidates
+                .iter()
+                .copied()
+                .find(|peer| *peer >= config.attacker_count);
+            Ok(candidates
+                .into_iter()
+                .map(|peer| {
+                    if peer < config.attacker_count || Some(peer) == first_honest_unknown {
+                        MeshPeer::new(&peer_ids[peer])
+                    } else {
+                        MeshPeer::observed(&peer_ids[peer], honest_link_score(node_index, peer))
+                    }
+                })
+                .collect())
+        }
+        PeerSelectionMode::SharedReputation => {
+            shared_reputation_peers(config, node_index, &candidates, peer_ids, keys)
+        }
+    }
+}
+
+fn shared_reputation_peers(
+    config: &SimulationConfig,
+    node_index: usize,
+    candidates: &[usize],
+    peer_ids: &[String],
+    keys: &[Keys],
+) -> Result<Vec<MeshPeer>> {
+    let (mut reputation, policies) =
+        PeerReputation::new(&peer_ids[node_index], PeerReputationConfig::default())
+            .map_err(pubsub_error)?;
+    let first_honest_unknown = candidates
+        .iter()
+        .copied()
+        .find(|peer| *peer >= config.attacker_count);
+    let first_attacker_unknown = candidates
         .iter()
         .copied()
         .find(|peer| *peer < config.attacker_count);
-    peer_indices
-        .into_iter()
-        .map(|peer| match mode {
-            PeerSelectionMode::Neutral => MeshPeer::new(peer_id(peer)),
-            PeerSelectionMode::LocalBehavior if Some(peer) == first_attack_peer => {
-                MeshPeer::new(peer_id(peer))
+    let mut ratings = Vec::new();
+    for peer in candidates.iter().copied() {
+        if Some(peer) == first_honest_unknown || Some(peer) == first_attacker_unknown {
+            continue;
+        }
+        ratings.push(peer_rating_event(
+            &keys[node_index],
+            &peer_ids[node_index],
+            &peer_ids[peer],
+            if peer < config.attacker_count { 0 } else { 100 },
+            u64::try_from(peer).unwrap_or(u64::MAX).saturating_add(1),
+        )?);
+    }
+    reputation.replay(&ratings).map_err(pubsub_error)?;
+
+    let mut peers = Vec::with_capacity(candidates.len());
+    for peer in candidates {
+        if let Some(mut selected) = policies
+            .select_mesh_peer(&peer_ids[*peer])
+            .map_err(pubsub_error)?
+        {
+            if let Some(shared_score) = selected.quality_score {
+                selected = MeshPeer::observed(
+                    &selected.id,
+                    shared_score
+                        .saturating_sub((100 - honest_link_score(node_index, *peer)) / 5)
+                        .clamp(-100, 100),
+                );
             }
-            PeerSelectionMode::LocalBehavior if peer < config.attacker_count => {
-                MeshPeer::observed(peer_id(peer), -100)
-            }
-            PeerSelectionMode::LocalBehavior => {
-                MeshPeer::observed(peer_id(peer), honest_link_score(node_index, peer))
-            }
-        })
-        .collect()
+            peers.push(selected);
+        }
+    }
+    Ok(peers)
+}
+
+fn peer_rating_event(
+    signer: &Keys,
+    rater: &str,
+    subject: &str,
+    value: i64,
+    created_at: u64,
+) -> Result<Event> {
+    let mut rating = Rating::new(rater, subject, value, 0, 100);
+    rating.scope = Some(PeerReputationConfig::default().scope);
+    rating.created_at = created_at;
+    rating.sample_count = Some(3);
+    rating.to_event(signer).map_err(pubsub_error)
 }
 
 fn honest_neighbors(position: usize, honest_count: usize) -> BTreeSet<usize> {
@@ -401,15 +524,15 @@ fn attack_peer_index(position: usize, sequence: usize, attacker_count: usize) ->
         .wrapping_rem(attacker_count)
 }
 
-fn peer_id(index: usize) -> String {
-    format!("peer-{index:08}")
-}
-
-fn parse_peer_id(peer_id: &str) -> Result<usize> {
-    peer_id
-        .strip_prefix("peer-")
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or_else(|| SimulationError::Pubsub(format!("invalid simulated peer id {peer_id}")))
+fn simulation_keys(node_count: usize) -> Result<Vec<Keys>> {
+    let mut keys = (0..node_count)
+        .map(|index| {
+            Keys::parse(&format!("{:064x}", index.saturating_add(1)))
+                .map_err(|error| SimulationError::Pubsub(error.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    keys.sort_by_key(|keys| keys.public_key().to_hex());
+    Ok(keys)
 }
 
 fn signed_sim_event() -> Event {
@@ -442,13 +565,16 @@ mod tests {
     fn thousand_node_local_behavior_priority_resists_sybil_eclipse() {
         let config = SimulationConfig::default();
         let neutral = run_simulation(config.clone(), PeerSelectionMode::Neutral).unwrap();
-        let prioritized = run_simulation(config, PeerSelectionMode::LocalBehavior).unwrap();
+        let learned = run_simulation(config.clone(), PeerSelectionMode::LocalBehavior).unwrap();
+        let shared = run_simulation(config, PeerSelectionMode::SharedReputation).unwrap();
 
         assert!(neutral.delivery_basis_points < 100, "{neutral:?}");
-        assert!(prioritized.delivery_basis_points > 9_500, "{prioritized:?}");
-        assert!(prioritized.sends_to_unknown_peers > 0);
-        assert_eq!(prioritized.injected_attack_inventories, 800);
-        assert_eq!(prioritized.rejected_malformed_messages, 200);
+        assert!(learned.delivery_basis_points > 9_500, "{learned:?}");
+        assert!(shared.delivery_basis_points > 9_500, "{shared:?}");
+        assert!(learned.sends_to_unknown_peers > 0);
+        assert!(shared.sends_to_unknown_peers > 0);
+        assert_eq!(learned.injected_attack_inventories, 800);
+        assert_eq!(learned.rejected_malformed_messages, 9_600);
     }
 
     #[test]
@@ -465,6 +591,6 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.injected_attack_inventories, 96);
-        assert_eq!(first.rejected_malformed_messages, 24);
+        assert_eq!(first.rejected_malformed_messages, 1_152);
     }
 }

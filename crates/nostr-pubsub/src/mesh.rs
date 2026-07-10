@@ -11,6 +11,11 @@ pub const DEFAULT_INV_WANT_MAX_WIRE_BYTES: usize = DEFAULT_INV_WANT_MAX_EVENT_BY
 
 const DEFAULT_ROUTE_TTL_MS: u64 = 2 * 60 * 1_000;
 const DEFAULT_EVENT_TTL_MS: u64 = 10 * 60 * 1_000;
+const MAX_TRACKED_PEER_BEHAVIORS: usize = 4_096;
+const MIN_PEER_BEHAVIOR_SAMPLES: u32 = 3;
+const VALID_FRAME_REWARD: i32 = 20;
+const INVALID_MESSAGE_PENALTY: i32 = -40;
+const UNSERVED_INVENTORY_PENALTY: i32 = -20;
 
 /// Network-neutral inventory/want/frame messages for signed Nostr events.
 ///
@@ -154,6 +159,13 @@ impl MeshPeer {
     }
 }
 
+/// Selects the connected peers eligible for mesh traffic and assigns optional
+/// local quality scores. Unknown peers should normally remain eligible so a
+/// new node can explore beyond its existing trust graph.
+pub trait MeshPeerPolicy: Send + Sync {
+    fn select_mesh_peer(&self, peer_id: &str) -> Result<Option<MeshPeer>>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvWantMeshOptions {
     pub fanout: usize,
@@ -219,6 +231,12 @@ struct PendingPeers {
     expires_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerBehavior {
+    score: i32,
+    samples: u32,
+}
+
 struct ReceivedInventory {
     event_id: String,
     event_kind: u16,
@@ -239,6 +257,8 @@ pub struct InvWantMesh {
     upstream_routes: HashMap<String, UpstreamRoute>,
     pending_downstream: HashMap<String, PendingPeers>,
     want_forwarded: HashMap<String, u64>,
+    peer_behaviors: HashMap<String, PeerBehavior>,
+    peer_behavior_order: VecDeque<String>,
 }
 
 impl InvWantMesh {
@@ -264,12 +284,45 @@ impl InvWantMesh {
             upstream_routes: HashMap::new(),
             pending_downstream: HashMap::new(),
             want_forwarded: HashMap::new(),
+            peer_behaviors: HashMap::new(),
+            peer_behavior_order: VecDeque::new(),
         }
     }
 
     #[must_use]
     pub fn options(&self) -> &InvWantMeshOptions {
         &self.options
+    }
+
+    /// Return a locally observed pubsub behavior score once enough evidence is
+    /// available. A peer with fewer samples remains unknown.
+    #[must_use]
+    pub fn peer_behavior_score(&self, peer_id: &str) -> Option<i32> {
+        self.peer_behaviors
+            .get(peer_id)
+            .filter(|behavior| behavior.samples >= MIN_PEER_BEHAVIOR_SAMPLES)
+            .map(|behavior| behavior.score)
+    }
+
+    /// Record a malformed or otherwise invalid wire message rejected by the
+    /// transport adapter before it reached [`Self::receive`].
+    pub fn record_invalid_message(&mut self, peer_id: &str) {
+        self.record_peer_behavior(peer_id, INVALID_MESSAGE_PENALTY);
+    }
+
+    /// Close a requested route when the transport or application rejects an
+    /// otherwise served frame under local admission policy. This gives no
+    /// provider credit and avoids later treating the peer as if it never
+    /// answered the want.
+    pub fn dismiss_frame(&mut self, peer_id: &str, event_id: &str) {
+        if self
+            .upstream_routes
+            .get(event_id)
+            .is_some_and(|route| route.peer_id == peer_id)
+        {
+            self.upstream_routes.remove(event_id);
+            self.want_forwarded.remove(event_id);
+        }
     }
 
     pub fn publish(
@@ -302,7 +355,7 @@ impl InvWantMesh {
         now_ms: u64,
     ) -> Result<Vec<InvWantAction>> {
         self.prune(now_ms);
-        match message {
+        let result = match message {
             InvWantWireMessage::Inventory {
                 event_id,
                 event_kind,
@@ -324,7 +377,11 @@ impl InvWantMesh {
             InvWantWireMessage::Frame { event_id, event } => {
                 self.receive_frame(source_peer, &event_id, &event, peers, now_ms)
             }
+        };
+        if result.is_err() {
+            self.record_invalid_message(source_peer);
         }
+        result
     }
 
     fn receive_inventory(
@@ -452,6 +509,13 @@ impl InvWantMesh {
             return Err(validation(
                 "inv/want frame does not match announced kind or payload size",
             ));
+        }
+        if route
+            .as_ref()
+            .is_some_and(|route| route.peer_id == source_peer)
+            && self.want_forwarded.contains_key(event_id)
+        {
+            self.record_peer_behavior(source_peer, VALID_FRAME_REWARD);
         }
         self.store_event(event.clone(), now_ms);
 
@@ -601,8 +665,9 @@ impl InvWantMesh {
         excluded_peer: Option<&str>,
         message: &InvWantWireMessage,
     ) -> Vec<InvWantAction> {
+        let peers = self.peers_with_behavior(peers);
         select_peers(
-            peers,
+            &peers,
             excluded_peer,
             self.options.fanout,
             self.options.unknown_peer_reserve,
@@ -615,7 +680,50 @@ impl InvWantMesh {
         .collect()
     }
 
+    fn peers_with_behavior(&self, peers: &[MeshPeer]) -> Vec<MeshPeer> {
+        peers
+            .iter()
+            .map(|peer| {
+                let local_score = self.peer_behavior_score(&peer.id);
+                let quality_score = match (peer.quality_score, local_score) {
+                    (Some(external), Some(local)) => {
+                        Some(external.saturating_add(local).clamp(-100, 100))
+                    }
+                    (external, local) => external.or(local),
+                };
+                match quality_score {
+                    Some(score) => MeshPeer::observed(&peer.id, score),
+                    None => MeshPeer::new(&peer.id),
+                }
+            })
+            .collect()
+    }
+
+    fn record_peer_behavior(&mut self, peer_id: &str, score_delta: i32) {
+        if !self.peer_behaviors.contains_key(peer_id) {
+            while self.peer_behaviors.len() >= MAX_TRACKED_PEER_BEHAVIORS {
+                let Some(oldest) = self.peer_behavior_order.pop_front() else {
+                    break;
+                };
+                self.peer_behaviors.remove(&oldest);
+            }
+            self.peer_behavior_order.push_back(peer_id.to_string());
+        }
+        let behavior = self.peer_behaviors.entry(peer_id.to_string()).or_default();
+        behavior.samples = behavior.samples.saturating_add(1);
+        behavior.score = behavior.score.saturating_add(score_delta).clamp(-100, 100);
+    }
+
     fn prune(&mut self, now_ms: u64) {
+        let expired_routes = self
+            .upstream_routes
+            .values()
+            .filter(|route| route.expires_at_ms <= now_ms)
+            .map(|route| route.peer_id.clone())
+            .collect::<Vec<_>>();
+        for peer_id in expired_routes {
+            self.record_peer_behavior(&peer_id, UNSERVED_INVENTORY_PENALTY);
+        }
         self.cached_events
             .retain(|_, cached| cached.expires_at_ms > now_ms);
         self.cache_order

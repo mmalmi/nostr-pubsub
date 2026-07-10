@@ -157,6 +157,172 @@ fn behavioral_priority_reserves_fanout_for_an_unknown_peer() {
     assert_eq!(selected, BTreeSet::from(["good-a", "good-b", "newcomer"]));
 }
 
+#[test]
+fn local_pubsub_behavior_learns_good_and_bad_without_classifying_newcomers() {
+    let options = InvWantMeshOptions {
+        fanout: 2,
+        unknown_peer_reserve: 1,
+        allowed_kinds: Some(BTreeSet::from([37_195])),
+        ..InvWantMeshOptions::default()
+    };
+    let mut mesh = InvWantMesh::new(options);
+    let peers = [
+        MeshPeer::new("useful"),
+        MeshPeer::new("malformed"),
+        MeshPeer::new("newcomer"),
+    ];
+
+    for now in 1..=3 {
+        let event = signed_event();
+        let event_id = event.id.to_hex();
+        let payload_bytes = u32::try_from(serde_json::to_vec(&event).unwrap().len()).unwrap();
+        let inventory = InvWantWireMessage::Inventory {
+            event_id: event_id.clone(),
+            event_kind: 37_195,
+            payload_bytes,
+            hop_limit: 4,
+        };
+        assert_eq!(
+            mesh.receive("useful", inventory, &peers, now * 2)
+                .unwrap()
+                .len(),
+            1
+        );
+        mesh.receive(
+            "useful",
+            InvWantWireMessage::Frame {
+                event_id,
+                event: Box::new(event),
+            },
+            &peers,
+            now * 2 + 1,
+        )
+        .unwrap();
+    }
+    for _ in 0..3 {
+        mesh.record_invalid_message("malformed");
+    }
+
+    assert!(
+        mesh.peer_behavior_score("useful")
+            .is_some_and(|score| score > 0)
+    );
+    assert!(
+        mesh.peer_behavior_score("malformed")
+            .is_some_and(|score| score < 0)
+    );
+    assert_eq!(mesh.peer_behavior_score("newcomer"), None);
+
+    let selected = mesh
+        .publish(signed_event(), &peers, 100)
+        .unwrap()
+        .into_iter()
+        .filter_map(|action| match action {
+            InvWantAction::Send { peer_id, .. } => Some(peer_id),
+            InvWantAction::Deliver { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        selected,
+        BTreeSet::from(["newcomer".to_string(), "useful".to_string()])
+    );
+}
+
+#[test]
+fn provider_scoring_penalizes_irrelevant_and_unserved_inventories_but_not_silence() {
+    let options = InvWantMeshOptions {
+        fanout: 1,
+        unknown_peer_reserve: 1,
+        route_ttl_ms: 10,
+        event_ttl_ms: 20,
+        allowed_kinds: Some(BTreeSet::from([37_195])),
+        ..InvWantMeshOptions::default()
+    };
+
+    let mut silent = InvWantMesh::new(options.clone());
+    silent
+        .publish(signed_event(), &[MeshPeer::new("silent")], 1)
+        .unwrap();
+    silent
+        .publish(signed_event(), &[MeshPeer::new("silent")], 20)
+        .unwrap();
+    assert_eq!(silent.peer_behavior_score("silent"), None);
+
+    let mut irrelevant = InvWantMesh::new(options.clone());
+    for now in 1..=3 {
+        irrelevant
+            .receive(
+                "irrelevant",
+                InvWantWireMessage::Inventory {
+                    event_id: format!("{:064x}", now + 10),
+                    event_kind: 1,
+                    payload_bytes: 512,
+                    hop_limit: 4,
+                },
+                &[MeshPeer::new("irrelevant")],
+                now,
+            )
+            .unwrap_err();
+    }
+    assert!(
+        irrelevant
+            .peer_behavior_score("irrelevant")
+            .is_some_and(|score| score < 0)
+    );
+
+    let mut blackhole = InvWantMesh::new(options);
+    for now in 1..=3 {
+        blackhole
+            .receive(
+                "blackhole",
+                InvWantWireMessage::Inventory {
+                    event_id: format!("{now:064x}"),
+                    event_kind: 37_195,
+                    payload_bytes: 512,
+                    hop_limit: 4,
+                },
+                &[MeshPeer::new("blackhole")],
+                now,
+            )
+            .unwrap();
+    }
+    blackhole
+        .publish(signed_event(), &[MeshPeer::new("blackhole")], 20)
+        .unwrap();
+    assert!(
+        blackhole
+            .peer_behavior_score("blackhole")
+            .is_some_and(|score| score < 0)
+    );
+
+    let mut locally_rejected = InvWantMesh::new(InvWantMeshOptions {
+        fanout: 1,
+        route_ttl_ms: 10,
+        event_ttl_ms: 20,
+        allowed_kinds: Some(BTreeSet::from([37_195])),
+        ..InvWantMeshOptions::default()
+    });
+    let rejected_id = "ff".repeat(32);
+    locally_rejected
+        .receive(
+            "provider",
+            InvWantWireMessage::Inventory {
+                event_id: rejected_id.clone(),
+                event_kind: 37_195,
+                payload_bytes: 512,
+                hop_limit: 4,
+            },
+            &[MeshPeer::new("provider")],
+            1,
+        )
+        .unwrap();
+    locally_rejected.dismiss_frame("provider", &rejected_id);
+    locally_rejected
+        .publish(signed_event(), &[MeshPeer::new("provider")], 20)
+        .unwrap();
+    assert_eq!(locally_rejected.peer_behavior_score("provider"), None);
+}
+
 fn mesh() -> InvWantMesh {
     let options = InvWantMeshOptions {
         fanout: 8,

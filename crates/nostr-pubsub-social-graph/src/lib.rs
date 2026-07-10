@@ -4,11 +4,15 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+pub use nostr_pubsub::MeshPeerPolicy;
 use nostr_pubsub::{
     EventPolicyContext, EventSource, EventSourceKind, MeshPeer, PolicyDecision, PublicKey,
     PubsubError, PubsubPolicy, Result, SourcePolicyContext,
 };
 use nostr_social_graph::SocialGraphBackend;
+
+mod reputation;
+pub use reputation::*;
 
 pub const DEFAULT_SOCIAL_GRAPH_ENTRYPOINT_NPUB: &str =
     "npub1g53mukxnjkcmr94fhryzkqutdz2ukq4ks0gvy5af25rgmwsl4ngq43drvk";
@@ -63,12 +67,6 @@ pub struct SocialGraphPolicy<B> {
     graph: Arc<RwLock<B>>,
     config: SocialGraphPolicyConfig,
     service_reputation: Option<Arc<dyn ServiceReputation>>,
-}
-
-/// Converts local application policy into the peers eligible for inv/want
-/// fanout. `None` drops a peer; an included peer can remain explicitly unknown.
-pub trait MeshPeerPolicy: Send + Sync {
-    fn select_mesh_peer(&self, peer_id: &str) -> Result<Option<MeshPeer>>;
 }
 
 impl<B> SocialGraphPolicy<B> {

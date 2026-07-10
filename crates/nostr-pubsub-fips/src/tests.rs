@@ -7,7 +7,9 @@ use fips_core::{
     register_sim_network, unregister_sim_network,
 };
 use nostr::{EventBuilder, Filter, Keys, Kind};
-use nostr_pubsub::{EventBus, EventSourceKind, PubsubProvider, QueryOptions, VerifiedEvent};
+use nostr_pubsub::{
+    EventBus, EventSourceKind, PolicyDecision, PubsubProvider, QueryOptions, VerifiedEvent,
+};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -64,6 +66,8 @@ async fn two_fips_endpoints_query_publish_and_close_over_service_port() {
     );
     wait_for_connected_peer(&endpoint_a, endpoint_b.npub()).await;
     wait_for_connected_peer(&endpoint_b, endpoint_a.npub()).await;
+
+    exercise_default_reputation(&endpoint_a, endpoint_b.npub()).await;
 
     endpoint_b
         .register_service(FIPS_NOSTR_PUBSUB_SERVICE_PORT)
@@ -130,6 +134,50 @@ async fn two_fips_endpoints_query_publish_and_close_over_service_port() {
     endpoint_a.shutdown().await.expect("shutdown endpoint A");
     endpoint_b.shutdown().await.expect("shutdown endpoint B");
     unregister_sim_network(&network_id);
+}
+
+async fn exercise_default_reputation(endpoint: &Arc<FipsEndpoint>, peer_npub: &str) {
+    let reputation = FipsPeerReputation::new(
+        Arc::clone(endpoint),
+        std::iter::empty(),
+        FipsPeerReputationOptions::default(),
+    )
+    .expect("start default FIPS peer reputation");
+    assert!(
+        reputation
+            .peer_policy()
+            .select_mesh_peer(peer_npub)
+            .expect("unknown peer policy")
+            .expect("unknown peer remains eligible")
+            .is_unknown()
+    );
+    reputation
+        .publication_candidates(1_000)
+        .await
+        .expect("snapshot signed FIPS ratings");
+
+    let mut policy = FipsPubsubPolicy::new(
+        Arc::clone(endpoint),
+        std::iter::empty(),
+        FipsPubsubPolicyOptions::default(),
+    )
+    .expect("start pubsub policy");
+    let event = EventBuilder::text_note("ordinary event")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign ordinary event");
+    assert!(
+        !policy
+            .observe_event(&event)
+            .expect("observe ordinary event")
+    );
+    assert!(!matches!(
+        policy
+            .check_event(&event, &EventSource::relay("wss://bootstrap.example"))
+            .await
+            .expect("check relay event author"),
+        PolicyDecision::Drop { .. }
+    ));
+    assert!(policy.maintenance_events(1_000).await.unwrap().is_empty());
 }
 
 fn endpoint_config(

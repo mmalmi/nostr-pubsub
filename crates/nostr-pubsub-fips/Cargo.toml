@@ -12,13 +12,15 @@ exclude = ["Cargo.lock"]
 [dependencies]
 async-trait.workspace = true
 fips-core.workspace = true
+nostr.workspace = true
 nostr-pubsub.workspace = true
+nostr-pubsub-social-graph.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 fips-core = { workspace = true, features = ["sim-transport"] }
 hex = "0.4"
-nostr.workspace = true
+nostr-sdk.workspace = true
 
 [lints]
 workspace = true

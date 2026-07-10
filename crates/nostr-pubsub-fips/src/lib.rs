@@ -16,6 +16,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+mod reputation;
+pub use reputation::*;
+
 pub const FIPS_NOSTR_PUBSUB_SERVICE_PORT: u16 = 7368;
 pub const FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS: usize = 8;
 

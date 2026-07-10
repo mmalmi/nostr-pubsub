@@ -26,6 +26,14 @@ the shared pubsub vocabulary. Peer-quality inputs are local transport or pubsub
 observations; the mesh does not assume that a transport peer has a social
 identity and does not trust shared ratings by default.
 
+The production mesh's local score is provider-specific. It rewards a peer only
+after an accepted inventory is wanted and the peer returns the matching valid
+signed frame. Inventories outside the configured kind subscription, invalid or
+mismatched frames, and accepted inventories left unserved through route expiry
+are negative evidence. Silent peers remain unknown. Applications should run
+author/social admission before delivering a frame to the mesh; a locally
+rejected valid frame can be dismissed without provider credit or penalty.
+
 Consumers select exactly one `PubsubProvider`: `local-only` for a local peer
 provider or `direct-relay` for direct relay sockets. Provider construction is
 explicit and the core never falls back between the two modes at runtime.
