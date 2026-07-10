@@ -5,8 +5,8 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use nostr_pubsub::{
-    EventPolicyContext, EventSource, EventSourceKind, PolicyDecision, PublicKey, PubsubError,
-    PubsubPolicy, Result, SourcePolicyContext,
+    EventPolicyContext, EventSource, EventSourceKind, MeshPeer, PolicyDecision, PublicKey,
+    PubsubError, PubsubPolicy, Result, SourcePolicyContext,
 };
 use nostr_social_graph::SocialGraphBackend;
 
@@ -65,6 +65,12 @@ pub struct SocialGraphPolicy<B> {
     service_reputation: Option<Arc<dyn ServiceReputation>>,
 }
 
+/// Converts local application policy into the peers eligible for inv/want
+/// fanout. `None` drops a peer; an included peer can remain explicitly unknown.
+pub trait MeshPeerPolicy: Send + Sync {
+    fn select_mesh_peer(&self, peer_id: &str) -> Result<Option<MeshPeer>>;
+}
+
 impl<B> SocialGraphPolicy<B> {
     #[must_use]
     pub fn new(graph: Arc<RwLock<B>>, config: SocialGraphPolicyConfig) -> Self {
@@ -97,6 +103,14 @@ where
     B: SocialGraphBackend + Send + Sync + 'static,
 {
     fn decision_for_author(&self, author_pubkey: &str) -> Result<PolicyDecision> {
+        self.decision_and_graph_membership_for_author(author_pubkey)
+            .map(|(decision, _)| decision)
+    }
+
+    fn decision_and_graph_membership_for_author(
+        &self,
+        author_pubkey: &str,
+    ) -> Result<(PolicyDecision, bool)> {
         let graph = self
             .graph
             .read()
@@ -105,7 +119,10 @@ where
         if self.config.drop_root_mutes
             && author_is_muted_by_root(&*graph, author_pubkey).map_err(graph_policy_error)?
         {
-            return Ok(PolicyDecision::drop("author muted by social graph root"));
+            return Ok((
+                PolicyDecision::drop("author muted by social graph root"),
+                true,
+            ));
         }
 
         if self.config.drop_overmuted
@@ -113,7 +130,10 @@ where
                 .is_overmuted(author_pubkey, self.config.overmute_threshold)
                 .map_err(graph_policy_error)?
         {
-            return Ok(PolicyDecision::drop("author overmuted by social graph"));
+            return Ok((
+                PolicyDecision::drop("author overmuted by social graph"),
+                true,
+            ));
         }
 
         let distance = graph
@@ -126,15 +146,19 @@ where
                 .is_some_and(|max_distance| distance > max_distance);
 
         if outside {
-            return Ok(Self::decision_from_action(
-                self.config.outside_graph_action,
-                self.config.outside_graph_priority,
-                outside_reason(distance, &self.config),
+            return Ok((
+                Self::decision_from_action(
+                    self.config.outside_graph_action,
+                    self.config.outside_graph_priority,
+                    outside_reason(distance, &self.config),
+                ),
+                false,
             ));
         }
 
-        Ok(PolicyDecision::allow_with_priority(
-            self.priority_for_distance(distance),
+        Ok((
+            PolicyDecision::allow_with_priority(self.priority_for_distance(distance)),
+            true,
         ))
     }
 
@@ -189,6 +213,42 @@ where
             return graph_decision;
         };
         combine_source_decisions(graph_decision, reputation_decision)
+    }
+}
+
+impl<B> MeshPeerPolicy for SocialGraphPolicy<B>
+where
+    B: SocialGraphBackend + Send + Sync + 'static,
+{
+    fn select_mesh_peer(&self, peer_id: &str) -> Result<Option<MeshPeer>> {
+        let source = EventSource::fips_endpoint(peer_id);
+        let (graph_decision, inside_graph) = match parse_pubkey(peer_id) {
+            Some(author_pubkey) => self.decision_and_graph_membership_for_author(&author_pubkey)?,
+            None => (self.decision_for_missing_author(), false),
+        };
+        let reputation_decision = self
+            .service_reputation
+            .as_ref()
+            .and_then(|reputation| reputation.decision_for_source(&source, None));
+        let (decision, has_reputation) = match reputation_decision {
+            Some(reputation_decision) => (
+                combine_source_decisions(graph_decision, reputation_decision),
+                true,
+            ),
+            None => (graph_decision, false),
+        };
+
+        match decision {
+            PolicyDecision::Drop { .. } => Ok(None),
+            PolicyDecision::Allow { priority } | PolicyDecision::Throttle { priority, .. }
+                if inside_graph || has_reputation =>
+            {
+                Ok(Some(MeshPeer::observed(peer_id, priority)))
+            }
+            PolicyDecision::Allow { .. } | PolicyDecision::Throttle { .. } => {
+                Ok(Some(MeshPeer::new(peer_id)))
+            }
+        }
     }
 }
 

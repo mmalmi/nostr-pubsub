@@ -9,7 +9,7 @@ use nostr_pubsub::{
 };
 use nostr_pubsub_social_graph::{
     DEFAULT_SOCIAL_GRAPH_ENTRYPOINT_NPUB, GraphDistanceAction, InMemoryServiceReputation,
-    SocialGraphPolicy, SocialGraphPolicyConfig,
+    MeshPeerPolicy, SocialGraphPolicy, SocialGraphPolicyConfig,
 };
 use nostr_social_graph::{NostrEvent, SocialGraph, SocialGraphBackend};
 
@@ -147,6 +147,50 @@ async fn service_reputation_can_throttle_socially_near_sources_with_bad_history(
     assert!(
         matches!(decision, PolicyDecision::Throttle { reason, .. } if reason.contains("recent invalid responses"))
     );
+}
+
+#[test]
+fn mesh_peer_policy_keeps_good_unknown_and_malicious_distinct() {
+    let Fixture {
+        graph,
+        friend,
+        unknown,
+        overmuted,
+    } = fixture();
+    let policy = SocialGraphPolicy::new(graph, SocialGraphPolicyConfig::default());
+
+    let good = policy
+        .select_mesh_peer(&friend.public_key().to_bech32().unwrap())
+        .unwrap()
+        .expect("known-good peer remains eligible");
+    let unknown = policy
+        .select_mesh_peer(&unknown.public_key().to_bech32().unwrap())
+        .unwrap()
+        .expect("unknown peer remains eligible for exploration");
+    let malicious = policy
+        .select_mesh_peer(&overmuted.public_key().to_bech32().unwrap())
+        .unwrap();
+
+    assert!(good.quality_score.is_some_and(|score| score > 0));
+    assert!(unknown.is_unknown());
+    assert_eq!(malicious, None);
+}
+
+#[test]
+fn global_behavior_reputation_can_classify_an_unknown_mesh_peer() {
+    let Fixture { graph, unknown, .. } = fixture();
+    let unknown_npub = unknown.public_key().to_bech32().unwrap();
+    let reputation = Arc::new(InMemoryServiceReputation::default());
+    reputation.throttle_source(&unknown_npub, None, -250, "repeated unanswered inventories");
+    let policy = SocialGraphPolicy::new(graph, SocialGraphPolicyConfig::default())
+        .with_service_reputation(reputation);
+
+    let malicious = policy
+        .select_mesh_peer(&unknown_npub)
+        .unwrap()
+        .expect("downranked peer stays available as a last resort");
+
+    assert!(malicious.quality_score.is_some_and(|score| score < 0));
 }
 
 #[tokio::test]
