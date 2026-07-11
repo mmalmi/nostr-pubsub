@@ -48,23 +48,14 @@
       },
       "json": "[\"REQ\",\"fips-approval\",{\"#d\":[\"fips.peer\"],\"kinds\":[37195]}]"
     },
-  {
-    "name": "targeted approval close",
+    {
+      "name": "targeted approval close",
       "message": {
         "type": "close",
         "subscriptionId": "fips-approval"
       },
-    "json": "[\"CLOSE\",\"fips-approval\"]"
-  },
-  {
-    "name": "targeted approval replay complete",
-    "message": {
-      "type": "eose",
-      "subscriptionId": "fips-approval",
-      "eventCount": 1
+      "json": "[\"CLOSE\",\"fips-approval\"]"
     },
-    "json": "[\"EOSE\",\"fips-approval\",1]"
-  },
     {
       "name": "client event publish",
       "message": {

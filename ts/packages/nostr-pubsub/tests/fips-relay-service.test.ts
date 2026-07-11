@@ -83,11 +83,6 @@ class MemoryRelay implements NostrRelayTransport {
     const record = this.subscriptions[index];
     if (record !== undefined && !record.closed) record.handlers.onEvent(event);
   }
-
-  eose(index: number): void {
-    const record = this.subscriptions[index];
-    if (record !== undefined && !record.closed) record.handlers.onEose?.();
-  }
 }
 
 interface ClientContext {
@@ -136,7 +131,8 @@ function blockedClientContext(peerId = PEER_A): ClientContext & { release: () =>
 }
 
 async function flushTasks(): Promise<void> {
-  for (let index = 0; index < 16; index += 1) await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 describe('FipsNostrRelayService', () => {
@@ -168,20 +164,14 @@ describe('FipsNostrRelayService', () => {
     ]);
     relay.emit(0, events.hashtreeRoot);
     relay.emit(0, events.fipsAdvert);
-    relay.eose(0);
     await flushTasks();
 
-    expect(client.replies).toHaveLength(2);
+    expect(client.replies).toHaveLength(1);
     const outbound = adapter.codec.decodeFrame(client.replies[0]);
     expect(outbound.type).toBe('event');
     if (outbound.type !== 'event') throw new Error('expected EVENT');
     expect(outbound.subscriptionId).toBe('approval');
     expect(outbound.event.id).toBe(events.fipsAdvert.id);
-    expect(adapter.codec.decodeFrame(client.replies[1])).toEqual({
-      type: 'eose',
-      subscriptionId: 'approval',
-      eventCount: 1,
-    });
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(relay.subscriptions[0].closed).toBe(true);
@@ -189,7 +179,7 @@ describe('FipsNostrRelayService', () => {
     expect(service.activeSubscriptionCount()).toBe(0);
     relay.emit(0, events.fipsAdvert);
     await flushTasks();
-    expect(client.replies).toHaveLength(2);
+    expect(client.replies).toHaveLength(1);
 
     await service.stop();
     expect(node.serviceCount()).toBe(0);

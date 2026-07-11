@@ -1,15 +1,13 @@
 # nostr-pubsub-fips
 
 `FipsEndpoint` provider for local-only Nostr pubsub. It uses the standard Nostr
-`REQ`, `EVENT`, counted `EOSE`, and `CLOSE` JSON messages on FIPS service port `7368`.
+`REQ`, `EVENT`, and `CLOSE` JSON messages on FIPS service port `7368`.
 
 The provider fans each subscription and publication to authenticated,
 connected Ethernet peers reported by FIPS. Subscription replies are accepted
 only from the peers that received that subscription. Frames, peer fanout,
 active subscriptions, replay deduplication, and delivery queues are bounded;
 replay defaults to at most 8 events per filter.
-Queries finish as soon as every selected peer's counted replay is complete,
-without waiting for the query timeout or assuming ordered service datagrams.
 
 `FipsPeerReputation` composes FIPS's authenticated peer metrics and signed
 rating events with the shared social-graph reputation policy. Its default keeps

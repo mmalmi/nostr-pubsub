@@ -11,7 +11,7 @@ delivery sources.
 ## Shape
 
 Use the standard `nostr` crate message types for normal Nostr protocol traffic:
-`REQ`/`CLOSE` subscriptions, `EVENT` publish/delivery, and bounded replay completion. The
+`REQ`/`CLOSE` subscriptions, `EVENT` publish/delivery, and relay responses. The
 core crate re-exports those types so transports do not invent parallel
 subscription messages.
 
@@ -50,9 +50,7 @@ policy/scoring semantics.
 The Rust and TypeScript cores expose matching `FipsPubsubWireCodec` and
 `FipsPubsubWireAdapter` boundaries. Each codec consumes one payload frame
 provided by FIPS, enforces a configurable byte limit, and carries ordinary
-Nostr `REQ`, `CLOSE`, client `EVENT`, and subscription `EVENT` JSON arrays. Replay
-completion uses `["EOSE", subscription_id, event_count]`; the count prevents an
-out-of-order completion datagram from overtaking the final replay event.
+Nostr `REQ`, `CLOSE`, client `EVENT`, and subscription `EVENT` JSON arrays.
 Decoded events are accepted only after their IDs and Schnorr signatures verify.
 The codec does not define stream framing or peer admission.
 

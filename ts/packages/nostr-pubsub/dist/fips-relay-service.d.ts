@@ -19,7 +19,6 @@ export interface NostrRelaySubscription {
 }
 export interface NostrRelayTransportHandlers {
     onEvent(event: NostrEvent): void;
-    onEose?(): void;
     onClose?(reasons?: readonly string[]): void;
 }
 export interface NostrRelayTransport {
@@ -35,7 +34,7 @@ export interface FipsNostrRelayServiceLimits {
     maxFrameBytes: number;
 }
 export interface FipsNostrRelayServiceErrorContext {
-    operation: 'relay-event' | 'relay-eose' | 'subscription-close';
+    operation: 'relay-event' | 'subscription-close';
     peerId: string;
     subscriptionId: string;
 }
@@ -66,8 +65,6 @@ export declare class FipsNostrRelayService {
     private handle;
     private openSubscription;
     private queueRelayEvent;
-    private queueRelayEose;
-    private queueReply;
     private closeSubscription;
 }
 //# sourceMappingURL=fips-relay-service.d.ts.map

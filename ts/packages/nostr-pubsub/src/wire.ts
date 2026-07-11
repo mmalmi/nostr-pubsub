@@ -10,7 +10,6 @@ export const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES = 64 * 1024;
 export type FipsPubsubWireMessage =
   | { type: 'req'; subscriptionId: string; filters: NostrFilter[] }
   | { type: 'close'; subscriptionId: string }
-  | { type: 'eose'; subscriptionId: string; eventCount: number }
   | { type: 'event'; event: NostrVerifiedEvent; subscriptionId?: string };
 
 export class FipsPubsubWireCodec {
@@ -92,11 +91,6 @@ function encodeWireMessage(message: FipsPubsubWireMessage): unknown[] {
       return ['REQ', message.subscriptionId, ...message.filters.map(normalizeFilter)];
     case 'close':
       return ['CLOSE', message.subscriptionId];
-    case 'eose':
-      if (!isNonNegativeSafeInteger(message.eventCount)) {
-        throw invalidFrame('EOSE event count must be a non-negative safe integer');
-      }
-      return ['EOSE', message.subscriptionId, message.eventCount];
     case 'event': {
       const event = verifyNostrEvent(message.event);
       const wireEvent = {
@@ -135,16 +129,6 @@ function decodeWireMessage(value: unknown): FipsPubsubWireMessage {
       throw invalidFrame('CLOSE requires exactly an id');
     }
     return { type: 'close', subscriptionId: value[1] };
-  }
-  if (messageType === 'EOSE') {
-    if (
-      value.length !== 3 ||
-      typeof value[1] !== 'string' ||
-      !isNonNegativeSafeInteger(value[2])
-    ) {
-      throw invalidFrame('EOSE requires an id and non-negative event count');
-    }
-    return { type: 'eose', subscriptionId: value[1], eventCount: value[2] };
   }
   if (messageType === 'EVENT') {
     if (value.length === 2) {

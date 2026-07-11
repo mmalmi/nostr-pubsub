@@ -48,13 +48,6 @@ enum WireMessageVector {
         #[serde(rename = "subscriptionId")]
         subscription_id: String,
     },
-    #[serde(rename = "eose")]
-    Eose {
-        #[serde(rename = "subscriptionId")]
-        subscription_id: String,
-        #[serde(rename = "eventCount")]
-        event_count: usize,
-    },
     #[serde(rename = "event")]
     Event {
         #[serde(default, rename = "subscriptionId")]
@@ -548,10 +541,6 @@ fn wire_message_from_vector(
         WireMessageVector::Close { subscription_id } => {
             FipsPubsubWireMessage::close(SubscriptionId::new(subscription_id))
         }
-        WireMessageVector::Eose {
-            subscription_id,
-            event_count,
-        } => FipsPubsubWireMessage::eose(SubscriptionId::new(subscription_id), *event_count),
         WireMessageVector::Event {
             subscription_id,
             event,

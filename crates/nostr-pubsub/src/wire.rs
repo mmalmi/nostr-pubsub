@@ -18,10 +18,6 @@ pub enum FipsPubsubWireMessage {
     Close {
         subscription_id: SubscriptionId,
     },
-    Eose {
-        subscription_id: SubscriptionId,
-        event_count: usize,
-    },
     Event {
         subscription_id: Option<SubscriptionId>,
         event: VerifiedEvent,
@@ -40,14 +36,6 @@ impl FipsPubsubWireMessage {
     #[must_use]
     pub fn close(subscription_id: SubscriptionId) -> Self {
         Self::Close { subscription_id }
-    }
-
-    #[must_use]
-    pub fn eose(subscription_id: SubscriptionId, event_count: usize) -> Self {
-        Self::Eose {
-            subscription_id,
-            event_count,
-        }
     }
 
     #[must_use]
@@ -105,10 +93,6 @@ impl FipsPubsubWireCodec {
             FipsPubsubWireMessage::Close { subscription_id } => {
                 ClientMessage::close(subscription_id.clone()).as_json()
             }
-            FipsPubsubWireMessage::Eose {
-                subscription_id,
-                event_count,
-            } => serde_json::json!(["EOSE", subscription_id.to_string(), event_count]).to_string(),
             FipsPubsubWireMessage::Event {
                 subscription_id: None,
                 event,
@@ -145,14 +129,10 @@ impl FipsPubsubWireCodec {
         match (message_type.as_str(), field_count) {
             ("REQ", 3..) => decode_req(value),
             ("CLOSE", 2) => decode_close(value),
-            ("EOSE", 3) => decode_eose(value),
             ("EVENT", 2) => decode_published_event(value),
             ("EVENT", 3) => decode_delivered_event(value),
             ("REQ", _) => Err(invalid_frame("REQ requires an id and at least one filter")),
             ("CLOSE", _) => Err(invalid_frame("CLOSE requires exactly an id")),
-            ("EOSE", _) => Err(invalid_frame(
-                "EOSE requires an id and non-negative event count",
-            )),
             ("EVENT", _) => Err(invalid_frame(
                 "EVENT requires an event and optional subscription id",
             )),
@@ -233,9 +213,7 @@ impl FipsPubsubWireAdapter {
                     .remove(&peer_id, &subscription_id.to_string());
                 PubsubSubscriptionUpdate::Closed
             }
-            FipsPubsubWireMessage::Eose { .. } | FipsPubsubWireMessage::Event { .. } => {
-                PubsubSubscriptionUpdate::Ignored
-            }
+            FipsPubsubWireMessage::Event { .. } => PubsubSubscriptionUpdate::Ignored,
         };
         Ok(FipsPubsubInbound {
             message,
@@ -272,25 +250,6 @@ fn decode_close(value: Value) -> Result<FipsPubsubWireMessage> {
         return Err(invalid_frame("expected CLOSE message"));
     };
     Ok(FipsPubsubWireMessage::close(subscription_id.into_owned()))
-}
-
-fn decode_eose(value: Value) -> Result<FipsPubsubWireMessage> {
-    let fields = value
-        .as_array()
-        .ok_or_else(|| invalid_frame("EOSE must be a JSON array"))?;
-    let subscription_id = fields
-        .get(1)
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid_frame("EOSE subscription id must be a string"))?;
-    let event_count = fields
-        .get(2)
-        .and_then(Value::as_u64)
-        .and_then(|count| usize::try_from(count).ok())
-        .ok_or_else(|| invalid_frame("EOSE event count must be a non-negative integer"))?;
-    Ok(FipsPubsubWireMessage::eose(
-        SubscriptionId::new(subscription_id),
-        event_count,
-    ))
 }
 
 fn decode_published_event(value: Value) -> Result<FipsPubsubWireMessage> {

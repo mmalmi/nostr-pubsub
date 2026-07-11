@@ -195,12 +195,6 @@ function wireMessageFromVector(message: (typeof vectors.wireCases)[number]['mess
       return { type: 'req', subscriptionId: message.subscriptionId, filters: message.filters };
     case 'close':
       return { type: 'close', subscriptionId: message.subscriptionId };
-    case 'eose':
-      return {
-        type: 'eose',
-        subscriptionId: message.subscriptionId,
-        eventCount: message.eventCount,
-      };
     case 'event':
       return message.subscriptionId === undefined
         ? { type: 'event', event: events[message.event] }
@@ -217,8 +211,6 @@ function wireMessageSummary(message: FipsPubsubWireMessage): unknown {
     case 'req':
       return message;
     case 'close':
-      return message;
-    case 'eose':
       return message;
     case 'event':
       return {

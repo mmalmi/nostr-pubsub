@@ -220,9 +220,9 @@ impl EventBus for FipsPubsubClient {
         let deadline = Instant::now() + self.inner.options.query_timeout;
         let mut events = Vec::with_capacity(limit);
         while events.len() < limit {
-            match tokio::time::timeout_at(deadline, subscription.recv_query_item()).await {
-                Ok(Some(SubscriptionDelivery::Event(event))) => events.push(event),
-                Ok(Some(SubscriptionDelivery::Eose) | None) | Err(_) => break,
+            match tokio::time::timeout_at(deadline, subscription.recv()).await {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) | Err(_) => break,
             }
         }
         subscription.close();
@@ -239,7 +239,7 @@ impl PubsubProvider for FipsPubsubClient {
 pub struct FipsPubsubSubscription {
     subscription_id: SubscriptionId,
     key: String,
-    receiver: mpsc::Receiver<SubscriptionDelivery>,
+    receiver: mpsc::Receiver<QueryEvent>,
     inner: Arc<ClientInner>,
     closed: bool,
 }
@@ -251,25 +251,11 @@ impl FipsPubsubSubscription {
     }
 
     pub async fn recv(&mut self) -> Option<QueryEvent> {
-        loop {
-            match self.receiver.recv().await? {
-                SubscriptionDelivery::Event(event) => return Some(event),
-                SubscriptionDelivery::Eose => {}
-            }
-        }
-    }
-
-    async fn recv_query_item(&mut self) -> Option<SubscriptionDelivery> {
         self.receiver.recv().await
     }
 
     pub fn try_recv(&mut self) -> std::result::Result<QueryEvent, mpsc::error::TryRecvError> {
-        loop {
-            match self.receiver.try_recv()? {
-                SubscriptionDelivery::Event(event) => return Ok(event),
-                SubscriptionDelivery::Eose => {}
-            }
-        }
+        self.receiver.try_recv()
     }
 
     pub fn close(mut self) {
@@ -391,9 +377,6 @@ impl ClientInner {
                 ActiveSubscription {
                     filters,
                     peers: subscribed_peers,
-                    peer_event_ids: HashMap::new(),
-                    peer_eose_counts: HashMap::new(),
-                    replay_complete_sent: false,
                     recent_event_ids: HashSet::new(),
                     recent_event_order: VecDeque::new(),
                     sender,
@@ -467,56 +450,28 @@ impl ClientInner {
         {
             return;
         }
-        let Ok(message) = self.codec.decode_frame(datagram.data.as_slice()) else {
+        let Ok(FipsPubsubWireMessage::Event {
+            subscription_id: Some(subscription_id),
+            event,
+        }) = self.codec.decode_frame(datagram.data.as_slice())
+        else {
             return;
-        };
-
-        let (subscription_id, event, eose_count) = match message {
-            FipsPubsubWireMessage::Event {
-                subscription_id: Some(subscription_id),
-                event,
-            } => (subscription_id, Some(event), None),
-            FipsPubsubWireMessage::Eose {
-                subscription_id,
-                event_count,
-            } => (subscription_id, None, Some(event_count)),
-            _ => return,
         };
 
         let key = subscription_id.to_string();
         let source_npub = datagram.source_peer.npub();
+        let event_id = event.as_event().id.to_string();
         let Ok(mut subscriptions) = self.subscriptions.lock() else {
             return;
         };
         let Some(active) = subscriptions.get_mut(&key) else {
             return;
         };
-        if !active.peers.contains(&source_npub) {
-            return;
-        }
-        let Some(event) = event else {
-            active
-                .peer_eose_counts
-                .insert(source_npub, eose_count.unwrap_or_default());
-            maybe_signal_replay_complete(active);
-            return;
-        };
-        let event_id = event.as_event().id.to_string();
-        if PubsubPeerInterest::from_filters(&active.filters, &event)
-            != PubsubPeerInterest::Subscribed
+        if !active.peers.contains(&source_npub)
+            || PubsubPeerInterest::from_filters(&active.filters, &event)
+                != PubsubPeerInterest::Subscribed
+            || active.recent_event_ids.contains(&event_id)
         {
-            return;
-        }
-        let peer_events = active
-            .peer_event_ids
-            .entry(source_npub.clone())
-            .or_default();
-        if !peer_events.insert(event_id.clone()) {
-            return;
-        }
-
-        if active.recent_event_ids.contains(&event_id) {
-            maybe_signal_replay_complete(active);
             return;
         }
 
@@ -527,14 +482,11 @@ impl ClientInner {
                 active.recent_event_ids.remove(&oldest);
             }
         }
-        let _ = active
-            .sender
-            .try_send(SubscriptionDelivery::Event(QueryEvent {
-                event,
-                source: EventSource::fips_endpoint(source_npub),
-                priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-            }));
-        maybe_signal_replay_complete(active);
+        let _ = active.sender.try_send(QueryEvent {
+            event,
+            source: EventSource::fips_endpoint(source_npub),
+            priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
+        });
     }
 
     fn close_subscription(&self, key: &str) {
@@ -600,32 +552,9 @@ struct ConnectedPeer {
 struct ActiveSubscription {
     filters: Vec<Filter>,
     peers: HashSet<String>,
-    peer_event_ids: HashMap<String, HashSet<String>>,
-    peer_eose_counts: HashMap<String, usize>,
-    replay_complete_sent: bool,
     recent_event_ids: HashSet<String>,
     recent_event_order: VecDeque<String>,
-    sender: mpsc::Sender<SubscriptionDelivery>,
-}
-
-enum SubscriptionDelivery {
-    Event(QueryEvent),
-    Eose,
-}
-
-fn maybe_signal_replay_complete(active: &mut ActiveSubscription) {
-    if active.replay_complete_sent {
-        return;
-    }
-    let complete = active.peers.iter().all(|peer| {
-        active.peer_eose_counts.get(peer).is_some_and(|expected| {
-            active.peer_event_ids.get(peer).map_or(0, HashSet::len) >= *expected
-        })
-    });
-    if complete {
-        active.replay_complete_sent = true;
-        let _ = active.sender.try_send(SubscriptionDelivery::Eose);
-    }
+    sender: mpsc::Sender<QueryEvent>,
 }
 
 async fn receive_loop(
