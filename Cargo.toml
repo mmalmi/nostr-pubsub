@@ -19,7 +19,7 @@ async-trait = "0.1"
 fips-core = { version = "0.3.83", path = "../fips/crates/fips-core" }
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
-nostr-pubsub = { version = "0.1.6", path = "crates/nostr-pubsub" }
+nostr-pubsub = { version = "0.1.7", path = "crates/nostr-pubsub" }
 nostr-pubsub-social-graph = { version = "0.1.6", path = "crates/nostr-pubsub-social-graph" }
 nostr-social-graph = "0.1.2"
 nostr-social-memory = "0.1.1"

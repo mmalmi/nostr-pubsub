@@ -347,6 +347,30 @@ impl InvWantMesh {
         Ok(self.send_to_selected_peers(peers, None, &inventory))
     }
 
+    /// Cache a verified event and advertise it directly to a peer that joined
+    /// after the original publication. The normal WANT/FRAME exchange still
+    /// proves interest before the event payload is sent.
+    pub fn replay_to_peer(
+        &mut self,
+        event: Event,
+        peer_id: &str,
+        now_ms: u64,
+    ) -> Result<Vec<InvWantAction>> {
+        self.prune(now_ms);
+        let (event_id, payload_bytes) = self.validate_event(&event)?;
+        let event_kind = u16::from(event.kind);
+        self.store_event(event, now_ms);
+        Ok(vec![InvWantAction::Send {
+            peer_id: peer_id.to_string(),
+            message: InvWantWireMessage::Inventory {
+                event_id,
+                event_kind,
+                payload_bytes,
+                hop_limit: self.options.max_hops,
+            },
+        }])
+    }
+
     pub fn receive(
         &mut self,
         source_peer: &str,

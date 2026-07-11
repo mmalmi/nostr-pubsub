@@ -12,6 +12,8 @@ building blocks for:
 - inv/want content keys, inventory announcements, wants, and frames
 - a bounded signed-event `InvWantMesh` state machine with reverse wants,
   exactly-once local delivery, and configurable protocol envelopes
+- targeted cached-event replay for late peers through the same
+  inventory/WANT/frame proof
 - priority-aware peer fanout with explicit unknown-peer exploration capacity
 - peer subscription tracking so inventory is sent only after a matching filter
 - bounded FIPS payload-frame codecs for standard Nostr `REQ`/`CLOSE`/`EVENT`

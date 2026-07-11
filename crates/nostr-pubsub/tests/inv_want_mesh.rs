@@ -129,6 +129,46 @@ fn unproven_inventory_is_never_amplified() {
 }
 
 #[test]
+fn cached_event_can_be_replayed_to_a_peer_that_connected_later() {
+    let event = signed_event();
+    let event_id = event.id.to_hex();
+    let expected_payload_bytes = u32::try_from(serde_json::to_vec(&event).unwrap().len()).unwrap();
+    let mut provider = mesh();
+
+    assert!(provider.publish(event.clone(), &[], 1).unwrap().is_empty());
+    let inventory = only_message(
+        provider
+            .replay_to_peer(event, "late-peer", 20 * 60 * 1_000)
+            .unwrap(),
+    );
+    assert_eq!(
+        inventory,
+        InvWantWireMessage::Inventory {
+            event_id: event_id.clone(),
+            event_kind: 37_195,
+            payload_bytes: expected_payload_bytes,
+            hop_limit: 4,
+        }
+    );
+
+    let frame = provider
+        .receive(
+            "late-peer",
+            InvWantWireMessage::Want { event_id },
+            &[MeshPeer::new("late-peer")],
+            20 * 60 * 1_000 + 1,
+        )
+        .unwrap();
+    assert!(matches!(
+        frame.as_slice(),
+        [InvWantAction::Send {
+            peer_id,
+            message: InvWantWireMessage::Frame { .. },
+        }] if peer_id == "late-peer"
+    ));
+}
+
+#[test]
 fn behavioral_priority_reserves_fanout_for_an_unknown_peer() {
     let options = InvWantMeshOptions {
         fanout: 3,
