@@ -87,6 +87,28 @@ export {
 } from './invwant.js';
 
 export {
+  DEFAULT_INV_WANT_FANOUT,
+  DEFAULT_INV_WANT_MAX_EVENT_BYTES,
+  DEFAULT_INV_WANT_MAX_WIRE_BYTES,
+  InvWantCodec,
+  meshEventJsonBytes,
+  type InvWantWireMessage,
+} from './mesh-codec.js';
+
+export {
+  InvWantMesh,
+  defaultInvWantMeshOptions,
+  type InvWantAction,
+  type InvWantMeshOptions,
+} from './mesh.js';
+
+export {
+  meshPeer,
+  selectMeshPeers,
+  type MeshPeer,
+} from './mesh-peer.js';
+
+export {
   InMemoryEventBus,
   type EventBus,
   type PublishReport,

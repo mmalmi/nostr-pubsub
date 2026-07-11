@@ -14,7 +14,8 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsc",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && pnpm lint",
+    "lint": "node ../../scripts/check-source-size.mjs",
     "test": "vitest run"
   },
   "keywords": [

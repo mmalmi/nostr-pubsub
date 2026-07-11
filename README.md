@@ -81,9 +81,9 @@ their product-specific event interpretation in their own repos.
 The browser-ready TypeScript core lives in `ts/packages/nostr-pubsub` and builds
 as an ESM package named `nostr-pubsub`. It mirrors the Rust core primitives that
 browser apps need before wiring real transports: source route defaults, Nostr
-filter retention, bounded peer subscriptions, delivery policy, inv/want frames,
-in-memory event buses, routed queries with source policy, and the bounded FIPS
-wire boundary.
+filter retention, bounded peer subscriptions, delivery policy, the verified
+bounded `InvWantMesh` and byte-compatible `InvWantCodec`, in-memory event buses,
+routed queries with source policy, and the bounded FIPS wire boundary.
 
 Iris browser apps can later consume it with a local dependency such as:
 
@@ -94,7 +94,8 @@ Iris browser apps can later consume it with a local dependency such as:
 Interop vectors live in `ts/packages/nostr-pubsub/test-data/interop-vectors.json`
 and are read by both Vitest and Rust integration tests. Update the shared vector
 file when changing behavior that must remain compatible across Rust/FIPS peers
-and browser callers.
+and browser callers. The inv/want contract is documented in
+`docs/inv-want-wire.md`.
 
 ## Checks
 

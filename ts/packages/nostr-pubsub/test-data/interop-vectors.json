@@ -80,6 +80,42 @@
       "json": "[\"EVENT\",{\"id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"created_at\":1700000001,\"kind\":37195,\"tags\":[[\"d\",\"fips.peer\"]],\"content\":\"tampered advert\",\"sig\":\"474b0e4a07f6d0b4f583c6b881017d1c7f081335b62ad318d07d07522289543a0f520e12f5b1ecc0dbe5242bca30a134ebe4ea96c201940684c838e799def653\"}]"
     }
   ],
+  "meshWireCases": [
+    {
+      "name": "inventory envelope",
+      "protocol": "iris.fips.pubsub",
+      "version": 1,
+      "message": {
+        "type": "inventory",
+        "eventId": "59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6",
+        "eventKind": 37195,
+        "payloadBytes": 374,
+        "hopLimit": 4
+      },
+      "json": "{\"protocol\":\"iris.fips.pubsub\",\"version\":1,\"message\":{\"type\":\"inventory\",\"event_id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",\"event_kind\":37195,\"payload_bytes\":374,\"hop_limit\":4}}"
+    },
+    {
+      "name": "want envelope",
+      "protocol": "iris.fips.pubsub",
+      "version": 1,
+      "message": {
+        "type": "want",
+        "eventId": "59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6"
+      },
+      "json": "{\"protocol\":\"iris.fips.pubsub\",\"version\":1,\"message\":{\"type\":\"want\",\"event_id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\"}}"
+    },
+    {
+      "name": "signed event frame envelope",
+      "protocol": "iris.fips.pubsub",
+      "version": 1,
+      "message": {
+        "type": "frame",
+        "eventId": "59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6",
+        "event": "fipsAdvert"
+      },
+      "json": "{\"protocol\":\"iris.fips.pubsub\",\"version\":1,\"message\":{\"type\":\"frame\",\"event_id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",\"event\":{\"id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"created_at\":1700000001,\"kind\":37195,\"tags\":[[\"d\",\"fips.peer\"]],\"content\":\"fips advert\",\"sig\":\"474b0e4a07f6d0b4f583c6b881017d1c7f081335b62ad318d07d07522289543a0f520e12f5b1ecc0dbe5242bca30a134ebe4ea96c201940684c838e799def653\"}}}"
+    }
+  ],
   "routeDefaults": {
     "expectedPriorities": {
       "localIndex": 300,

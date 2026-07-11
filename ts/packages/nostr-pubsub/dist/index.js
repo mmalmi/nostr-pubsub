@@ -5,6 +5,9 @@ export { cloneFilter, createEventRetentionPolicy, filterLimit, filtersMatch, ret
 export { PubsubPeerSubscriptionStore, createPeerSubscription, defaultPubsubSubscriptionLimits, } from './subscription.js';
 export { deliveryActionForEvent, deliveryActionForPeer, inventoryToPeersDeliveryPolicy, inventoryToSubscribersDeliveryPolicy, pushSubscribedDeliveryPolicy, } from './delivery.js';
 export { DEFAULT_INV_WANT_HOP_LIMIT, createContentKey, createFrame, createInventory, createWant, inventoryFromFrame, invWantMessageKey, invWantMessageStreamId, wantFromInventory, } from './invwant.js';
+export { DEFAULT_INV_WANT_FANOUT, DEFAULT_INV_WANT_MAX_EVENT_BYTES, DEFAULT_INV_WANT_MAX_WIRE_BYTES, InvWantCodec, meshEventJsonBytes, } from './mesh-codec.js';
+export { InvWantMesh, defaultInvWantMeshOptions, } from './mesh.js';
+export { meshPeer, selectMeshPeers, } from './mesh-peer.js';
 export { InMemoryEventBus, } from './event-bus.js';
 export { fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRoutePriority, withRouteReason, } from './routing.js';
 export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FipsPubsubWireAdapter, FipsPubsubWireCodec, } from './wire.js';

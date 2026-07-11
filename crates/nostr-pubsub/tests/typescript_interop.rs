@@ -5,11 +5,11 @@ use nostr::Event;
 use nostr_pubsub::{
     DEFAULT_INV_WANT_HOP_LIMIT, EventBus, EventPolicyContext, EventRetentionPolicy, Filter,
     FipsPubsubWireAdapter, FipsPubsubWireCodec, FipsPubsubWireMessage, InMemoryEventBus,
-    InvWantMessage, PolicyDecision, PubsubContentKey, PubsubDeliveryAction, PubsubDeliveryPolicy,
-    PubsubFrame, PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy,
-    PubsubSubscriptionLimits, PubsubSubscriptionUpdate, QueryOptions, RouteQuerySource,
-    RoutedQueryOptions, SourceId, SourcePolicyContext, SourceRoute, SubscriptionId, VerifiedEvent,
-    query_routes_with_policy,
+    InvWantCodec, InvWantMessage, InvWantWireMessage, PolicyDecision, PubsubContentKey,
+    PubsubDeliveryAction, PubsubDeliveryPolicy, PubsubFrame, PubsubPeerInterest,
+    PubsubPeerSubscriptionStore, PubsubPolicy, PubsubSubscriptionLimits, PubsubSubscriptionUpdate,
+    QueryOptions, RouteQuerySource, RoutedQueryOptions, SourceId, SourcePolicyContext, SourceRoute,
+    SubscriptionId, VerifiedEvent, query_routes_with_policy,
 };
 use serde::Deserialize;
 
@@ -19,6 +19,7 @@ struct InteropVectors {
     events: BTreeMap<String, Event>,
     wire_cases: Vec<WireCase>,
     invalid_wire_cases: Vec<InvalidWireCase>,
+    mesh_wire_cases: Vec<MeshWireCase>,
     route_defaults: RouteDefaults,
     retention_cases: Vec<RetentionCase>,
     peer_subscription_case: PeerSubscriptionCase,
@@ -60,6 +61,43 @@ enum WireMessageVector {
 struct InvalidWireCase {
     name: String,
     json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshWireCase {
+    name: String,
+    protocol: String,
+    version: u8,
+    message: MeshWireMessageVector,
+    json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+enum MeshWireMessageVector {
+    #[serde(rename = "inventory")]
+    Inventory {
+        #[serde(rename = "eventId")]
+        event_id: String,
+        #[serde(rename = "eventKind")]
+        event_kind: u16,
+        #[serde(rename = "payloadBytes")]
+        payload_bytes: u32,
+        #[serde(rename = "hopLimit")]
+        hop_limit: u8,
+    },
+    #[serde(rename = "want")]
+    Want {
+        #[serde(rename = "eventId")]
+        event_id: String,
+    },
+    #[serde(rename = "frame")]
+    Frame {
+        #[serde(rename = "eventId")]
+        event_id: String,
+        event: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,6 +302,31 @@ fn fips_wire_codec_matches_typescript_vectors() {
         );
         assert_eq!(
             codec.decode_frame(test_case.json.as_bytes()).unwrap(),
+            expected,
+            "{}",
+            test_case.name
+        );
+    }
+}
+
+#[test]
+fn inv_want_codec_matches_typescript_vectors() {
+    let vectors = load_vectors();
+    for test_case in &vectors.mesh_wire_cases {
+        let expected = mesh_wire_message_from_vector(&vectors, &test_case.message);
+        let codec = InvWantCodec::new(
+            test_case.protocol.clone(),
+            test_case.version,
+            test_case.json.len(),
+        );
+        assert_eq!(
+            codec.encode(&expected).unwrap(),
+            test_case.json.as_bytes(),
+            "{}",
+            test_case.name
+        );
+        assert_eq!(
+            codec.decode(test_case.json.as_bytes()).unwrap(),
             expected,
             "{}",
             test_case.name
@@ -556,6 +619,32 @@ fn wire_message_from_vector(
                 },
             )
         }
+    }
+}
+
+fn mesh_wire_message_from_vector(
+    vectors: &InteropVectors,
+    message: &MeshWireMessageVector,
+) -> InvWantWireMessage {
+    match message {
+        MeshWireMessageVector::Inventory {
+            event_id,
+            event_kind,
+            payload_bytes,
+            hop_limit,
+        } => InvWantWireMessage::Inventory {
+            event_id: event_id.clone(),
+            event_kind: *event_kind,
+            payload_bytes: *payload_bytes,
+            hop_limit: *hop_limit,
+        },
+        MeshWireMessageVector::Want { event_id } => InvWantWireMessage::Want {
+            event_id: event_id.clone(),
+        },
+        MeshWireMessageVector::Frame { event_id, event } => InvWantWireMessage::Frame {
+            event_id: event_id.clone(),
+            event: Box::new(vectors.events.get(event).unwrap().clone()),
+        },
     }
 }
 
