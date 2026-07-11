@@ -4,7 +4,7 @@ Neutral Nostr event and source routing primitives for relay, mesh, local-index,
 and test backends.
 
 This crate re-exports standard `nostr` protocol message types for normal
-`REQ`/`CLOSE` subscriptions and `EVENT` delivery. It adds transport-neutral
+`REQ`/`CLOSE` subscriptions, `EVENT` delivery, and counted `EOSE` replay completion. It adds transport-neutral
 building blocks for:
 
 - bounded event retention policies based on Nostr filters
@@ -16,7 +16,8 @@ building blocks for:
   inventory/WANT/frame proof
 - priority-aware peer fanout with explicit unknown-peer exploration capacity
 - peer subscription tracking so inventory is sent only after a matching filter
-- bounded FIPS payload-frame codecs for standard Nostr `REQ`/`CLOSE`/`EVENT`
+- bounded FIPS payload-frame codecs for Nostr `REQ`/`CLOSE`/`EVENT` plus
+  `["EOSE", subscription_id, event_count]` completion that tolerates datagram reordering
 
 `VerifiedEvent` verifies both the event ID and Schnorr signature. The FIPS wire
 adapter updates bounded peer subscriptions and never returns an unverified

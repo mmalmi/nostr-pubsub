@@ -98,6 +98,8 @@ export class FipsNostrRelayService {
                 this.adapter.applyInbound(peerId, message);
                 this.closeSubscription(peerId, message.subscriptionId);
                 return;
+            case 'eose':
+                throw serviceError('client cannot send EOSE');
             case 'event':
                 if (message.subscriptionId !== undefined) {
                     throw serviceError('client cannot publish a subscription-addressed EVENT');
@@ -141,12 +143,16 @@ export class FipsNostrRelayService {
             pendingReplyCount: 0,
             replyChain: Promise.resolve(),
             backpressureReported: false,
+            eoseSent: false,
         };
         subscriptions.set(message.subscriptionId, active);
         try {
             const relaySubscription = this.relay.subscribe(filters.map(cloneFilter), {
                 onEvent: (event) => {
                     this.queueRelayEvent(peerId, message.subscriptionId, active.token, event);
+                },
+                onEose: () => {
+                    this.queueRelayEose(peerId, message.subscriptionId, active.token);
                 },
                 onClose: () => {
                     this.closeSubscription(peerId, message.subscriptionId, active.token, false);
@@ -182,7 +188,6 @@ export class FipsNostrRelayService {
             return;
         if (active.recentEventIds.has(verified.id))
             return;
-        rememberEventId(active, verified.id);
         if (active.pendingReplyCount >= MAX_PENDING_REPLIES_PER_SUBSCRIPTION) {
             if (!active.backpressureReported) {
                 active.backpressureReported = true;
@@ -194,11 +199,27 @@ export class FipsNostrRelayService {
             }
             return;
         }
+        rememberEventId(active, verified.id);
         const frame = this.adapter.encodeOutbound({
             type: 'event',
             subscriptionId,
             event: verified,
         });
+        this.queueReply(peerId, subscriptionId, active, frame, 'relay-event');
+    }
+    queueRelayEose(peerId, subscriptionId, token) {
+        const active = this.peers.get(peerId)?.get(subscriptionId);
+        if (active === undefined || active.token !== token || active.eoseSent)
+            return;
+        active.eoseSent = true;
+        const frame = this.adapter.encodeOutbound({
+            type: 'eose',
+            subscriptionId,
+            eventCount: active.recentEventIds.size,
+        });
+        this.queueReply(peerId, subscriptionId, active, frame, 'relay-eose');
+    }
+    queueReply(peerId, subscriptionId, active, frame, operation) {
         active.pendingReplyCount += 1;
         const task = active.replyChain.catch(() => { }).then(async () => {
             if (this.peers.get(peerId)?.get(subscriptionId) !== active)
@@ -209,7 +230,7 @@ export class FipsNostrRelayService {
         this.pendingReplies.add(task);
         void task
             .catch((error) => {
-            this.onError(asError(error), { operation: 'relay-event', peerId, subscriptionId });
+            this.onError(asError(error), { operation, peerId, subscriptionId });
         })
             .finally(() => {
             active.pendingReplyCount -= 1;

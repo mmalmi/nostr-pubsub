@@ -70,6 +70,11 @@ function encodeWireMessage(message) {
             return ['REQ', message.subscriptionId, ...message.filters.map(normalizeFilter)];
         case 'close':
             return ['CLOSE', message.subscriptionId];
+        case 'eose':
+            if (!isNonNegativeSafeInteger(message.eventCount)) {
+                throw invalidFrame('EOSE event count must be a non-negative safe integer');
+            }
+            return ['EOSE', message.subscriptionId, message.eventCount];
         case 'event': {
             const event = verifyNostrEvent(message.event);
             const wireEvent = {
@@ -108,6 +113,14 @@ function decodeWireMessage(value) {
             throw invalidFrame('CLOSE requires exactly an id');
         }
         return { type: 'close', subscriptionId: value[1] };
+    }
+    if (messageType === 'EOSE') {
+        if (value.length !== 3 ||
+            typeof value[1] !== 'string' ||
+            !isNonNegativeSafeInteger(value[2])) {
+            throw invalidFrame('EOSE requires an id and non-negative event count');
+        }
+        return { type: 'eose', subscriptionId: value[1], eventCount: value[2] };
     }
     if (messageType === 'EVENT') {
         if (value.length === 2) {

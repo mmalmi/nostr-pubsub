@@ -276,7 +276,7 @@ fn spawn_peer_service(
                         .expect("send unrelated reply");
                     let reply = codec
                         .encode_frame(&FipsPubsubWireMessage::deliver(
-                            subscription_id,
+                            subscription_id.clone(),
                             replay_event.clone(),
                         ))
                         .expect("encode subscribed reply");
@@ -289,6 +289,18 @@ fn spawn_peer_service(
                         )
                         .await
                         .expect("send subscribed reply");
+                    let eose = codec
+                        .encode_frame(&FipsPubsubWireMessage::eose(subscription_id, 1))
+                        .expect("encode replay completion");
+                    endpoint
+                        .send_datagram(
+                            datagram.source_peer,
+                            FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+                            datagram.source_port,
+                            eose,
+                        )
+                        .await
+                        .expect("send replay completion");
                 }
             }
         }

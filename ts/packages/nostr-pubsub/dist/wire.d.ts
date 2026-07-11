@@ -9,6 +9,10 @@ export type FipsPubsubWireMessage = {
     type: 'close';
     subscriptionId: string;
 } | {
+    type: 'eose';
+    subscriptionId: string;
+    eventCount: number;
+} | {
     type: 'event';
     event: NostrVerifiedEvent;
     subscriptionId?: string;
