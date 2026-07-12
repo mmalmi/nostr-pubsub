@@ -16,6 +16,9 @@ peers to be omitted. It also restores persisted rating state and exposes the
 coalesced local rating events that a mesh runtime should publish.
 The composed author policy is transport-neutral: applications can apply it to
 relay ingress and other providers as well as FIPS frames.
+Maintenance also expires bounded reputation and publication-cadence state;
+the periodic FIPS snapshot creates fresh local observations, while pubsub
+subscriptions and replay distribute rating events that already exist.
 
 This crate never opens a Nostr relay socket and never falls back to one. Select
 `nostr-pubsub-relay` explicitly when direct relay access is desired.

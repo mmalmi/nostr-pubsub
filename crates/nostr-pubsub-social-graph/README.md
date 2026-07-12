@@ -19,4 +19,7 @@ coalesces local machine ratings before publication. Its shared policy bundle
 uses the same projection for mesh peers and signed event authors, so known-bad
 authors can be rejected before cache/fanout regardless of whether their event
 arrived through FIPS, a relay, or another transport. Unknown authors remain
-admitted by default.
+admitted by default. Ratings expire after 30 days, timestamps more than ten
+minutes in the future are rejected, and the projection retains at most 4,096
+rating keys total and 1,024 per rater. Publisher cadence state uses the same
+age window and per-rater bound.

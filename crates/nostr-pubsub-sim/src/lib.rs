@@ -448,6 +448,9 @@ fn shared_reputation_peers(
         .copied()
         .find(|peer| *peer < config.attacker_count);
     let mut ratings = Vec::new();
+    let rating_time_base = Timestamp::now()
+        .as_secs()
+        .saturating_sub(u64::try_from(config.node_count).unwrap_or(u64::MAX));
     for peer in candidates.iter().copied() {
         if Some(peer) == first_honest_unknown || Some(peer) == first_attacker_unknown {
             continue;
@@ -457,7 +460,7 @@ fn shared_reputation_peers(
             &peer_ids[node_index],
             &peer_ids[peer],
             if peer < config.attacker_count { 0 } else { 100 },
-            u64::try_from(peer).unwrap_or(u64::MAX).saturating_add(1),
+            rating_time_base.saturating_add(u64::try_from(peer).unwrap_or(u64::MAX)),
         )?);
     }
     reputation.replay(&ratings).map_err(pubsub_error)?;

@@ -150,6 +150,8 @@ impl FipsPubsubPolicy {
     }
 
     pub async fn maintenance_events(&mut self, now_ms: u64) -> Result<Vec<Event>> {
+        self.reputation.reputation.prune(now_ms / 1_000)?;
+        self.reputation.publisher.prune(now_ms);
         let interval_ms = duration_ms(self.reputation.evaluation_interval());
         let Some(next_evaluation_ms) = self.next_evaluation_ms else {
             self.next_evaluation_ms = Some(now_ms.saturating_add(interval_ms));

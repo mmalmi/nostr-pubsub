@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nostr::{Event, Kind};
 use nostr_pubsub::{
@@ -13,6 +14,10 @@ use nostr_social_memory::{RATING_KIND, rating_from_event};
 use crate::{SocialGraphPolicy, SocialGraphPolicyConfig};
 
 pub const DEFAULT_PEER_RATING_SCOPE: &str = "fips.peer";
+pub const PEER_RATING_MAX_AGE: Duration = Duration::from_hours(720);
+pub const PEER_RATING_MAX_FUTURE_SKEW: Duration = Duration::from_mins(10);
+pub const PEER_RATING_MAX_ENTRIES: usize = 4_096;
+pub const PEER_RATING_MAX_ENTRIES_PER_RATER: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerReputationConfig {
@@ -129,31 +134,48 @@ impl PeerReputation {
     }
 
     pub fn ingest_event(&mut self, event: &Event) -> Result<bool> {
-        if !self.consider_event(event) {
-            return Ok(false);
+        let now = now_unix_secs();
+        let pruned = self.prune_memory(now);
+        let accepted = self.consider_event(event, now);
+        if pruned > 0 || accepted {
+            self.rebuild()?;
         }
-        self.rebuild()?;
-        Ok(true)
+        Ok(accepted)
     }
 
     pub fn replay<'a>(&mut self, events: impl IntoIterator<Item = &'a Event>) -> Result<usize> {
+        let now = now_unix_secs();
+        let pruned = self.prune_memory(now);
         let mut changed = 0usize;
         for event in events {
-            changed += usize::from(self.consider_event(event));
+            changed += usize::from(self.consider_event(event, now));
         }
-        if changed > 0 {
+        if pruned > 0 || changed > 0 {
             self.rebuild()?;
         }
         Ok(changed)
     }
 
-    fn consider_event(&mut self, event: &Event) -> bool {
+    /// Removes expired, far-future, and over-budget ratings, then rebuilds the
+    /// shared policy projection when anything was forgotten.
+    pub fn prune(&mut self, now_secs: u64) -> Result<usize> {
+        let removed = self.prune_memory(now_secs);
+        if removed > 0 {
+            self.rebuild()?;
+        }
+        Ok(removed)
+    }
+
+    fn consider_event(&mut self, event: &Event, now_secs: u64) -> bool {
         if event.kind != Kind::Custom(RATING_KIND) || event.verify().is_err() {
             return false;
         }
         let Ok(mut rating) = rating_from_event(event) else {
             return false;
         };
+        if !rating_time_is_valid(rating.created_at, now_secs) {
+            return false;
+        }
         if rating.scope.as_deref() != Some(self.scope.as_str()) {
             return false;
         }
@@ -179,9 +201,67 @@ impl PeerReputation {
         }) {
             return false;
         }
+        self.latest.insert(
+            key.clone(),
+            StoredPeerRating {
+                event_id: event_id.clone(),
+                rating,
+            },
+        );
+        self.enforce_entry_limits();
         self.latest
-            .insert(key, StoredPeerRating { event_id, rating });
-        true
+            .get(&key)
+            .is_some_and(|stored| stored.event_id == event_id)
+    }
+
+    fn prune_memory(&mut self, now_secs: u64) -> usize {
+        let before = self.latest.len();
+        self.latest
+            .retain(|_, stored| rating_time_is_valid(stored.rating.created_at, now_secs));
+        self.enforce_entry_limits();
+        before.saturating_sub(self.latest.len())
+    }
+
+    fn enforce_entry_limits(&mut self) {
+        let mut by_rater = BTreeMap::<String, Vec<(u64, String, PeerRatingKey)>>::new();
+        for (key, stored) in &self.latest {
+            by_rater.entry(key.rater.clone()).or_default().push((
+                stored.rating.created_at,
+                stored.event_id.clone(),
+                key.clone(),
+            ));
+        }
+        let mut remove = Vec::new();
+        for entries in by_rater.values_mut() {
+            entries.sort();
+            let excess = entries
+                .len()
+                .saturating_sub(PEER_RATING_MAX_ENTRIES_PER_RATER);
+            remove.extend(entries.iter().take(excess).map(|(_, _, key)| key.clone()));
+        }
+        for key in remove {
+            self.latest.remove(&key);
+        }
+
+        let excess = self.latest.len().saturating_sub(PEER_RATING_MAX_ENTRIES);
+        if excess == 0 {
+            return;
+        }
+        let mut oldest = self
+            .latest
+            .iter()
+            .map(|(key, stored)| {
+                (
+                    stored.rating.created_at,
+                    stored.event_id.clone(),
+                    key.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        oldest.sort();
+        for (_, _, key) in oldest.into_iter().take(excess) {
+            self.latest.remove(&key);
+        }
     }
 
     fn rebuild(&self) -> Result<()> {
@@ -309,6 +389,7 @@ impl PeerRatingPublisher {
             }
             publisher.record(publication, published_at_ms);
         }
+        publisher.prune(now_unix_secs().saturating_mul(1_000));
         Ok(publisher)
     }
 
@@ -354,6 +435,34 @@ impl PeerRatingPublisher {
         true
     }
 
+    /// Forgets publication cadence for peers that have not produced a local
+    /// rating within the shared rating-retention window.
+    pub fn prune(&mut self, now_ms: u64) -> usize {
+        let before = self.published.len();
+        let max_age_ms = duration_ms(PEER_RATING_MAX_AGE);
+        let max_future_skew_ms = duration_ms(PEER_RATING_MAX_FUTURE_SKEW);
+        self.published.retain(|_, publication| {
+            publication.published_at_ms <= now_ms.saturating_add(max_future_skew_ms)
+                && now_ms.saturating_sub(publication.published_at_ms) <= max_age_ms
+        });
+        let excess = self
+            .published
+            .len()
+            .saturating_sub(PEER_RATING_MAX_ENTRIES_PER_RATER);
+        if excess > 0 {
+            let mut oldest = self
+                .published
+                .iter()
+                .map(|(subject, publication)| (publication.published_at_ms, subject.clone()))
+                .collect::<Vec<_>>();
+            oldest.sort();
+            for (_, subject) in oldest.into_iter().take(excess) {
+                self.published.remove(&subject);
+            }
+        }
+        before.saturating_sub(self.published.len())
+    }
+
     fn publication(&self, event: &Event) -> Option<RatingPublication> {
         if event.kind != Kind::Custom(RATING_KIND)
             || event.verify().is_err()
@@ -397,6 +506,18 @@ fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn rating_time_is_valid(created_at: u64, now_secs: u64) -> bool {
+    created_at <= now_secs.saturating_add(PEER_RATING_MAX_FUTURE_SKEW.as_secs())
+        && now_secs.saturating_sub(created_at) <= PEER_RATING_MAX_AGE.as_secs()
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn parse_pubkey(value: &str, field: &str) -> Result<String> {
     PublicKey::parse(value)
         .map(|pubkey| pubkey.to_hex())
@@ -421,6 +542,7 @@ mod tests {
         let unknown = Keys::generate();
         let bad = Keys::generate();
         let root_hex = root.public_key().to_hex();
+        let now = now_unix_secs();
         let (mut reputation, policy) = PeerReputation::new(
             &root.public_key().to_bech32().expect("root npub"),
             PeerReputationConfig::default(),
@@ -440,7 +562,7 @@ mod tests {
                     &root_hex,
                     &good.public_key().to_hex(),
                     100,
-                    1
+                    now.saturating_sub(1),
                 ))
                 .expect("good rating")
         );
@@ -456,7 +578,7 @@ mod tests {
                     &root_hex,
                     &bad.public_key().to_hex(),
                     0,
-                    2
+                    now,
                 ))
                 .expect("bad rating")
         );
@@ -476,13 +598,14 @@ mod tests {
         let root_hex = root.public_key().to_hex();
         let peer_hex = peer.public_key().to_hex();
         let peer_npub = peer.public_key().to_bech32().expect("peer npub");
+        let now = now_unix_secs();
         let (mut reputation, policy) = PeerReputation::new(
             &root.public_key().to_bech32().expect("root npub"),
             PeerReputationConfig::default(),
         )
         .expect("peer reputation");
 
-        let forged = rating_event(&attacker, &root_hex, &peer_hex, 0, 1);
+        let forged = rating_event(&attacker, &root_hex, &peer_hex, 0, now.saturating_sub(2));
         assert!(!reputation.ingest_event(&forged).expect("forged rating"));
         assert!(
             policy
@@ -492,11 +615,11 @@ mod tests {
                 .is_unknown()
         );
 
-        let negative = rating_event(&root, &root_hex, &peer_hex, 0, 2);
+        let negative = rating_event(&root, &root_hex, &peer_hex, 0, now.saturating_sub(1));
         assert!(reputation.ingest_event(&negative).expect("negative rating"));
         assert_eq!(policy.select_mesh_peer(&peer_npub).expect("negative"), None);
 
-        let recovered = rating_event(&root, &root_hex, &peer_hex, 100, 3);
+        let recovered = rating_event(&root, &root_hex, &peer_hex, 100, now);
         assert!(reputation.ingest_event(&recovered).expect("recovery"));
         assert!(
             policy
@@ -516,6 +639,7 @@ mod tests {
         let unknown = Keys::generate();
         let bad = Keys::generate();
         let root_hex = root.public_key().to_hex();
+        let now = now_unix_secs();
         let (mut reputation, policies) = PeerReputation::new(
             &root.public_key().to_bech32().expect("root npub"),
             PeerReputationConfig::default(),
@@ -527,7 +651,7 @@ mod tests {
                 &root_hex,
                 &good.public_key().to_hex(),
                 100,
-                1,
+                now.saturating_sub(1),
             ))
             .expect("good rating");
         reputation
@@ -536,7 +660,7 @@ mod tests {
                 &root_hex,
                 &bad.public_key().to_hex(),
                 0,
-                2,
+                now,
             ))
             .expect("bad rating");
 
@@ -602,6 +726,183 @@ mod tests {
         assert!(
             publisher
                 .should_publish_event(&negative, 1_001 + min_interval_ms + refresh_interval_ms)
+        );
+    }
+
+    #[test]
+    fn reputation_rejects_expired_and_far_future_ratings() {
+        let root = Keys::generate();
+        let subject = Keys::generate();
+        let root_hex = root.public_key().to_hex();
+        let subject_hex = subject.public_key().to_hex();
+        let now = now_unix_secs();
+        let (mut reputation, policy) =
+            PeerReputation::new(&root_hex, PeerReputationConfig::default())
+                .expect("peer reputation");
+
+        let expired = rating_event(
+            &root,
+            &root_hex,
+            &subject_hex,
+            0,
+            now.saturating_sub(PEER_RATING_MAX_AGE.as_secs() + 1),
+        );
+        assert!(!reputation.ingest_event(&expired).expect("expired rating"));
+
+        let future = rating_event(
+            &root,
+            &root_hex,
+            &subject_hex,
+            0,
+            now.saturating_add(PEER_RATING_MAX_FUTURE_SKEW.as_secs() + 1),
+        );
+        assert!(!reputation.ingest_event(&future).expect("future rating"));
+        assert!(
+            policy
+                .select_mesh_peer(&subject_hex)
+                .expect("unknown policy")
+                .expect("rejected ratings leave subject unknown")
+                .is_unknown()
+        );
+    }
+
+    #[test]
+    fn reputation_prune_forgets_stale_policy_state() {
+        let root = Keys::generate();
+        let subject = Keys::generate();
+        let root_hex = root.public_key().to_hex();
+        let subject_hex = subject.public_key().to_hex();
+        let subject_npub = subject.public_key().to_bech32().expect("subject npub");
+        let created_at = now_unix_secs();
+        let (mut reputation, policy) =
+            PeerReputation::new(&root_hex, PeerReputationConfig::default())
+                .expect("peer reputation");
+
+        assert!(
+            reputation
+                .ingest_event(&rating_event(&root, &root_hex, &subject_hex, 0, created_at,))
+                .expect("negative rating")
+        );
+        assert_eq!(
+            policy.select_mesh_peer(&subject_npub).expect("negative"),
+            None
+        );
+
+        assert_eq!(
+            reputation
+                .prune(created_at + PEER_RATING_MAX_AGE.as_secs() + 1)
+                .expect("prune reputation"),
+            1
+        );
+        assert!(
+            policy
+                .select_mesh_peer(&subject_npub)
+                .expect("forgotten policy")
+                .expect("forgotten peer is eligible again")
+                .is_unknown()
+        );
+    }
+
+    #[test]
+    fn publisher_prune_forgets_stale_subjects() {
+        let root = Keys::generate();
+        let subject = Keys::generate().public_key().to_hex();
+        let root_hex = root.public_key().to_hex();
+        let mut publisher = PeerRatingPublisher::new(
+            &root_hex,
+            DEFAULT_PEER_RATING_SCOPE,
+            PeerRatingPublisherConfig::default(),
+        )
+        .expect("publisher");
+        let event = rating_event_with_samples(&root, &root_hex, &subject, 80, 1, 3);
+
+        assert!(publisher.record_published_event(&event, 1_000));
+        assert_eq!(
+            publisher.prune(1_000 + duration_ms(PEER_RATING_MAX_AGE) + 1),
+            1
+        );
+        assert!(
+            publisher.should_publish_event(&event, 1_000 + duration_ms(PEER_RATING_MAX_AGE) + 1)
+        );
+    }
+
+    #[test]
+    fn reputation_enforces_total_and_per_rater_bounds() {
+        let root = Keys::generate().public_key().to_hex();
+        let (mut reputation, _) =
+            PeerReputation::new(&root, PeerReputationConfig::default()).expect("reputation");
+
+        for index in 0..=PEER_RATING_MAX_ENTRIES_PER_RATER {
+            insert_stored_rating(&mut reputation, "one-rater", index, index as u64);
+        }
+        reputation.enforce_entry_limits();
+        assert_eq!(
+            reputation
+                .latest
+                .keys()
+                .filter(|key| key.rater == "one-rater")
+                .count(),
+            PEER_RATING_MAX_ENTRIES_PER_RATER
+        );
+
+        reputation.latest.clear();
+        for index in 0..=PEER_RATING_MAX_ENTRIES {
+            insert_stored_rating(
+                &mut reputation,
+                &format!("rater-{index}"),
+                index,
+                index as u64,
+            );
+        }
+        reputation.enforce_entry_limits();
+        assert_eq!(reputation.latest.len(), PEER_RATING_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn publisher_enforces_subject_bound() {
+        let root = Keys::generate().public_key().to_hex();
+        let mut publisher = PeerRatingPublisher::new(
+            &root,
+            DEFAULT_PEER_RATING_SCOPE,
+            PeerRatingPublisherConfig::default(),
+        )
+        .expect("publisher");
+        let now = duration_ms(PEER_RATING_MAX_AGE);
+        for index in 0..=PEER_RATING_MAX_ENTRIES_PER_RATER {
+            publisher.published.insert(
+                format!("subject-{index}"),
+                PublishedPeerRating {
+                    score: 0,
+                    class: PeerRatingClass::Neutral,
+                    published_at_ms: now.saturating_sub(index as u64),
+                },
+            );
+        }
+
+        assert_eq!(publisher.prune(now), 1);
+        assert_eq!(publisher.published.len(), PEER_RATING_MAX_ENTRIES_PER_RATER);
+    }
+
+    fn insert_stored_rating(
+        reputation: &mut PeerReputation,
+        rater: &str,
+        index: usize,
+        created_at: u64,
+    ) {
+        let subject = format!("subject-{index}");
+        let mut rating = Rating::new(rater, &subject, 50, 0, 100);
+        rating.scope = Some(DEFAULT_PEER_RATING_SCOPE.to_string());
+        rating.created_at = created_at;
+        reputation.latest.insert(
+            PeerRatingKey {
+                rater: rater.to_string(),
+                subject,
+                scope: DEFAULT_PEER_RATING_SCOPE.to_string(),
+            },
+            StoredPeerRating {
+                event_id: format!("event-{index}"),
+                rating,
+            },
         );
     }
 
