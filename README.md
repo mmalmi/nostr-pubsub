@@ -65,7 +65,8 @@ than the first peerfinding path.
   inv/want types, plus the transport-blind provider interface and explicit
   `local-only` / `direct-relay` modes.
 - `nostr-pubsub-fips`: local-only `FipsEndpoint` provider over authenticated
-  Ethernet peers and FIPS service port 7368.
+  connected peers and FIPS service port 7368, with bounded replay for late
+  subscribers.
 - `nostr-pubsub-relay`: optional `nostr-sdk` backend for actual Nostr relays.
 - `nostr-pubsub-sim`: deterministic adversarial simulations that execute the
   production `InvWantMesh` and codec across up to thousands of virtual peers.

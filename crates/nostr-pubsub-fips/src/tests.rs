@@ -6,7 +6,7 @@ use fips_core::{
     Config, FipsEndpoint, Identity, IdentityConfig, SimNetwork, SimTransportConfig,
     register_sim_network, unregister_sim_network,
 };
-use nostr::{EventBuilder, Filter, Keys, Kind};
+use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, TagKind};
 use nostr_pubsub::{
     EventBus, EventSourceKind, PolicyDecision, PubsubProvider, QueryOptions, VerifiedEvent,
 };
@@ -134,6 +134,167 @@ async fn two_fips_endpoints_query_publish_and_close_over_service_port() {
     endpoint_a.shutdown().await.expect("shutdown endpoint A");
     endpoint_b.shutdown().await.expect("shutdown endpoint B");
     unregister_sim_network(&network_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_fips_peers_subscribe_and_receive_cached_update_announcements() {
+    let network_id = format!("nostr-pubsub-fips-updates-{}", std::process::id());
+    let (endpoint_a, endpoint_b, client_a, client_b) = connected_update_clients(&network_id).await;
+
+    let release_keys = Keys::generate();
+    let tree_name = "iris-chat-releases";
+    let announcement = VerifiedEvent::try_from(
+        EventBuilder::new(Kind::Custom(30_064), "")
+            .tags([
+                Tag::identifier(tree_name),
+                Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                    ["hashtree"],
+                ),
+                Tag::custom(TagKind::Custom("hash".into()), ["11".repeat(32)]),
+            ])
+            .sign_with_keys(&release_keys)
+            .expect("sign update announcement"),
+    )
+    .expect("verify update announcement");
+    client_b
+        .publish(
+            announcement.clone(),
+            nostr_pubsub::EventSource::local_index("release"),
+        )
+        .await
+        .expect("publish update announcement");
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(30_064))
+        .author(release_keys.public_key())
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::D),
+            tree_name.to_string(),
+        );
+    let mut subscription = client_a
+        .subscribe(vec![filter])
+        .await
+        .expect("subscribe to release tree");
+    let received = timeout(Duration::from_secs(2), subscription.recv())
+        .await
+        .expect("update announcement timeout")
+        .expect("subscription remains open");
+
+    assert_eq!(received.event, announcement);
+    assert_eq!(received.source.kind, EventSourceKind::FipsEndpoint);
+    assert_eq!(received.source.id.as_str(), endpoint_b.npub());
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if client_b
+                .peer_subscription_count()
+                .expect("peer subscription count")
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("publisher observes peer subscription");
+
+    let next_announcement = VerifiedEvent::try_from(
+        EventBuilder::new(Kind::Custom(30_064), "")
+            .tags([
+                Tag::identifier(tree_name),
+                Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                    ["hashtree"],
+                ),
+                Tag::custom(TagKind::Custom("hash".into()), ["22".repeat(32)]),
+            ])
+            .sign_with_keys(&release_keys)
+            .expect("sign next update announcement"),
+    )
+    .expect("verify next update announcement");
+    client_b
+        .publish(
+            next_announcement.clone(),
+            nostr_pubsub::EventSource::local_index("release"),
+        )
+        .await
+        .expect("publish next update announcement");
+    let received = timeout(Duration::from_secs(2), subscription.recv())
+        .await
+        .expect("next update announcement timeout")
+        .expect("subscription remains open");
+    assert_eq!(received.event, next_announcement);
+
+    subscription.close();
+    client_a.shutdown().await;
+    client_b.shutdown().await;
+    endpoint_a.shutdown().await.expect("shutdown endpoint A");
+    endpoint_b.shutdown().await.expect("shutdown endpoint B");
+    unregister_sim_network(&network_id);
+}
+
+async fn connected_update_clients(
+    network_id: &str,
+) -> (
+    Arc<FipsEndpoint>,
+    Arc<FipsEndpoint>,
+    FipsPubsubClient,
+    FipsPubsubClient,
+) {
+    register_sim_network(network_id, SimNetwork::new(7369));
+    let identity_a = Identity::from_secret_bytes(&[3; 32]).expect("identity A");
+    let identity_b = Identity::from_secret_bytes(&[4; 32]).expect("identity B");
+    let endpoint_a = Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(endpoint_config(
+                    network_id,
+                    "updates-a",
+                    [3; 32],
+                    identity_b.npub(),
+                    "updates-b",
+                ))
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .expect("bind endpoint A"),
+    );
+    let endpoint_b = Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(endpoint_config(
+                    network_id,
+                    "updates-b",
+                    [4; 32],
+                    identity_a.npub(),
+                    "updates-a",
+                ))
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .expect("bind endpoint B"),
+    );
+    wait_for_connected_peer(&endpoint_a, endpoint_b.npub()).await;
+    wait_for_connected_peer(&endpoint_b, endpoint_a.npub()).await;
+    let client_a = FipsPubsubClient::start_for_transport(
+        Arc::clone(&endpoint_a),
+        FipsPubsubClientOptions::default(),
+        "sim",
+    )
+    .await
+    .expect("start subscriber");
+    let client_b = FipsPubsubClient::start_for_transport(
+        Arc::clone(&endpoint_b),
+        FipsPubsubClientOptions::default(),
+        "sim",
+    )
+    .await
+    .expect("start publisher");
+    (endpoint_a, endpoint_b, client_a, client_b)
 }
 
 async fn exercise_default_reputation(endpoint: &Arc<FipsEndpoint>, peer_npub: &str) {

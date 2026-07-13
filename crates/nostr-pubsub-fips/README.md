@@ -4,10 +4,14 @@
 `REQ`, `EVENT`, and `CLOSE` JSON messages on FIPS service port `7368`.
 
 The provider fans each subscription and publication to authenticated,
-connected Ethernet peers reported by FIPS. Subscription replies are accepted
-only from the peers that received that subscription. Frames, peer fanout,
-active subscriptions, replay deduplication, and delivery queues are bounded;
-replay defaults to at most 8 events per filter.
+connected peers reported by FIPS, regardless of underlay transport.
+Subscription replies are accepted only from the peers that received that
+subscription. Each client also serves peer subscriptions and keeps a bounded
+event cache, so late subscribers can receive announcements without a relay.
+Its port-scoped receiver cannot consume another app service's datagrams on a
+shared endpoint.
+Frames, peer fanout, active subscriptions, replay deduplication, and delivery
+queues are bounded; replay defaults to at most 8 events per filter.
 
 `FipsPeerReputation` composes FIPS's authenticated peer metrics and signed
 rating events with the shared social-graph reputation policy. Its default keeps

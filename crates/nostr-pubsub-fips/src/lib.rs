@@ -1,4 +1,4 @@
-//! Local Ethernet pubsub over the `fips_core::FipsEndpoint` service API.
+//! Pubsub over authenticated peers on the `fips_core::FipsEndpoint` service API.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -6,11 +6,14 @@ use std::sync::{atomic::AtomicU64, atomic::Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use fips_core::{FipsEndpoint, FipsEndpointServiceDatagram, PeerIdentity};
+use fips_core::{
+    FipsEndpoint, FipsEndpointServiceDatagram, FipsEndpointServiceReceiver, PeerIdentity,
+};
 use nostr_pubsub::{
     EventBus, EventSource, Filter, FipsPubsubWireCodec, FipsPubsubWireMessage, PublishReport,
-    PubsubError, PubsubPeerInterest, PubsubProvider, PubsubProviderMode, QueryEvent, QueryOptions,
-    QueryReport, Result, SOURCE_PRIORITY_FIPS_ENDPOINT, SubscriptionId, VerifiedEvent,
+    PubsubError, PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubProvider,
+    PubsubProviderMode, PubsubSubscriptionLimits, QueryEvent, QueryOptions, QueryReport, Result,
+    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, VerifiedEvent,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -25,7 +28,6 @@ pub const FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS: usize = 8;
 /// Maximum FSP service body after its encrypted inner header and port header.
 pub const FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES: usize = u16::MAX as usize - 10;
 
-const LOCAL_ETHERNET_TRANSPORT: &str = "ethernet";
 const FIRST_ROUTE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Resource limits and replay window for a FIPS pubsub client.
@@ -35,7 +37,7 @@ pub struct FipsPubsubClientOptions {
     pub query_timeout: Duration,
     /// Maximum encoded Nostr frame accepted from or sent to a peer.
     pub max_frame_bytes: usize,
-    /// Maximum connected Ethernet peers included in one fanout.
+    /// Maximum connected FIPS peers included in one fanout.
     pub max_connected_peers: usize,
     /// Maximum simultaneous streaming or query subscriptions.
     pub max_active_subscriptions: usize,
@@ -100,21 +102,36 @@ impl FipsPubsubClient {
         endpoint: Arc<FipsEndpoint>,
         options: FipsPubsubClientOptions,
     ) -> Result<Self> {
-        Self::start_for_transport(endpoint, options, LOCAL_ETHERNET_TRANSPORT).await
+        Self::start_for_peer_transport(endpoint, options, None).await
     }
 
+    #[cfg(test)]
     async fn start_for_transport(
         endpoint: Arc<FipsEndpoint>,
         options: FipsPubsubClientOptions,
         peer_transport: &'static str,
     ) -> Result<Self> {
+        Self::start_for_peer_transport(endpoint, options, Some(peer_transport)).await
+    }
+
+    async fn start_for_peer_transport(
+        endpoint: Arc<FipsEndpoint>,
+        options: FipsPubsubClientOptions,
+        peer_transport: Option<&'static str>,
+    ) -> Result<Self> {
         options.validate()?;
-        endpoint
-            .register_service(FIPS_NOSTR_PUBSUB_SERVICE_PORT)
+        let service_receiver = endpoint
+            .register_service_receiver(FIPS_NOSTR_PUBSUB_SERVICE_PORT)
             .await
             .map_err(|error| storage_error("register FIPS pubsub service", error))?;
         let codec = FipsPubsubWireCodec::new(options.max_frame_bytes)?;
         let receive_batch_size = options.receive_batch_size;
+        let subscription_limits = PubsubSubscriptionLimits {
+            max_peers: options.max_connected_peers,
+            max_subscriptions_per_peer: options.max_active_subscriptions,
+            max_filters_per_subscription: options.max_filters_per_subscription,
+        };
+        let max_replay_events = options.max_replay_events;
         let inner = Arc::new(ClientInner {
             endpoint: Arc::clone(&endpoint),
             codec,
@@ -122,10 +139,12 @@ impl FipsPubsubClient {
             peer_transport,
             next_subscription_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
+            peer_subscriptions: Mutex::new(PubsubPeerSubscriptionStore::new(subscription_limits)),
+            recent_events: Mutex::new(RecentEvents::new(max_replay_events)),
         });
         let receiver_task = tokio::spawn(receive_loop(
             Arc::downgrade(&inner),
-            endpoint,
+            service_receiver,
             receive_batch_size,
         ));
         Ok(Self {
@@ -145,6 +164,14 @@ impl FipsPubsubClient {
 
     pub fn active_subscription_count(&self) -> Result<usize> {
         Ok(self.inner.lock_subscriptions()?.len())
+    }
+
+    pub fn peer_subscription_count(&self) -> Result<usize> {
+        self.inner
+            .peer_subscriptions
+            .lock()
+            .map(|subscriptions| subscriptions.subscription_count())
+            .map_err(|_| poisoned("FIPS peer subscription state"))
     }
 
     pub async fn subscribe(&self, filters: Vec<Filter>) -> Result<FipsPubsubSubscription> {
@@ -171,16 +198,35 @@ impl Drop for FipsPubsubClient {
 
 #[async_trait]
 impl EventBus for FipsPubsubClient {
-    async fn publish(&self, event: VerifiedEvent, _source: EventSource) -> Result<PublishReport> {
+    async fn publish(&self, event: VerifiedEvent, source: EventSource) -> Result<PublishReport> {
+        let peers = self.inner.connected_peers().await?;
+        if peers.is_empty() {
+            return Err(no_connected_peers(self.inner.peer_transport));
+        }
+
+        let is_new = self.inner.remember_event(event.clone(), source)?;
+        if !is_new {
+            return Ok(PublishReport {
+                accepted: true,
+                priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
+                reason: Some("event was already published".to_string()),
+            });
+        }
+
+        let subscribed = self.inner.peer_delivery_targets(&event, None)?;
+        if !subscribed.is_empty() {
+            let peer_count = subscribed.len();
+            let sent = self.inner.send_deliveries(subscribed, &event).await;
+            return publish_report(sent, peer_count, "subscribed FIPS peers");
+        }
+
+        // A raw client EVENT lets relay-like peers ingest publications even
+        // before they have sent us a REQ. Ordinary peer clients cache it and
+        // replay it once their local consumer subscribes.
         let frame = self
             .inner
             .codec
             .encode_frame(&FipsPubsubWireMessage::publish(event))?;
-        let peers = self.inner.connected_peers().await?;
-        if peers.is_empty() {
-            return Err(no_local_peers(self.inner.peer_transport));
-        }
-
         let peer_count = peers.len();
         let mut sent = 0usize;
         let mut last_error = None;
@@ -195,15 +241,14 @@ impl EventBus for FipsPubsubClient {
             }
         }
         if sent == 0 {
-            return Err(last_error.unwrap_or_else(|| no_local_peers(self.inner.peer_transport)));
+            return Err(last_error.unwrap_or_else(|| no_connected_peers(self.inner.peer_transport)));
         }
 
-        Ok(PublishReport {
-            accepted: true,
-            priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-            reason: (sent < peer_count)
-                .then(|| format!("sent to {sent} of {peer_count} local Ethernet peers")),
-        })
+        let mut report = publish_report(sent, peer_count, "connected FIPS peers")?;
+        if report.reason.is_none() && last_error.is_some() {
+            report.reason = Some("a FIPS publication send failed".to_string());
+        }
+        Ok(report)
     }
 
     async fn query(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport> {
@@ -281,9 +326,11 @@ struct ClientInner {
     endpoint: Arc<FipsEndpoint>,
     codec: FipsPubsubWireCodec,
     options: FipsPubsubClientOptions,
-    peer_transport: &'static str,
+    peer_transport: Option<&'static str>,
     next_subscription_id: AtomicU64,
     subscriptions: Mutex<HashMap<String, ActiveSubscription>>,
+    peer_subscriptions: Mutex<PubsubPeerSubscriptionStore>,
+    recent_events: Mutex<RecentEvents>,
 }
 
 impl ClientInner {
@@ -296,7 +343,10 @@ impl ClientInner {
         let mut peers = snapshot
             .into_iter()
             .filter(|peer| {
-                peer.connected && peer.transport_type.as_deref() == Some(self.peer_transport)
+                peer.connected
+                    && self
+                        .peer_transport
+                        .is_none_or(|transport| peer.transport_type.as_deref() == Some(transport))
             })
             .map(|peer| {
                 let npub = peer.npub;
@@ -317,7 +367,7 @@ impl ClientInner {
         if peers.len() > self.options.max_connected_peers {
             return Err(PubsubError::Storage(format!(
                 "connected local {} peer count {} exceeds limit {}",
-                self.peer_transport,
+                self.peer_transport.unwrap_or("FIPS"),
                 peers.len(),
                 self.options.max_connected_peers
             )));
@@ -350,7 +400,7 @@ impl ClientInner {
 
         let peers = self.connected_peers().await?;
         if peers.is_empty() {
-            return Err(no_local_peers(self.peer_transport));
+            return Err(no_connected_peers(self.peer_transport));
         }
         let sequence = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
         let subscription_id = SubscriptionId::new(format!("fips-{sequence}"));
@@ -384,6 +434,8 @@ impl ClientInner {
             );
         }
 
+        self.replay_local_events(&key)?;
+
         let mut sent = 0usize;
         let mut last_error = None;
         for peer in peers {
@@ -402,7 +454,7 @@ impl ClientInner {
         }
         if sent == 0 {
             self.close_subscription(&key);
-            return Err(last_error.unwrap_or_else(|| no_local_peers(self.peer_transport)));
+            return Err(last_error.unwrap_or_else(|| no_connected_peers(self.peer_transport)));
         }
 
         Ok(FipsPubsubSubscription {
@@ -444,49 +496,201 @@ impl ClientInner {
         Ok(())
     }
 
-    fn handle_datagram(&self, datagram: &FipsEndpointServiceDatagram) {
+    async fn handle_datagram(&self, datagram: &FipsEndpointServiceDatagram) {
         if datagram.source_port != FIPS_NOSTR_PUBSUB_SERVICE_PORT
             || datagram.destination_port != FIPS_NOSTR_PUBSUB_SERVICE_PORT
         {
             return;
         }
-        let Ok(FipsPubsubWireMessage::Event {
-            subscription_id: Some(subscription_id),
-            event,
-        }) = self.codec.decode_frame(datagram.data.as_slice())
-        else {
+        let Ok(message) = self.codec.decode_frame(datagram.data.as_slice()) else {
             return;
         };
 
-        let key = subscription_id.to_string();
         let source_npub = datagram.source_peer.npub();
+        let source_id = SourceId::new(source_npub.clone());
+        match message {
+            FipsPubsubWireMessage::Req {
+                subscription_id,
+                filters,
+            } => {
+                if self
+                    .remember_peer_subscription(source_id, &subscription_id, filters.clone())
+                    .is_err()
+                {
+                    return;
+                }
+                let replay = self.recent_matching_events(&filters).unwrap_or_default();
+                for event in replay {
+                    let Ok(frame) = self.codec.encode_frame(&FipsPubsubWireMessage::deliver(
+                        subscription_id.clone(),
+                        event,
+                    )) else {
+                        continue;
+                    };
+                    let _ = self
+                        .endpoint
+                        .send_datagram(
+                            datagram.source_peer,
+                            FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+                            FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+                            frame,
+                        )
+                        .await;
+                }
+            }
+            FipsPubsubWireMessage::Close { subscription_id } => {
+                if let Ok(mut subscriptions) = self.peer_subscriptions.lock() {
+                    subscriptions.remove(&source_id, &subscription_id.to_string());
+                }
+            }
+            FipsPubsubWireMessage::Event {
+                subscription_id,
+                event,
+            } => {
+                self.deliver_local_event(&source_npub, subscription_id.as_ref(), &event);
+                let source = EventSource::fips_endpoint(source_npub);
+                if self.remember_event(event.clone(), source).unwrap_or(false) {
+                    let targets = self
+                        .peer_delivery_targets(&event, Some(&source_id))
+                        .unwrap_or_default();
+                    let _ = self.send_deliveries(targets, &event).await;
+                }
+            }
+        }
+    }
+
+    fn remember_peer_subscription(
+        &self,
+        peer_id: SourceId,
+        subscription_id: &SubscriptionId,
+        filters: Vec<Filter>,
+    ) -> Result<()> {
+        self.peer_subscriptions
+            .lock()
+            .map_err(|_| poisoned("FIPS peer subscription state"))?
+            .upsert_filters(peer_id, subscription_id.to_string(), filters)?;
+        Ok(())
+    }
+
+    fn deliver_local_event(
+        &self,
+        source_npub: &str,
+        subscription_id: Option<&SubscriptionId>,
+        event: &VerifiedEvent,
+    ) {
         let event_id = event.as_event().id.to_string();
         let Ok(mut subscriptions) = self.subscriptions.lock() else {
             return;
         };
-        let Some(active) = subscriptions.get_mut(&key) else {
-            return;
-        };
-        if !active.peers.contains(&source_npub)
-            || PubsubPeerInterest::from_filters(&active.filters, &event)
-                != PubsubPeerInterest::Subscribed
-            || active.recent_event_ids.contains(&event_id)
-        {
-            return;
+        for (key, active) in subscriptions.iter_mut() {
+            if subscription_id.is_some_and(|id| id.to_string() != *key)
+                || !active.peers.contains(source_npub)
+                || PubsubPeerInterest::from_filters(&active.filters, event)
+                    != PubsubPeerInterest::Subscribed
+                || active.recent_event_ids.contains(&event_id)
+            {
+                continue;
+            }
+            deliver_local(
+                active,
+                event.clone(),
+                EventSource::fips_endpoint(source_npub),
+                &event_id,
+                self.options.max_replay_events,
+            );
         }
+    }
 
-        active.recent_event_ids.insert(event_id.clone());
-        active.recent_event_order.push_back(event_id);
-        while active.recent_event_order.len() > self.options.max_replay_events {
-            if let Some(oldest) = active.recent_event_order.pop_front() {
-                active.recent_event_ids.remove(&oldest);
+    fn remember_event(&self, event: VerifiedEvent, source: EventSource) -> Result<bool> {
+        self.recent_events
+            .lock()
+            .map_err(|_| poisoned("FIPS recent event cache"))
+            .map(|mut events| events.insert(event, source))
+    }
+
+    fn recent_matching_events(&self, filters: &[Filter]) -> Result<Vec<VerifiedEvent>> {
+        self.recent_events
+            .lock()
+            .map_err(|_| poisoned("FIPS recent event cache"))
+            .map(|events| events.matching(filters))
+    }
+
+    fn replay_local_events(&self, key: &str) -> Result<()> {
+        let recent = self
+            .recent_events
+            .lock()
+            .map_err(|_| poisoned("FIPS recent event cache"))?
+            .entries
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut subscriptions = self.lock_subscriptions()?;
+        let Some(active) = subscriptions.get_mut(key) else {
+            return Ok(());
+        };
+        for cached in recent {
+            if PubsubPeerInterest::from_filters(&active.filters, &cached.event)
+                != PubsubPeerInterest::Subscribed
+            {
+                continue;
+            }
+            let event_id = cached.event.as_event().id.to_string();
+            deliver_local(
+                active,
+                cached.event,
+                cached.source,
+                &event_id,
+                self.options.max_replay_events,
+            );
+        }
+        Ok(())
+    }
+
+    fn peer_delivery_targets(
+        &self,
+        event: &VerifiedEvent,
+        excluded_peer: Option<&SourceId>,
+    ) -> Result<Vec<(String, SubscriptionId)>> {
+        let subscriptions = self
+            .peer_subscriptions
+            .lock()
+            .map_err(|_| poisoned("FIPS peer subscription state"))?;
+        let mut targets = Vec::new();
+        for peer in subscriptions.interested_peers(event) {
+            if excluded_peer == Some(&peer) {
+                continue;
+            }
+            for subscription in subscriptions.matching_subscriptions(&peer, event) {
+                targets.push((
+                    peer.as_str().to_string(),
+                    SubscriptionId::new(subscription.subscription_id.clone()),
+                ));
             }
         }
-        let _ = active.sender.try_send(QueryEvent {
-            event,
-            source: EventSource::fips_endpoint(source_npub),
-            priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-        });
+        Ok(targets)
+    }
+
+    async fn send_deliveries(
+        &self,
+        targets: Vec<(String, SubscriptionId)>,
+        event: &VerifiedEvent,
+    ) -> usize {
+        let mut sent = 0;
+        for (npub, subscription_id) in targets {
+            let Ok(peer) = PeerIdentity::from_npub(&npub) else {
+                continue;
+            };
+            let Ok(frame) = self.codec.encode_frame(&FipsPubsubWireMessage::deliver(
+                subscription_id,
+                event.clone(),
+            )) else {
+                continue;
+            };
+            if self.send_frame(peer, frame, false).await.is_ok() {
+                sent += 1;
+            }
+        }
+        sent
     }
 
     fn close_subscription(&self, key: &str) {
@@ -559,13 +763,13 @@ struct ActiveSubscription {
 
 async fn receive_loop(
     inner: Weak<ClientInner>,
-    endpoint: Arc<FipsEndpoint>,
+    service_receiver: FipsEndpointServiceReceiver,
     receive_batch_size: usize,
 ) {
     let mut datagrams = Vec::with_capacity(receive_batch_size);
     loop {
-        let Some(_) = endpoint
-            .recv_service_datagram_batch_into(&mut datagrams, receive_batch_size)
+        let Some(_) = service_receiver
+            .recv_batch_into(&mut datagrams, receive_batch_size)
             .await
         else {
             break;
@@ -574,9 +778,91 @@ async fn receive_loop(
             break;
         };
         for datagram in datagrams.drain(..) {
-            inner.handle_datagram(&datagram);
+            inner.handle_datagram(&datagram).await;
         }
     }
+}
+
+#[derive(Clone)]
+struct CachedEvent {
+    event: VerifiedEvent,
+    source: EventSource,
+}
+
+struct RecentEvents {
+    max_events: usize,
+    event_ids: HashSet<String>,
+    entries: VecDeque<CachedEvent>,
+}
+
+impl RecentEvents {
+    fn new(max_events: usize) -> Self {
+        Self {
+            max_events,
+            event_ids: HashSet::new(),
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, event: VerifiedEvent, source: EventSource) -> bool {
+        let event_id = event.as_event().id.to_string();
+        if !self.event_ids.insert(event_id) {
+            return false;
+        }
+        self.entries.push_back(CachedEvent { event, source });
+        while self.entries.len() > self.max_events {
+            if let Some(removed) = self.entries.pop_front() {
+                self.event_ids
+                    .remove(&removed.event.as_event().id.to_string());
+            }
+        }
+        true
+    }
+
+    fn matching(&self, filters: &[Filter]) -> Vec<VerifiedEvent> {
+        self.entries
+            .iter()
+            .filter(|cached| {
+                PubsubPeerInterest::from_filters(filters, &cached.event)
+                    == PubsubPeerInterest::Subscribed
+            })
+            .map(|cached| cached.event.clone())
+            .collect()
+    }
+}
+
+fn deliver_local(
+    active: &mut ActiveSubscription,
+    event: VerifiedEvent,
+    source: EventSource,
+    event_id: &str,
+    max_replay_events: usize,
+) {
+    active.recent_event_ids.insert(event_id.to_string());
+    active.recent_event_order.push_back(event_id.to_string());
+    while active.recent_event_order.len() > max_replay_events {
+        if let Some(oldest) = active.recent_event_order.pop_front() {
+            active.recent_event_ids.remove(&oldest);
+        }
+    }
+    let _ = active.sender.try_send(QueryEvent {
+        event,
+        source,
+        priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
+    });
+}
+
+fn publish_report(sent: usize, peer_count: usize, peers: &str) -> Result<PublishReport> {
+    if sent == 0 {
+        return Err(PubsubError::Storage(format!(
+            "failed to publish to {peer_count} {peers}"
+        )));
+    }
+    Ok(PublishReport {
+        accepted: true,
+        priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
+        reason: (sent < peer_count).then(|| format!("sent to {sent} of {peer_count} {peers}")),
+    })
 }
 
 fn invalid_option(message: impl Into<String>) -> PubsubError {
@@ -586,12 +872,17 @@ fn invalid_option(message: impl Into<String>) -> PubsubError {
     ))
 }
 
-fn no_local_peers(transport: &str) -> PubsubError {
-    PubsubError::Storage(format!("no connected local {transport} FIPS pubsub peers"))
+fn no_connected_peers(transport: Option<&str>) -> PubsubError {
+    let scope = transport.map_or_else(String::new, |value| format!(" {value}"));
+    PubsubError::Storage(format!("no connected{scope} FIPS pubsub peers"))
 }
 
 fn storage_error(operation: &str, error: impl std::fmt::Display) -> PubsubError {
     PubsubError::Storage(format!("{operation}: {error}"))
+}
+
+fn poisoned(name: &str) -> PubsubError {
+    PubsubError::Storage(format!("{name} poisoned"))
 }
 
 #[cfg(test)]
