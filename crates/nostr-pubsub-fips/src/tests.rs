@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fips_core::config::{PeerConfig, TransportInstances};
+use fips_core::config::{NostrDiscoveryConfig, PeerConfig, TransportInstances};
 use fips_core::{
     Config, FipsEndpoint, Identity, IdentityConfig, SimNetwork, SimTransportConfig,
     register_sim_network, unregister_sim_network,
@@ -20,6 +20,78 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::*;
+
+#[test]
+fn fips_discovery_config_converts_to_bounded_pubsub_retention() {
+    let config = NostrDiscoveryConfig {
+        enabled: true,
+        app: "fips-test".to_string(),
+        advert_cache_max_entries: 17,
+        ..NostrDiscoveryConfig::default()
+    };
+    let policy = fips_discovery_retention_policy(&config).expect("enabled discovery policy");
+    let matching = VerifiedEvent::try_from(
+        EventBuilder::new(Kind::Custom(37195), "advert")
+            .tags([Tag::identifier("fips-test")])
+            .sign_with_keys(&Keys::generate())
+            .expect("signed matching event"),
+    )
+    .expect("verified matching event");
+    let other_app = VerifiedEvent::try_from(
+        EventBuilder::new(Kind::Custom(37195), "advert")
+            .tags([Tag::identifier("other-app")])
+            .sign_with_keys(&Keys::generate())
+            .expect("signed other-app event"),
+    )
+    .expect("verified other-app event");
+
+    assert_eq!(policy.max_events, 17);
+    assert!(policy.accepts(&matching));
+    assert!(!policy.accepts(&other_app));
+    assert!(fips_discovery_retention_policy(&NostrDiscoveryConfig::default()).is_none());
+}
+
+#[tokio::test]
+async fn verified_pubsub_event_ingests_through_neutral_fips_api() {
+    let mut config = Config::new();
+    config.node.discovery.nostr.enabled = true;
+    config.node.discovery.nostr.advertise = false;
+    config.node.discovery.nostr.advert_relays.clear();
+    config.node.discovery.nostr.dm_relays.clear();
+    config.node.discovery.nostr.app = "fips-test".to_string();
+    let endpoint = Box::pin(
+        FipsEndpoint::builder()
+            .config(config)
+            .without_system_tun()
+            .bind(),
+    )
+    .await
+    .expect("endpoint with Nostr discovery");
+    let now = Timestamp::now().as_secs();
+    let event = EventBuilder::new(
+        Kind::Custom(37195),
+        r#"{"identifier":"fips-overlay-v1","version":1,"endpoints":[{"transport":"tcp","addr":"8.8.8.8:443"}]}"#,
+    )
+    .tags([
+        Tag::identifier("fips-test"),
+        Tag::custom(TagKind::custom("protocol"), ["fips-test"]),
+        Tag::custom(TagKind::custom("version"), ["1"]),
+        Tag::expiration(Timestamp::from(now.saturating_add(3_600))),
+    ])
+    .custom_created_at(Timestamp::from(now))
+    .sign_with_keys(&Keys::generate())
+    .expect("signed FIPS advert");
+
+    assert!(
+        ingest_fips_discovery_event(
+            &endpoint,
+            VerifiedEvent::try_from(event).expect("verified FIPS advert"),
+        )
+        .await
+        .expect("FIPS discovery ingest")
+    );
+    endpoint.shutdown().await.expect("endpoint shutdown");
+}
 
 #[test]
 fn client_limits_reject_unbounded_fips_frames() {

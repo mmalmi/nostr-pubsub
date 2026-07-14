@@ -19,8 +19,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+mod peerfinding;
 mod reputation;
 mod stats;
+pub use peerfinding::*;
 pub use reputation::*;
 
 pub const FIPS_NOSTR_PUBSUB_SERVICE_PORT: u16 = 7368;
