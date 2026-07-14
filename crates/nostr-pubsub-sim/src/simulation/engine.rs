@@ -1,12 +1,11 @@
 use super::{
     CHURN_END_MS, CHURN_START_MS, DirectedServiceLink, FipsPubsubWireMessage, InvWantAction,
-    InvWantWireMessage, LinkOutage, MALFORMED_TRAINING_SAMPLES, MeshPeer, MeshPeerPolicy, NodeRole,
-    OutageCause, Packet, PeerSelectionMode, PubsubDeliveryAction, PubsubDeliveryPolicy,
-    REPUTATION_SWEEP_MS, Result, ScheduledAction, Simulation, SimulationError, SourceId,
-    SubscriptionClass, SubscriptionPurpose, SubscriptionStore, TopologyStrategy, TrafficDirection,
-    TrafficProvenance, VerifiedEvent, hash_bytes, is_fresh_sybil, is_quiet_attacker,
-    machine_admitted_class, message_fault_key, message_traffic_provenance, mix64,
-    profile_subscription_id, pubsub_error,
+    InvWantWireMessage, LinkOutage, MALFORMED_TRAINING_SAMPLES, MeshPeer, NodeRole, OutageCause,
+    Packet, PeerSelectionMode, PubsubDeliveryAction, PubsubDeliveryPolicy, REPUTATION_SWEEP_MS,
+    Result, ScheduledAction, Simulation, SimulationError, SourceId, SubscriptionClass,
+    SubscriptionPurpose, SubscriptionStore, TopologyStrategy, TrafficDirection, TrafficProvenance,
+    VerifiedEvent, hash_bytes, is_fresh_sybil, is_quiet_attacker, machine_admitted_class,
+    message_fault_key, message_traffic_provenance, mix64, profile_subscription_id, pubsub_error,
 };
 
 impl Simulation {
@@ -809,13 +808,7 @@ impl Simulation {
                 .map_err(pubsub_error)?;
             match machine {
                 None => return Ok(None),
-                Some(peer) if !peer.is_unknown() => return Ok(Some(peer)),
-                Some(_) => {
-                    return self.nodes[source]
-                        .mesh_policy
-                        .select_mesh_peer(&self.peer_ids[destination])
-                        .map_err(pubsub_error);
-                }
+                Some(peer) => return Ok(Some(peer)),
             }
         }
         Ok(Some(MeshPeer::new(&self.peer_ids[destination])))

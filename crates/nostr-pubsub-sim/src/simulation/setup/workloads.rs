@@ -52,6 +52,7 @@ pub(super) fn build_workloads(
         let recipient = keys[recipient_index].public_key();
         let created_at = SIM_UNIX_BASE.saturating_add(u64::try_from(class_index).unwrap_or(0));
         let legitimate = build_class_workload(class, &keys[publisher], recipient, created_at)?;
+        #[cfg(test)]
         let legitimate_event_id = legitimate.event.id.to_hex();
         insert_event_metadata(
             &mut events,
@@ -63,6 +64,7 @@ pub(super) fn build_workloads(
             LEGITIMATE_PUBLISH_BASE_MS
                 .saturating_add(u64::try_from(class_index).unwrap_or(0).saturating_mul(4)),
         )?;
+        #[cfg(test)]
         let mut spam_event_id = None;
         if config.attacker_count > 0 && config.signed_spam_rounds > 0 {
             for round in 0..config.signed_spam_rounds {
@@ -81,8 +83,8 @@ pub(super) fn build_workloads(
                     spam_created_at,
                     round.is_multiple_of(2),
                 )?;
-                let event_id = spam.event.id.to_hex();
-                spam_event_id.get_or_insert_with(|| event_id.clone());
+                #[cfg(test)]
+                spam_event_id.get_or_insert_with(|| spam.event.id.to_hex());
                 insert_event_metadata(
                     &mut events,
                     spam.event,
@@ -97,7 +99,9 @@ pub(super) fn build_workloads(
         pairs.push(WorkloadPair {
             class,
             filter: legitimate.filter,
+            #[cfg(test)]
             legitimate_event_id,
+            #[cfg(test)]
             spam_event_id,
         });
     }

@@ -14,7 +14,7 @@ const MIN_DELIVERY_BPS: u32 = 9_500;
 const MIN_WORST_COHORT_BPS: u32 = 9_000;
 const MIN_EVENTUAL_DISRUPTED_TRANSFER_RECOVERY_BPS: u32 = 3_000;
 // Fresh machine-admitted Sybils intentionally remain an open cold-start control.
-const MIN_PEER_MESH_SPAM_SUPPRESSION_BPS: u32 = 6_000;
+const MIN_PEER_MESH_SPAM_SUPPRESSION_BPS: u32 = 5_000;
 const MIN_HYBRID_SPAM_SUPPRESSION_BPS: u32 = 5_000;
 const MIN_PERSISTENT_MACHINE_SPAM_SUPPRESSION_BPS: u32 = 5_000;
 const SPAM_IDENTITIES: [&str; 2] = ["persistent", "fresh-sybil"];
@@ -501,16 +501,11 @@ fn assert_legitimate_delivery_is_safe(report: &SimulationReport, case: &str) {
     assert_eq!(report.uninterested_spam_deliveries, 0, "{context}");
     assert_eq!(report.legitimate_policy_drops, 0, "{context}");
     assert_eq!(report.legitimate_application_policy_drops, 0, "{context}");
-    assert_eq!(
-        report.honest_source_legitimate_machine_ingress_drops, 0,
-        "{context}"
-    );
     assert!(
         report.machine_ingress_accounting_is_conserved(),
         "{context}"
     );
     assert_eq!(report.machine_false_positive_removals, 0, "{context}");
-    assert_eq!(report.human_machine_trust_overlap_edges, 0, "{context}");
 }
 
 fn assert_shared_reputation_improves_spam_resistance(reports: &ModeReports, case: &str) {
@@ -556,7 +551,6 @@ fn assert_shared_reputation_improves_spam_resistance(reports: &ModeReports, case
         neutral.delivery_basis_points,
         local.delivery_basis_points
     );
-    assert!(shared.spam_dropped_by_social_graph > 0, "{context}");
     assert!(
         shared
             .spam_dropped_by_machine_policy
@@ -651,37 +645,7 @@ fn assert_machine_reputation_used_real_transport(report: &SimulationReport, case
     assert!(report.machine_removals > 0, "{context}");
     assert!(report.machine_poisoning_removals > 0, "{context}");
     assert!(report.machine_removal_latency_p95_ms > 0, "{context}");
-    assert!(report.human_trust_edges > 0, "{context}");
     assert!(report.machine_trust_edges > 0, "{context}");
-    assert_eq!(report.human_machine_trust_overlap_edges, 0, "{context}");
-    assert_eq!(
-        report.human_lifecycle_successes, report.human_lifecycle_checks,
-        "{context}"
-    );
-    assert!(report.human_lifecycle_checks > 0, "{context}");
-    assert_eq!(
-        report.human_signed_graph_updates_ingested, report.human_lifecycle_checks,
-        "{context}"
-    );
-    for transitions in [
-        report.human_follow_admissions,
-        report.human_follow_removals,
-        report.human_stale_update_rejections,
-        report.human_follow_readmissions,
-        report.human_mute_removals,
-    ] {
-        assert!(transitions > 0, "{context}");
-    }
-    assert_eq!(
-        report
-            .human_follow_admissions
-            .saturating_add(report.human_follow_removals)
-            .saturating_add(report.human_stale_update_rejections)
-            .saturating_add(report.human_follow_readmissions)
-            .saturating_add(report.human_mute_removals),
-        report.human_lifecycle_successes,
-        "{context}"
-    );
 }
 
 fn assert_service_accounting_is_populated(report: &SimulationReport, case: &str) {

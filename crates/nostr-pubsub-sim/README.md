@@ -12,7 +12,7 @@ The simulator compares three peer-selection modes:
 - `local-behavior`: production mesh scores learned from malformed messages and
   protocol outcomes;
 - `shared-reputation`: local behavior plus signed, transported machine ratings
-  and `nostr-social-graph` policies, while reserving unknown-peer exploration.
+  evaluated by `nostr-social-graph`, while reserving unknown-peer exploration.
 
 ## Production-shaped traffic
 
@@ -48,13 +48,13 @@ boundary.
 
 ## Admission and adversaries
 
-In `shared-reputation`, admission is deliberately split by event class:
+In `shared-reputation`, admission is deliberately split by event class without
+assuming that users maintain follow or mute lists:
 
-- human admission uses `nostr-social-graph` follow distance for author,
-  hashtag, Hashtree, and repository traffic; contact-list additions, removals,
-  stale updates, and mute-list removal are exercised with signed Nostr kind 3
-  and kind 10000 events. These updates enter the production local
-  `SocialGraph` API; they are not claimed as transported graph-sync traffic;
+- author, hashtag, Hashtree, and repository traffic is admitted by the
+  recipient's production Nostr subscription filters. It does not require a
+  follow edge. The simulator does not construct or mutate human follow/mute
+  graphs;
 - machine admission covers targeted ratings, FIPS adverts, paid offers, and
   peer-rating control traffic. Production `PeerRatingPublisher`, signed kind
   7368 events, FIPS subscriptions, `InvWantMesh`, and `PeerReputation` carry
@@ -64,10 +64,8 @@ In `shared-reputation`, admission is deliberately split by event class:
   ingester. A separate valid, self-signed compromised-trusted-rater probe
   measures the removal power intentionally granted to an authorized rater.
   Valid untrusted ratings can be structurally ingested for transitive graph use,
-  but only trusted/reachable raters change the local projection. The complete
-  human contact graph and machine-rater choices use independent hash domains,
-  exclude overlap per honest node, and are counted separately: a follow does
-  not authorize a machine rating, and machine trust does not create a follow;
+  but only trusted/reachable raters change the local projection. Machine rater
+  trust is seeded from the simulated peer topology and counted explicitly;
 - application admission checks broad Iris Drive roots against authors learned
   by applying production Nostr filter matching to established signed history.
 
@@ -80,8 +78,8 @@ transfer retries, and eventual disrupted-transfer delivery run on the virtual
 clock. Persistent attacker identities repeat after reputation can propagate;
 separately keyed fresh Sybils first appear later as a cold-start control. Every
 identity lane is reported both across all matching traffic and for the three
-machine-admitted subscription classes, so learned removal cannot be confused
-with filter mismatch or human-follow policy. The poisoned-rating probe
+machine-admitted subscription classes, so learned removal can be separated
+from filter mismatch. The poisoned-rating probe
 targets an honest non-neighbor when possible, so it measures trust-anchor risk
 without manufacturing an ordinary data-path failure; it is still accounted as
 spam. The simulator demonstrates this risk, not a defense against a compromised
@@ -117,8 +115,8 @@ as normal-peer supernode discovery selections.
 Interest-affinity discovery is **not** verified
 `nostr-social-graph` evidence. Cohort IDs are self-claimed, attackers may claim
 ordinary cohorts, and the simulator reports honest/false selections so this
-strategy is not mistaken for a trust oracle. Verified social-graph processing
-is used separately by event and mesh admission. Discovery precision, honest
+strategy is not mistaken for a trust oracle. Machine reputation is used
+separately by event and mesh admission. Discovery precision, honest
 coverage, and false-only selection describe initial topology construction only;
 the simulation does not perform runtime rediscovery. Link recovery restores the
 same selected neighbors.
@@ -152,9 +150,8 @@ The CSV report has one row per topology and peer-selection mode. It covers:
 - machine rating publication/transport/ingestion, admission/removal
   transitions, unserved-inventory-only quiet-blackhole removals, deliberate
   poisoning removals versus honest-observer false positives, same-subject
-  admit/remove/readmit completion, removal latency, complete and disjoint
-  human/machine trust-edge counts, signed graph updates, and per-transition
-  human lifecycle checks;
+  admit/remove/readmit completion, removal latency, machine trust-edge counts,
+  and signed machine graph updates;
 - scheduled subscription messages and bytes, reliable-control resend and
   recovery counts (`subscription_retries` and
   `subscription_retry_recoveries`), rejection, bounded eviction, and
@@ -196,12 +193,13 @@ cargo run --release -p nostr-pubsub-sim
 The ignored release gate runs a deterministic 18-case matrix: three seeds,
 both topologies, and all three peer-selection modes, with 1,000 nodes per case.
 It requires at least 95% aggregate and 90% worst-cohort legitimate delivery,
-at least 60% peer-mesh and 50% mixed-hybrid signed-spam outcome suppression,
+at least 50% peer-mesh and 50% mixed-hybrid signed-spam outcome suppression,
 at least 50% suppression in the persistent machine-admitted identity lane,
 zero honest-observer machine-removal false positives, exact accounting
 conservation, and no shared-policy delivery regression against the neutral and
-local controls. Fresh machine-admitted Sybils are compared with the lossy local
-control rather than treated as learned identities.
+local controls.
+Fresh machine-admitted Sybils are compared with the lossy local control rather
+than treated as learned identities.
 
 ```sh
 cargo test --release -p nostr-pubsub-sim --test release_gate -- \

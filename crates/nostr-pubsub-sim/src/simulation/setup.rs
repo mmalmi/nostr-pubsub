@@ -10,9 +10,11 @@ use nostr_pubsub_social_graph::PeerRatingPublisher;
 use super::{
     EventMetadata, POST_RECONNECT_REPUTATION_SWEEP_MS, POST_ROUTE_REPUTATION_SWEEP_MS,
     PeerSelectionMode, REPUTATION_SWEEP_MS, Result, SIM_PROTOCOL, SIM_VERSION, ScheduledAction,
-    SimNode, Simulation, SimulationConfig, SimulationReport, WorkloadPair, basis_points, mix64,
-    pubsub_error, simulation_keys,
+    SimNode, Simulation, SimulationConfig, SimulationReport, basis_points, mix64, pubsub_error,
+    simulation_keys,
 };
+#[cfg(test)]
+use super::WorkloadPair;
 use crate::clock::VirtualScheduler;
 use crate::metrics::NodeTrafficLedger;
 use crate::topology::{SupernodeDiscoveryStrategy, TopologyResult, TopologyStrategy};
@@ -53,7 +55,6 @@ impl Simulation {
         self.drain_scheduler()?;
         self.exercise_subscription_lifecycle()?;
         self.drain_scheduler()?;
-        self.exercise_human_lifecycle()?;
         self.exercise_machine_lifecycle()?;
         self.exercise_adversarial_reputation_probes()?;
         self.drain_scheduler()?;
@@ -86,6 +87,7 @@ struct PreparedSimulation {
     topology: TopologyResult,
     nodes: Vec<SimNode>,
     events: HashMap<String, EventMetadata>,
+    #[cfg(test)]
     workload_pairs: Vec<WorkloadPair>,
     reputation_publishers: Vec<Option<PeerRatingPublisher>>,
 }
@@ -136,6 +138,7 @@ fn prepare_simulation(
         topology,
         nodes,
         events,
+        #[cfg(test)]
         workload_pairs,
         reputation_publishers,
     })
@@ -153,6 +156,7 @@ fn assemble_simulation(
         topology,
         nodes,
         events,
+        #[cfg(test)]
         workload_pairs,
         reputation_publishers,
     } = prepared;
@@ -189,6 +193,7 @@ fn assemble_simulation(
         topology,
         nodes,
         events,
+        #[cfg(test)]
         workload_pairs,
     })
 }
@@ -203,20 +208,11 @@ fn initial_report(
     let discovered_supernode_links = discovery
         .honest_supernode_links
         .saturating_add(discovery.false_supernode_links);
-    let (human_trust_edges, machine_trust_edges, human_machine_trust_overlap_edges) = nodes
+    let machine_trust_edges = nodes
         .iter()
         .skip(config.attacker_count)
-        .fold((0usize, 0usize, 0usize), |totals, node| {
-            (
-                totals.0.saturating_add(node.human_peer_follows.len()),
-                totals.1.saturating_add(node.machine_trusted_raters.len()),
-                totals.2.saturating_add(
-                    node.human_peer_follows
-                        .intersection(&node.machine_trusted_raters)
-                        .count(),
-                ),
-            )
-        });
+        .map(|node| node.machine_trusted_raters.len())
+        .sum();
     SimulationReport {
         config: config.clone(),
         mode,
@@ -239,9 +235,7 @@ fn initial_report(
         false_only_supernode_peers: discovery
             .candidate_peer_count
             .saturating_sub(discovery.peers_with_honest_supernode),
-        human_trust_edges,
         machine_trust_edges,
-        human_machine_trust_overlap_edges,
         ..EMPTY_REPORT_TEMPLATE.clone()
     }
 }
@@ -311,7 +305,6 @@ const EMPTY_REPORT_TEMPLATE: SimulationReport = SimulationReport {
     signed_spam_suppression_basis_points_by_identity: BTreeMap::new(),
     machine_admitted_spam_suppression_basis_points_by_identity: BTreeMap::new(),
     unknown_discovery_adverts_delivered: 0,
-    spam_dropped_by_social_graph: 0,
     spam_dropped_by_machine_policy: 0,
     spam_dropped_by_application_policy: 0,
     spam_suppression_basis_points: 0,
@@ -372,17 +365,7 @@ const EMPTY_REPORT_TEMPLATE: SimulationReport = SimulationReport {
     forged_machine_ratings_rejected: 0,
     legitimate_policy_drops: 0,
     legitimate_application_policy_drops: 0,
-    human_signed_graph_updates_ingested: 0,
-    human_lifecycle_checks: 0,
-    human_lifecycle_successes: 0,
-    human_follow_admissions: 0,
-    human_follow_removals: 0,
-    human_stale_update_rejections: 0,
-    human_follow_readmissions: 0,
-    human_mute_removals: 0,
-    human_trust_edges: 0,
     machine_trust_edges: 0,
-    human_machine_trust_overlap_edges: 0,
     subscription_messages: 0,
     control_plane_wire_bytes: 0,
     subscription_retries: 0,

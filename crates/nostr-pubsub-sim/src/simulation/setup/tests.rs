@@ -417,7 +417,7 @@ fn attacker_cohorts_are_deterministic_claims_not_a_truth_sentinel() {
 }
 
 #[test]
-fn hybrid_no_loss_exercises_filter_and_graph_layers() {
+fn hybrid_no_loss_exercises_filter_and_machine_reputation_layers() {
     let report = run_simulation(
         adversarial_config(TopologyStrategy::HybridSupernodes),
         PeerSelectionMode::SharedReputation,
@@ -431,10 +431,5 @@ fn hybrid_no_loss_exercises_filter_and_graph_layers() {
             && report.filter_suppression_basis_points < 10_000,
         "{report:?}"
     );
-    assert!(
-        report.spam_dropped_by_social_graph > 0
-            || report.spam_delivered > 0
-            || report.unknown_discovery_adverts_delivered > 0,
-        "{report:?}",
-    );
+    assert!(report.machine_removals > 0, "{report:?}");
 }

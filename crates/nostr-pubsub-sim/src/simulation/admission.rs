@@ -1,7 +1,7 @@
 use super::{
-    AdmissionDrop, EventPolicyContext, EventSource, NodeRole, PeerSelectionMode, PolicyDecision,
-    PubsubPolicy, Result, Simulation, SubscriptionClass, TrafficProvenance, VerifiedEvent,
-    machine_admitted_class, poll_ready, pubsub_error,
+    AdmissionDrop, EventSource, NodeRole, PeerSelectionMode, PolicyDecision, Result, Simulation,
+    SubscriptionClass, TrafficProvenance, VerifiedEvent, machine_admitted_class, poll_ready,
+    pubsub_error,
 };
 
 impl Simulation {
@@ -70,10 +70,6 @@ impl Simulation {
             return;
         }
         match drop {
-            AdmissionDrop::HumanGraph => {
-                self.report.spam_dropped_by_social_graph =
-                    self.report.spam_dropped_by_social_graph.saturating_add(1);
-            }
             AdmissionDrop::MachineReputation => {
                 self.report.spam_dropped_by_machine_policy =
                     self.report.spam_dropped_by_machine_policy.saturating_add(1);
@@ -107,28 +103,15 @@ impl Simulation {
             .then_some(AdmissionDrop::Application));
         }
         let machine_admitted = is_reputation_rating || class.is_some_and(machine_admitted_class);
-        let (decision, drop) =
-            if machine_admitted {
-                let Some(policies) = self.nodes[destination].machine_policies.as_ref() else {
-                    return Ok(None);
-                };
-                (
-                    poll_ready(policies.check_event(event.as_event(), &source))?
-                        .map_err(pubsub_error)?,
-                    AdmissionDrop::MachineReputation,
-                )
-            } else {
-                (
-                    poll_ready(self.nodes[destination].human_policy.check_event(
-                        EventPolicyContext {
-                            event,
-                            source: &source,
-                        },
-                    ))?
-                    .map_err(pubsub_error)?,
-                    AdmissionDrop::HumanGraph,
-                )
-            };
-        Ok(matches!(decision, PolicyDecision::Drop { .. }).then_some(drop))
+        if !machine_admitted {
+            return Ok(None);
+        }
+        let Some(policies) = self.nodes[destination].machine_policies.as_ref() else {
+            return Ok(None);
+        };
+        let decision =
+            poll_ready(policies.check_event(event.as_event(), &source))?.map_err(pubsub_error)?;
+        Ok(matches!(decision, PolicyDecision::Drop { .. })
+            .then_some(AdmissionDrop::MachineReputation))
     }
 }

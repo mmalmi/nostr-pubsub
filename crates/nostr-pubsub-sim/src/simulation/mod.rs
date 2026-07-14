@@ -11,22 +11,21 @@ mod setup;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, Timestamp};
 use nostr_pubsub::{
-    DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, EventPolicyContext, EventSource, FipsPubsubWireAdapter,
-    FipsPubsubWireCodec, FipsPubsubWireMessage, InvWantAction, InvWantCodec, InvWantMesh,
-    InvWantMeshOptions, InvWantWireMessage, MeshPeer, MeshPeerPolicy, PolicyDecision,
-    PubsubDeliveryAction, PubsubDeliveryPolicy, PubsubPeerInterest, PubsubPeerSubscriptionStore,
-    PubsubPolicy, PubsubSubscriptionLimits, SourceId, SubscriptionId, VerifiedEvent,
+    DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, EventSource, FipsPubsubWireAdapter, FipsPubsubWireCodec,
+    FipsPubsubWireMessage, InvWantAction, InvWantCodec, InvWantMesh, InvWantMeshOptions,
+    InvWantWireMessage, MeshPeer, PolicyDecision, PubsubDeliveryAction,
+    PubsubDeliveryPolicy, PubsubPeerInterest, PubsubPeerSubscriptionStore,
+    PubsubSubscriptionLimits, SourceId, SubscriptionId, VerifiedEvent,
 };
 use nostr_pubsub_social_graph::{
-    GraphDistanceAction, PeerRatingPublisher, PeerReputation, PeerReputationConfig,
-    PeerReputationPolicies, SocialGraphPolicy, SocialGraphPolicyConfig,
+    PeerRatingPublisher, PeerReputation, PeerReputationConfig, PeerReputationPolicies,
 };
-use nostr_social_graph::{NostrEvent, Rating, SocialGraph};
+use nostr_social_graph::Rating;
 use nostr_social_memory::RatingEventExt;
 
 use crate::clock::VirtualScheduler;
@@ -192,7 +191,6 @@ pub struct SimulationReport {
     pub signed_spam_suppression_basis_points_by_identity: BTreeMap<String, u32>,
     pub machine_admitted_spam_suppression_basis_points_by_identity: BTreeMap<String, u32>,
     pub unknown_discovery_adverts_delivered: usize,
-    pub spam_dropped_by_social_graph: usize,
     pub spam_dropped_by_machine_policy: usize,
     pub spam_dropped_by_application_policy: usize,
     pub spam_suppression_basis_points: u32,
@@ -259,17 +257,7 @@ pub struct SimulationReport {
     pub forged_machine_ratings_rejected: usize,
     pub legitimate_policy_drops: usize,
     pub legitimate_application_policy_drops: usize,
-    pub human_signed_graph_updates_ingested: usize,
-    pub human_lifecycle_checks: usize,
-    pub human_lifecycle_successes: usize,
-    pub human_follow_admissions: usize,
-    pub human_follow_removals: usize,
-    pub human_stale_update_rejections: usize,
-    pub human_follow_readmissions: usize,
-    pub human_mute_removals: usize,
-    pub human_trust_edges: usize,
     pub machine_trust_edges: usize,
-    pub human_machine_trust_overlap_edges: usize,
     pub subscription_messages: usize,
     pub control_plane_wire_bytes: u64,
     pub subscription_retries: usize,
@@ -334,11 +322,8 @@ struct SimNode {
     wire: FipsPubsubWireAdapter,
     rating_wire: FipsPubsubWireAdapter,
     filters: Vec<Filter>,
-    human_policy: SocialGraphPolicy<SocialGraph>,
-    mesh_policy: SocialGraphPolicy<SocialGraph>,
     machine_reputation: Option<PeerReputation>,
     machine_policies: Option<PeerReputationPolicies>,
-    human_peer_follows: BTreeSet<String>,
     machine_trusted_raters: BTreeSet<String>,
     app_authorized_authors: BTreeSet<String>,
     local_events: HashMap<String, Event>,
@@ -482,7 +467,6 @@ enum MachineLifecyclePhase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdmissionDrop {
-    HumanGraph,
     MachineReputation,
     Application,
 }
@@ -490,7 +474,9 @@ enum AdmissionDrop {
 struct WorkloadPair {
     class: SubscriptionClass,
     filter: Filter,
+    #[cfg(test)]
     legitimate_event_id: String,
+    #[cfg(test)]
     spam_event_id: Option<String>,
 }
 
@@ -513,6 +499,7 @@ struct Simulation {
     reputation_removal_latencies: Vec<u64>,
     forged_rating_published: bool,
     poisoned_rating_published: bool,
+    #[cfg(test)]
     workload_pairs: Vec<WorkloadPair>,
     delivery_times: HashMap<(usize, String), u64>,
     down_links: HashSet<LinkOutage>,
@@ -574,44 +561,6 @@ fn peer_rating_event_with_samples(
         .custom_created_at(Timestamp::from(created_at))
         .sign_with_keys(signer)
         .map_err(pubsub_error)
-}
-
-fn contact_list_event<'a>(
-    root: &str,
-    created_at: u64,
-    follows: impl IntoIterator<Item = &'a str>,
-) -> NostrEvent {
-    graph_event(root, 3, created_at, follows)
-}
-
-fn graph_event<'a>(
-    root: &str,
-    kind: u32,
-    created_at: u64,
-    tagged: impl IntoIterator<Item = &'a str>,
-) -> NostrEvent {
-    NostrEvent {
-        created_at,
-        content: String::new(),
-        tags: tagged
-            .into_iter()
-            .map(|pubkey| vec!["p".to_string(), pubkey.to_string()])
-            .collect(),
-        kind,
-        pubkey: root.to_string(),
-        id: format!("{root}:{kind}:{created_at}"),
-        sig: "00".repeat(64),
-    }
-}
-
-fn policy_drops(
-    policy: &SocialGraphPolicy<SocialGraph>,
-    event: &VerifiedEvent,
-    source: &EventSource,
-) -> Result<bool> {
-    let decision = poll_ready(policy.check_event(EventPolicyContext { event, source }))?
-        .map_err(pubsub_error)?;
-    Ok(matches!(decision, PolicyDecision::Drop { .. }))
 }
 
 fn poll_ready<F>(future: F) -> Result<F::Output>
@@ -826,10 +775,6 @@ mod tests {
         assert_eq!(first_role_service, second_role_service);
         assert_eq!(first_credits, second_credits);
         assert!(first.protocol_accounting_is_conserved(), "{first:?}");
-        assert_eq!(
-            first.human_lifecycle_checks,
-            first.human_lifecycle_successes
-        );
         assert!(first.forged_machine_ratings_published > 0);
         assert!(first.forged_machine_ratings_received > 0);
         assert!(first.forged_machine_ratings_evaluated > 0);
@@ -841,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn social_graph_mode_filters_spam_without_losing_interested_delivery() {
+    fn shared_machine_reputation_filters_spam_without_losing_interested_delivery() {
         let config = SimulationConfig {
             node_count: 180,
             attacker_count: 36,
@@ -888,7 +833,6 @@ mod tests {
         );
         assert_eq!(shared.uninterested_deliveries, 0, "{shared:?}");
         assert!(shared.unauthorized_source_drops > 0, "{shared:?}");
-        assert_eq!(shared.legitimate_policy_drops, 0, "{shared:?}");
         assert_eq!(
             shared.honest_source_legitimate_machine_ingress_drops, 0,
             "{shared:?}"

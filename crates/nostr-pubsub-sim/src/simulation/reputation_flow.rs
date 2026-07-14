@@ -823,13 +823,7 @@ mod tests {
                 .machine_trusted_raters
                 .contains(&simulation.peer_ids[publisher])
         );
-        assert!(
-            !simulation.nodes[receiver]
-                .human_peer_follows
-                .contains(&simulation.peer_ids[publisher])
-        );
         assert!(!simulation.topology.neighbors[receiver].contains(&subject));
-        assert_eq!(simulation.report.human_machine_trust_overlap_edges, 0);
     }
 
     fn assert_poison_recipients(simulation: &Simulation, publisher: usize, subject: usize) {
