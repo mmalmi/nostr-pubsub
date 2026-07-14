@@ -9,6 +9,46 @@ pub fn basis_points(numerator: u64, denominator: u64) -> u32 {
     basis_points_wide(u128::from(numerator), u128::from(denominator))
 }
 
+/// Nearest-rank summary of an unordered non-negative integer distribution.
+///
+/// The total saturates at `u64::MAX`; the mean is calculated from the wider
+/// unsaturated total using integer truncation. Every field is zero for an
+/// empty input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DistributionSummary {
+    pub count: usize,
+    pub total: u64,
+    pub mean: u64,
+    pub p50: u64,
+    pub p95: u64,
+    pub p99: u64,
+    pub max: u64,
+}
+
+#[must_use]
+pub fn summarize_distribution(samples: &[u64]) -> DistributionSummary {
+    if samples.is_empty() {
+        return DistributionSummary::default();
+    }
+
+    let wide_total = samples.iter().fold(0_u128, |total, sample| {
+        total.saturating_add(u128::from(*sample))
+    });
+    let count = u128::try_from(samples.len()).unwrap_or(u128::MAX);
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+
+    DistributionSummary {
+        count: samples.len(),
+        total: saturating_u64(wide_total),
+        mean: saturating_u64(wide_total.checked_div(count).unwrap_or_default()),
+        p50: nearest_rank(&sorted, 50),
+        p95: nearest_rank(&sorted, 95),
+        p99: nearest_rank(&sorted, 99),
+        max: sorted.last().copied().unwrap_or_default(),
+    }
+}
+
 /// Nearest-rank latency percentiles over an unordered sample set.
 ///
 /// All fields, including `sample_count`, are zero when the input is empty.
@@ -23,18 +63,13 @@ pub struct LatencySummary {
 
 #[must_use]
 pub fn summarize_latencies(samples: &[u64]) -> LatencySummary {
-    if samples.is_empty() {
-        return LatencySummary::default();
-    }
-
-    let mut sorted = samples.to_vec();
-    sorted.sort_unstable();
+    let summary = summarize_distribution(samples);
     LatencySummary {
-        sample_count: sorted.len(),
-        p50: nearest_rank(&sorted, 50),
-        p95: nearest_rank(&sorted, 95),
-        p99: nearest_rank(&sorted, 99),
-        max: sorted.last().copied().unwrap_or_default(),
+        sample_count: summary.count,
+        p50: summary.p50,
+        p95: summary.p95,
+        p99: summary.p99,
+        max: summary.max,
     }
 }
 
@@ -332,8 +367,9 @@ fn saturating_u64(value: u128) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        LatencySummary, NodeTrafficLedger, TrafficCounter, TrafficDirection, TrafficProvenance,
-        TrafficScope, basis_points, gini_basis_points, summarize_latencies, summarize_load,
+        DistributionSummary, LatencySummary, NodeTrafficLedger, TrafficCounter, TrafficDirection,
+        TrafficProvenance, TrafficScope, basis_points, gini_basis_points, summarize_distribution,
+        summarize_latencies, summarize_load,
     };
 
     #[test]
@@ -376,6 +412,74 @@ mod tests {
             }
         );
         assert_eq!(summarize_latencies(&[20, 10]).p50, 10);
+    }
+
+    #[test]
+    fn distribution_summary_defines_empty_and_single_sample_behavior() {
+        assert_eq!(summarize_distribution(&[]), DistributionSummary::default());
+        assert_eq!(
+            summarize_distribution(&[42]),
+            DistributionSummary {
+                count: 1,
+                total: 42,
+                mean: 42,
+                p50: 42,
+                p95: 42,
+                p99: 42,
+                max: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn distribution_summary_uses_nearest_rank_on_unsorted_samples() {
+        let samples = (1..=100).rev().collect::<Vec<_>>();
+        assert_eq!(
+            summarize_distribution(&samples),
+            DistributionSummary {
+                count: 100,
+                total: 5_050,
+                mean: 50,
+                p50: 50,
+                p95: 95,
+                p99: 99,
+                max: 100,
+            }
+        );
+
+        let two = summarize_distribution(&[20, 10]);
+        assert_eq!((two.p50, two.p95, two.p99), (10, 20, 20));
+    }
+
+    #[test]
+    fn distribution_summary_truncates_mean_and_preserves_zeroes() {
+        assert_eq!(
+            summarize_distribution(&[0, 0, 0]),
+            DistributionSummary {
+                count: 3,
+                ..DistributionSummary::default()
+            }
+        );
+
+        let summary = summarize_distribution(&[0, 1, 2, 2]);
+        assert_eq!(summary.total, 5);
+        assert_eq!(summary.mean, 1);
+        assert_eq!(
+            (summary.p50, summary.p95, summary.p99, summary.max),
+            (1, 2, 2, 2)
+        );
+    }
+
+    #[test]
+    fn distribution_summary_saturates_total_without_corrupting_mean() {
+        let summary = summarize_distribution(&[u64::MAX, u64::MAX]);
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.total, u64::MAX);
+        assert_eq!(summary.mean, u64::MAX);
+        assert_eq!(summary.p50, u64::MAX);
+        assert_eq!(summary.p95, u64::MAX);
+        assert_eq!(summary.p99, u64::MAX);
+        assert_eq!(summary.max, u64::MAX);
     }
 
     #[test]

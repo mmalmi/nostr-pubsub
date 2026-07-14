@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use nostr::{Event, EventBuilder, Keys, Kind};
 use nostr_pubsub::{
     InvWantAction, InvWantCodec, InvWantMesh, InvWantMeshOptions, InvWantWireMessage, MeshPeer,
+    VerifiedEvent,
 };
 
 const PROTOCOL: &str = "nvpn.control.pubsub";
@@ -557,6 +558,79 @@ fn cached_event_can_be_replayed_to_a_peer_that_connected_later() {
 }
 
 #[test]
+fn verified_frame_path_reuses_boundary_signature_check() {
+    let event = signed_event();
+    let event_id = event.id.to_hex();
+    let mut provider = mesh();
+    let mut consumer = mesh();
+    let inventory = only_message(
+        provider
+            .publish(event, &[MeshPeer::new("consumer")], 1)
+            .unwrap(),
+    );
+    let want = only_message(
+        consumer
+            .receive("provider", inventory, &[MeshPeer::new("provider")], 2)
+            .unwrap(),
+    );
+    let frame = only_message(
+        provider
+            .receive("consumer", want, &[MeshPeer::new("consumer")], 3)
+            .unwrap(),
+    );
+    let InvWantWireMessage::Frame { event, .. } = frame else {
+        panic!("provider must answer WANT with FRAME");
+    };
+    let verified = VerifiedEvent::try_from(*event).unwrap();
+
+    let actions = consumer
+        .receive_verified_frame("provider", &event_id, verified, &[], 4)
+        .unwrap();
+
+    assert_eq!(delivered_ids(&actions), vec![event_id]);
+}
+
+#[test]
+fn cached_event_payload_bytes_are_hard_bounded() {
+    let first = signed_event_with_content(&"a".repeat(128));
+    let second = signed_event_with_content(&"b".repeat(128));
+    let first_bytes = serde_json::to_vec(&first).unwrap().len();
+    let second_bytes = serde_json::to_vec(&second).unwrap().len();
+    let max_event_bytes = first_bytes.max(second_bytes);
+    let max_cached_event_bytes = first_bytes + second_bytes - 1;
+    let mut provider = InvWantMesh::new(InvWantMeshOptions {
+        max_event_bytes,
+        max_cached_events: 8,
+        max_cached_event_bytes,
+        allowed_kinds: Some(BTreeSet::from([37_195])),
+        ..InvWantMeshOptions::default()
+    });
+
+    provider.publish(first.clone(), &[], 1).unwrap();
+    provider.publish(second.clone(), &[], 2).unwrap();
+
+    let retained = provider.retained_state();
+    assert_eq!(retained.cached_events, 1);
+    assert_eq!(retained.cached_event_bytes, second_bytes as u64);
+    assert!(
+        provider
+            .receive(
+                "late-peer",
+                InvWantWireMessage::Want {
+                    event_id: first.id.to_hex(),
+                },
+                &[],
+                3,
+            )
+            .unwrap()
+            .is_empty(),
+        "the oldest payload is evicted before the aggregate byte cap is exceeded"
+    );
+    provider.maintain(provider.options().event_ttl_ms + 3);
+    assert_eq!(provider.retained_state().cached_event_bytes, 0);
+}
+
+#[test]
 fn behavioral_priority_reserves_fanout_for_an_unknown_peer() {
     let options = InvWantMeshOptions {
         fanout: 3,
@@ -776,7 +850,11 @@ fn mesh() -> InvWantMesh {
 }
 
 fn signed_event() -> Event {
-    EventBuilder::new(Kind::Custom(37_195), "peer advert")
+    signed_event_with_content("peer advert")
+}
+
+fn signed_event_with_content(content: &str) -> Event {
+    EventBuilder::new(Kind::Custom(37_195), content)
         .sign_with_keys(&Keys::generate())
         .unwrap()
 }

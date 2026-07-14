@@ -1,15 +1,11 @@
-import { DEFAULT_INV_WANT_HOP_LIMIT } from './invwant.js';
 import {
-  DEFAULT_INV_WANT_FANOUT,
-  DEFAULT_INV_WANT_MAX_EVENT_BYTES,
   meshEventJsonBytes,
   type InvWantWireMessage,
 } from './mesh-codec.js';
 import { meshPeer, selectMeshPeers, type MeshPeer } from './mesh-peer.js';
+import { BoundedEventCache, type InvWantMeshRetainedState } from './mesh-resources.js';
 import {
-  boundedPositive,
   clamp,
-  nonNegative,
   requireEventId,
   requireKind,
   requireNow,
@@ -19,113 +15,63 @@ import {
   saturatingAdd,
   validation,
 } from './mesh-state.js';
+import {
+  INVALID_MESSAGE_PENALTY,
+  MAX_TRACKED_PEER_BEHAVIORS,
+  MAX_UPSTREAM_PROVIDERS_PER_EVENT,
+  MIN_PEER_BEHAVIOR_SAMPLES,
+  UNSERVED_INVENTORY_PENALTY,
+  VALID_FRAME_REWARD,
+  defaultInvWantMeshOptions,
+  normalizeInvWantMeshOptions,
+  type InvWantAction,
+  type InvWantMeshOptions,
+  type PeerBehaviorEvidence,
+  type PeerBehaviorObservation,
+  type PendingPeers,
+  type UpstreamRoute,
+} from './mesh-types.js';
 import type { NostrEvent, NostrVerifiedEvent } from './types.js';
-import { verifyNostrEvent } from './types.js';
+import { copyVerifiedNostrEvent, verifyNostrEvent } from './types.js';
 
-const DEFAULT_ROUTE_TTL_MS = 2 * 60 * 1_000;
-const DEFAULT_EVENT_TTL_MS = 10 * 60 * 1_000;
-const MAX_UPSTREAM_PROVIDERS_PER_EVENT = 3;
-const MAX_TRACKED_PEER_BEHAVIORS = 4_096;
-const MIN_PEER_BEHAVIOR_SAMPLES = 3;
-const VALID_FRAME_REWARD = 20;
-const INVALID_MESSAGE_PENALTY = -40;
-const UNSERVED_INVENTORY_PENALTY = -20;
-
-export interface InvWantMeshOptions {
-  fanout: number;
-  unknownPeerReserve: number;
-  maxHops: number;
-  maxEventBytes: number;
-  maxCachedEvents: number;
-  maxSeenEvents: number;
-  maxPendingPeersPerEvent: number;
-  routeTtlMs: number;
-  eventTtlMs: number;
-  allowedKinds?: ReadonlySet<number>;
-}
-
-export type InvWantAction =
-  | { type: 'send'; peerId: string; message: InvWantWireMessage }
-  | { type: 'deliver'; sourcePeer: string; event: NostrVerifiedEvent };
-
-interface CachedEvent {
-  event: NostrVerifiedEvent;
-  expiresAtMs: number;
-}
-
-interface UpstreamRoute {
-  peerId: string;
-  alternatePeerIds: Set<string>;
-  eventKind: number;
-  payloadBytes: number;
-  hopLimit: number;
-  expiresAtMs: number;
-  fulfilled: boolean;
-}
-
-interface PendingPeers {
-  peers: Set<string>;
-  expiresAtMs: number;
-}
-
-export interface PeerBehaviorObservation {
-  score: number;
-  samples: number;
-  validFrames: number;
-  invalidMessages: number;
-  unservedInventories: number;
-}
-
-type PeerBehaviorEvidence = keyof Pick<
-  PeerBehaviorObservation,
-  'validFrames' | 'invalidMessages' | 'unservedInventories'
->;
-
-export function defaultInvWantMeshOptions(): InvWantMeshOptions {
-  return {
-    fanout: DEFAULT_INV_WANT_FANOUT,
-    unknownPeerReserve: 1,
-    maxHops: DEFAULT_INV_WANT_HOP_LIMIT,
-    maxEventBytes: DEFAULT_INV_WANT_MAX_EVENT_BYTES,
-    maxCachedEvents: 1_024,
-    maxSeenEvents: 4_096,
-    maxPendingPeersPerEvent: 64,
-    routeTtlMs: DEFAULT_ROUTE_TTL_MS,
-    eventTtlMs: DEFAULT_EVENT_TTL_MS,
-  };
-}
+export { defaultInvWantMeshOptions };
+export type { InvWantAction, InvWantMeshOptions, PeerBehaviorObservation };
 
 /** Transport-neutral bounded inv/want state machine matching Rust's `InvWantMesh`. */
 export class InvWantMesh {
   readonly options: InvWantMeshOptions;
-  private readonly cachedEvents = new Map<string, CachedEvent>();
-  private readonly cacheOrder: string[] = [];
+  private readonly cachedEvents: BoundedEventCache;
   private readonly seenInventories = new Map<string, number>();
   private readonly seenOrder: string[] = [];
-  private readonly deliveredEvents = new Set<string>();
+  private readonly deliveredEvents = new Map<string, number>();
   private readonly deliveredOrder: string[] = [];
   private readonly upstreamRoutes = new Map<string, UpstreamRoute>();
   private readonly pendingDownstream = new Map<string, PendingPeers>();
+  private pendingPeerCount = 0;
   private readonly wantForwarded = new Map<string, number>();
   private readonly peerBehaviors = new Map<string, PeerBehaviorObservation>();
   private readonly peerBehaviorOrder: string[] = [];
 
   constructor(options: Partial<InvWantMeshOptions> = {}) {
-    const defaults = defaultInvWantMeshOptions();
-    const merged = { ...defaults, ...options };
-    this.options = {
-      ...merged,
-      fanout: boundedPositive(merged.fanout),
-      unknownPeerReserve: Math.min(nonNegative(merged.unknownPeerReserve), boundedPositive(merged.fanout)),
-      maxHops: boundedPositive(merged.maxHops, 255),
-      maxEventBytes: boundedPositive(merged.maxEventBytes),
-      maxCachedEvents: boundedPositive(merged.maxCachedEvents),
-      maxSeenEvents: boundedPositive(merged.maxSeenEvents),
-      maxPendingPeersPerEvent: boundedPositive(merged.maxPendingPeersPerEvent),
-      routeTtlMs: boundedPositive(merged.routeTtlMs),
-      eventTtlMs: Math.max(boundedPositive(merged.eventTtlMs), boundedPositive(merged.routeTtlMs)),
-      allowedKinds:
-        merged.allowedKinds === undefined ? undefined : new Set([...merged.allowedKinds].map(requireKind)),
+    this.options = normalizeInvWantMeshOptions(options);
+    this.cachedEvents = new BoundedEventCache(
+      this.options.maxCachedEvents,
+      this.options.maxCachedEventBytes,
+      this.options.eventTtlMs,
+    );
+  }
+
+  retainedState(): InvWantMeshRetainedState {
+    return {
+      cachedEvents: this.cachedEvents.size,
+      cachedEventBytes: this.cachedEvents.payloadBytes,
+      seenInventories: this.seenInventories.size,
+      deliveredEvents: this.deliveredEvents.size,
+      upstreamRoutes: this.upstreamRoutes.size,
+      pendingEvents: this.pendingDownstream.size,
+      pendingPeers: this.pendingPeerCount,
+      forwardedWants: this.wantForwarded.size,
+      peerBehaviors: this.peerBehaviors.size,
     };
   }
 
@@ -154,16 +100,34 @@ export class InvWantMesh {
     const route = this.upstreamRoutes.get(eventId);
     if (route !== undefined && routeHasProvider(route, peerId)) {
       route.fulfilled = true;
-      this.pendingDownstream.delete(eventId);
+      this.removePendingEvent(eventId);
     }
   }
 
   publish(event: NostrEvent, peers: readonly MeshPeer[], nowMs: number): InvWantAction[] {
+    return this.publishEvent(event, peers, nowMs, false);
+  }
+
+  /** Publish an event whose signature was already checked at the trust boundary. */
+  publishVerified(
+    event: NostrVerifiedEvent,
+    peers: readonly MeshPeer[],
+    nowMs: number,
+  ): InvWantAction[] {
+    return this.publishEvent(event, peers, nowMs, true);
+  }
+
+  private publishEvent(
+    event: NostrEvent,
+    peers: readonly MeshPeer[],
+    nowMs: number,
+    alreadyVerified: boolean,
+  ): InvWantAction[] {
     requireNow(nowMs);
     this.prune(nowMs);
-    const verified = this.validateEvent(event);
+    const verified = this.acceptEvent(event, alreadyVerified);
     const payloadBytes = meshEventJsonBytes(verified);
-    this.storeEvent(verified, nowMs);
+    this.storeEvent(verified, payloadBytes, nowMs);
     if (!this.rememberInventory(verified.id, nowMs)) return [];
     return this.sendToSelectedPeers(peers, undefined, {
       type: 'inventory',
@@ -175,11 +139,29 @@ export class InvWantMesh {
   }
 
   replayToPeer(event: NostrEvent, peerId: string, nowMs: number): InvWantAction[] {
+    return this.replayEventToPeer(event, peerId, nowMs, false);
+  }
+
+  /** Replay a verified event without repeating signature verification. */
+  replayVerifiedToPeer(
+    event: NostrVerifiedEvent,
+    peerId: string,
+    nowMs: number,
+  ): InvWantAction[] {
+    return this.replayEventToPeer(event, peerId, nowMs, true);
+  }
+
+  private replayEventToPeer(
+    event: NostrEvent,
+    peerId: string,
+    nowMs: number,
+    alreadyVerified: boolean,
+  ): InvWantAction[] {
     requireNow(nowMs);
     this.prune(nowMs);
-    const verified = this.validateEvent(event);
+    const verified = this.acceptEvent(event, alreadyVerified);
     const payloadBytes = meshEventJsonBytes(verified);
-    this.storeEvent(verified, nowMs);
+    this.storeEvent(verified, payloadBytes, nowMs);
     return [send(peerId, {
       type: 'inventory',
       eventId: verified.id,
@@ -204,8 +186,26 @@ export class InvWantMesh {
         case 'want':
           return this.receiveWant(sourcePeer, message.eventId, nowMs);
         case 'frame':
-          return this.receiveFrame(sourcePeer, message.eventId, message.event, peers, nowMs);
+          return this.receiveFrame(sourcePeer, message.eventId, message.event, peers, nowMs, false);
       }
+    } catch (error) {
+      this.recordInvalidMessage(sourcePeer);
+      throw error;
+    }
+  }
+
+  /** Admit a frame already verified by event policy at the trust boundary. */
+  receiveVerifiedFrame(
+    sourcePeer: string,
+    eventId: string,
+    event: NostrVerifiedEvent,
+    peers: readonly MeshPeer[],
+    nowMs: number,
+  ): InvWantAction[] {
+    requireNow(nowMs);
+    this.prune(nowMs);
+    try {
+      return this.receiveFrame(sourcePeer, eventId, event, peers, nowMs, true);
     } catch (error) {
       this.recordInvalidMessage(sourcePeer);
       throw error;
@@ -264,7 +264,7 @@ export class InvWantMesh {
   private receiveWant(sourcePeer: string, eventId: string, nowMs: number): InvWantAction[] {
     requireEventId(eventId);
     const cached = this.cachedEvents.get(eventId);
-    if (cached !== undefined) return [send(sourcePeer, { type: 'frame', eventId, event: cached.event })];
+    if (cached !== undefined) return [send(sourcePeer, { type: 'frame', eventId, event: cached })];
     const route = this.upstreamRoutes.get(eventId);
     if (route === undefined) return [];
     if (route.fulfilled) return [];
@@ -274,7 +274,13 @@ export class InvWantMesh {
       pending = { peers: new Set(), expiresAtMs: saturatingAdd(nowMs, this.options.routeTtlMs) };
       this.pendingDownstream.set(eventId, pending);
     }
-    if (pending.peers.size < this.options.maxPendingPeersPerEvent) pending.peers.add(sourcePeer);
+    if (
+      pending.peers.size < this.options.maxPendingPeersPerEvent &&
+      !pending.peers.has(sourcePeer)
+    ) {
+      pending.peers.add(sourcePeer);
+      this.pendingPeerCount += 1;
+    }
     if ((this.wantForwarded.get(eventId) ?? 0) > nowMs) return [];
     this.wantForwarded.set(eventId, route.expiresAtMs);
     return [send(route.peerId, { type: 'want', eventId })];
@@ -286,6 +292,7 @@ export class InvWantMesh {
     event: NostrEvent,
     peers: readonly MeshPeer[],
     nowMs: number,
+    alreadyVerified: boolean,
   ): InvWantAction[] {
     requireEventId(eventId);
     const route = this.upstreamRoutes.get(eventId);
@@ -293,7 +300,7 @@ export class InvWantMesh {
     if (!this.wantForwarded.has(eventId) || !routeHasProvider(route, sourcePeer)) {
       throw validation('inv/want frame was not requested from source');
     }
-    const verified = this.validateEvent(event);
+    const verified = this.acceptEvent(event, alreadyVerified);
     const payloadBytes = meshEventJsonBytes(verified);
     if (verified.id !== eventId) throw validation('inv/want frame id does not match signed event id');
     if (route.eventKind !== verified.kind || route.payloadBytes !== payloadBytes) {
@@ -301,17 +308,18 @@ export class InvWantMesh {
     }
     if (route.fulfilled) return [];
     this.recordPeerBehavior(sourcePeer, VALID_FRAME_REWARD, 'validFrames');
-    this.storeEvent(verified, nowMs);
+    this.storeEvent(verified, payloadBytes, nowMs);
     route.fulfilled = true;
 
     const actions: InvWantAction[] = [];
-    if (this.rememberDelivered(eventId)) actions.push({ type: 'deliver', sourcePeer, event: verified });
-    const pending = this.pendingDownstream.get(eventId);
+    if (this.rememberDelivered(eventId, nowMs)) {
+      actions.push({ type: 'deliver', sourcePeer, event: verified });
+    }
+    const pending = this.removePendingEvent(eventId);
     if (pending !== undefined) {
       for (const peerId of [...pending.peers].sort()) {
         actions.push(send(peerId, { type: 'frame', eventId, event: verified }));
       }
-      this.pendingDownstream.delete(eventId);
     }
     if (route.hopLimit > 1) {
       actions.push(...this.sendToSelectedPeers(peers, sourcePeer, {
@@ -327,6 +335,14 @@ export class InvWantMesh {
 
   private validateEvent(event: NostrEvent): NostrVerifiedEvent {
     const verified = verifyNostrEvent(event);
+    this.validateKind(verified.kind);
+    this.validateEventLength(meshEventJsonBytes(verified));
+    return verified;
+  }
+
+  private acceptEvent(event: NostrEvent, alreadyVerified: boolean): NostrVerifiedEvent {
+    if (!alreadyVerified) return this.validateEvent(event);
+    const verified = copyVerifiedNostrEvent(event as NostrVerifiedEvent);
     this.validateKind(verified.kind);
     this.validateEventLength(meshEventJsonBytes(verified));
     return verified;
@@ -350,19 +366,8 @@ export class InvWantMesh {
     }
   }
 
-  private storeEvent(event: NostrVerifiedEvent, nowMs: number): void {
-    if (!this.cachedEvents.has(event.id)) {
-      while (this.cachedEvents.size >= this.options.maxCachedEvents) {
-        const oldest = this.cacheOrder.shift();
-        if (oldest === undefined) break;
-        this.cachedEvents.delete(oldest);
-      }
-      this.cacheOrder.push(event.id);
-    }
-    this.cachedEvents.set(event.id, {
-      event,
-      expiresAtMs: saturatingAdd(nowMs, this.options.eventTtlMs),
-    });
+  private storeEvent(event: NostrVerifiedEvent, payloadBytes: number, nowMs: number): void {
+    this.cachedEvents.store(event, payloadBytes, nowMs);
   }
 
   private rememberInventory(eventId: string, nowMs: number): boolean {
@@ -373,7 +378,7 @@ export class InvWantMesh {
         if (oldest === undefined) break;
         this.seenInventories.delete(oldest);
         this.upstreamRoutes.delete(oldest);
-        this.pendingDownstream.delete(oldest);
+        this.removePendingEvent(oldest);
         this.wantForwarded.delete(oldest);
       }
       this.seenOrder.push(eventId);
@@ -382,15 +387,23 @@ export class InvWantMesh {
     return true;
   }
 
-  private rememberDelivered(eventId: string): boolean {
+  private removePendingEvent(eventId: string): PendingPeers | undefined {
+    const pending = this.pendingDownstream.get(eventId);
+    if (pending === undefined) return undefined;
+    this.pendingDownstream.delete(eventId);
+    this.pendingPeerCount -= pending.peers.size;
+    return pending;
+  }
+
+  private rememberDelivered(eventId: string, nowMs: number): boolean {
     if (this.deliveredEvents.has(eventId)) return false;
-    this.deliveredEvents.add(eventId);
     this.deliveredOrder.push(eventId);
-    while (this.deliveredEvents.size > this.options.maxSeenEvents) {
+    while (this.deliveredEvents.size >= this.options.maxSeenEvents) {
       const oldest = this.deliveredOrder.shift();
       if (oldest === undefined) break;
       this.deliveredEvents.delete(oldest);
     }
+    this.deliveredEvents.set(eventId, saturatingAdd(nowMs, this.options.eventTtlMs));
     return true;
   }
 
@@ -443,13 +456,16 @@ export class InvWantMesh {
         this.recordPeerBehavior(peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
       }
     }
-    retainMap(this.cachedEvents, (cached) => cached.expiresAtMs > nowMs);
-    retainOrder(this.cacheOrder, this.cachedEvents);
+    this.cachedEvents.prune(nowMs);
     retainMap(this.seenInventories, (expiry) => expiry > nowMs);
     retainOrder(this.seenOrder, this.seenInventories);
+    retainMap(this.deliveredEvents, (expiry) => expiry > nowMs);
+    retainOrder(this.deliveredOrder, this.deliveredEvents);
     retainMap(this.upstreamRoutes, (route) => route.expiresAtMs > nowMs);
     retainMap(this.pendingDownstream, (pending, eventId) =>
       pending.expiresAtMs > nowMs && this.upstreamRoutes.has(eventId));
+    this.pendingPeerCount = [...this.pendingDownstream.values()]
+      .reduce((total, pending) => total + pending.peers.size, 0);
     retainMap(this.wantForwarded, (expiry, eventId) =>
       expiry > nowMs && this.upstreamRoutes.has(eventId));
   }

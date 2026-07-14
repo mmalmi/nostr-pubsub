@@ -1,7 +1,6 @@
 use super::{
     FipsPubsubWireMessage, Result, ScheduledAction, Simulation, SubscriptionFrame,
-    SubscriptionPurpose, SubscriptionStore, TrafficDirection, TrafficProvenance, hash_bytes,
-    pubsub_error,
+    SubscriptionPurpose, TrafficDirection, TrafficProvenance, hash_bytes, pubsub_error,
 };
 use nostr_pubsub::SourceId;
 
@@ -11,7 +10,6 @@ impl Simulation {
         source: usize,
         destination: usize,
         message: &FipsPubsubWireMessage,
-        store: SubscriptionStore,
         purpose: SubscriptionPurpose,
         traffic_provenance: TrafficProvenance,
     ) -> Result<()> {
@@ -19,11 +17,14 @@ impl Simulation {
             .fips_codec
             .encode_frame(message)
             .map_err(pubsub_error)?;
+        let bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+        self.record_cpu_work(source, |work| {
+            work.fips_encode_bytes = work.fips_encode_bytes.saturating_add(bytes);
+        });
         self.schedule_subscription_frame(SubscriptionFrame::new(
             source,
             destination,
             payload,
-            store,
             purpose,
             traffic_provenance,
         ));
@@ -31,12 +32,17 @@ impl Simulation {
     }
 
     pub(in crate::simulation) fn schedule_subscription_frame(&mut self, frame: SubscriptionFrame) {
+        self.add_queued_resource_bytes(
+            frame.source,
+            u64::try_from(frame.payload.len()).unwrap_or(u64::MAX),
+        );
         self.scheduler
             .schedule_after(0, ScheduledAction::SendSubscription(frame));
     }
 
     pub(super) fn send_subscription_frame(&mut self, frame: SubscriptionFrame) {
         let bytes = u64::try_from(frame.payload.len()).unwrap_or(u64::MAX);
+        self.remove_queued_resource_bytes(frame.source, bytes);
         self.report.subscription_messages = self.report.subscription_messages.saturating_add(1);
         self.report.control_plane_wire_bytes =
             self.report.control_plane_wire_bytes.saturating_add(bytes);
@@ -63,11 +69,14 @@ impl Simulation {
             return;
         }
         let latency = self.link_latency_ms(frame.source, frame.destination);
+        self.add_queued_resource_bytes(frame.destination, bytes);
         self.scheduler
             .schedule_after(latency, ScheduledAction::SubscriptionArrived(frame));
     }
 
     pub(super) fn process_subscription_frame(&mut self, frame: SubscriptionFrame) -> Result<()> {
+        let bytes = u64::try_from(frame.payload.len()).unwrap_or(u64::MAX);
+        self.remove_queued_resource_bytes(frame.destination, bytes);
         if !self.topology.neighbors[frame.destination].contains(&frame.source) {
             self.report.unauthorized_source_drops =
                 self.report.unauthorized_source_drops.saturating_add(1);
@@ -79,7 +88,6 @@ impl Simulation {
             return Ok(());
         }
 
-        let bytes = u64::try_from(frame.payload.len()).unwrap_or(u64::MAX);
         self.traffic[frame.destination].record_message(
             TrafficDirection::Received,
             frame.traffic_provenance,
@@ -96,17 +104,16 @@ impl Simulation {
     }
 
     fn decode_subscription_frame(&mut self, frame: &SubscriptionFrame) -> Result<()> {
+        let bytes = u64::try_from(frame.payload.len()).unwrap_or(u64::MAX);
+        self.record_cpu_work(frame.destination, |work| {
+            work.fips_decode_bytes = work.fips_decode_bytes.saturating_add(bytes);
+        });
         let peer_id = SourceId::new(&self.peer_ids[frame.source]);
-        let before = self.subscription_count(frame.destination, frame.store, &peer_id);
-        let limit = self.subscription_limit(frame.destination, frame.store);
-        let decoded = match frame.store {
-            SubscriptionStore::Ordinary => self.nodes[frame.destination]
-                .wire
-                .decode_inbound(peer_id.clone(), &frame.payload),
-            SubscriptionStore::Rating => self.nodes[frame.destination]
-                .rating_wire
-                .decode_inbound(peer_id.clone(), &frame.payload),
-        };
+        let before = self.subscription_count(frame.destination, &peer_id);
+        let limit = self.subscription_limit(frame.destination);
+        let decoded = self.nodes[frame.destination]
+            .wire
+            .decode_inbound(peer_id.clone(), &frame.payload);
         let inbound = match decoded {
             Ok(inbound) => inbound,
             Err(error) => {
@@ -119,7 +126,8 @@ impl Simulation {
                 };
             }
         };
-        let after = self.subscription_count(frame.destination, frame.store, &peer_id);
+        let after = self.subscription_count(frame.destination, &peer_id);
+        self.observe_subscription_resource_state(frame.destination)?;
         let retry_completed = frame.attempt > 0
             && frame.is_reliable()
             && subscription_action_completed(frame.purpose, &inbound.message, before, after);
@@ -161,7 +169,7 @@ impl Simulation {
                 Ok(())
             }
             SubscriptionPurpose::Reconnect => {
-                self.replay_link_direction(frame.destination, frame.source, frame.store)
+                self.replay_link_direction(frame.destination, frame.source)
             }
             SubscriptionPurpose::Install | SubscriptionPurpose::Flood => Ok(()),
         }
@@ -173,6 +181,10 @@ impl Simulation {
         }
         frame.attempt = frame.attempt.saturating_add(1);
         self.report.subscription_retries = self.report.subscription_retries.saturating_add(1);
+        self.add_queued_resource_bytes(
+            frame.source,
+            u64::try_from(frame.payload.len()).unwrap_or(u64::MAX),
+        );
         self.scheduler.schedule_after(
             self.config
                 .retry_delay_ms
@@ -181,41 +193,19 @@ impl Simulation {
         );
     }
 
-    fn subscription_count(
-        &self,
-        provider: usize,
-        store: SubscriptionStore,
-        peer_id: &SourceId,
-    ) -> usize {
-        match store {
-            SubscriptionStore::Ordinary => self.nodes[provider]
-                .wire
-                .subscriptions()
-                .peer_subscription_count(peer_id),
-            SubscriptionStore::Rating => self.nodes[provider]
-                .rating_wire
-                .subscriptions()
-                .peer_subscription_count(peer_id),
-        }
+    fn subscription_count(&self, provider: usize, peer_id: &SourceId) -> usize {
+        self.nodes[provider]
+            .wire
+            .subscriptions()
+            .peer_subscription_count(peer_id)
     }
 
-    fn subscription_limit(&self, provider: usize, store: SubscriptionStore) -> usize {
-        match store {
-            SubscriptionStore::Ordinary => {
-                self.nodes[provider]
-                    .wire
-                    .subscriptions()
-                    .limits()
-                    .max_subscriptions_per_peer
-            }
-            SubscriptionStore::Rating => {
-                self.nodes[provider]
-                    .rating_wire
-                    .subscriptions()
-                    .limits()
-                    .max_subscriptions_per_peer
-            }
-        }
+    fn subscription_limit(&self, provider: usize) -> usize {
+        self.nodes[provider]
+            .wire
+            .subscriptions()
+            .limits()
+            .max_subscriptions_per_peer
     }
 }
 
@@ -240,10 +230,6 @@ fn subscription_action_completed(
 }
 
 fn subscription_fault_key(frame: &SubscriptionFrame) -> u64 {
-    let store = match frame.store {
-        SubscriptionStore::Ordinary => 0x4f52_4449_4e41_5259,
-        SubscriptionStore::Rating => 0x5241_5449_4e47_0000,
-    };
     let purpose = match frame.purpose {
         SubscriptionPurpose::Install => 1,
         SubscriptionPurpose::LifecycleClose => 2,
@@ -251,7 +237,7 @@ fn subscription_fault_key(frame: &SubscriptionFrame) -> u64 {
         SubscriptionPurpose::Reconnect => 4,
         SubscriptionPurpose::Flood => 5,
     };
-    hash_bytes(&frame.payload) ^ store ^ purpose
+    hash_bytes(&frame.payload) ^ purpose
 }
 
 #[cfg(test)]
@@ -295,7 +281,6 @@ mod tests {
             source,
             destination,
             payload,
-            SubscriptionStore::Ordinary,
             SubscriptionPurpose::Install,
             TrafficProvenance::Legitimate,
         )
@@ -393,7 +378,6 @@ mod tests {
             source,
             destination,
             payload,
-            SubscriptionStore::Ordinary,
             SubscriptionPurpose::LifecycleClose,
             TrafficProvenance::Legitimate,
         );
@@ -417,7 +401,6 @@ mod tests {
             source,
             destination,
             br#"["REQ","broken""#.to_vec(),
-            SubscriptionStore::Ordinary,
             SubscriptionPurpose::Install,
             TrafficProvenance::Legitimate,
         );
@@ -440,7 +423,6 @@ mod tests {
             source,
             destination,
             payload,
-            SubscriptionStore::Ordinary,
             SubscriptionPurpose::Flood,
             TrafficProvenance::Adversarial,
         ));

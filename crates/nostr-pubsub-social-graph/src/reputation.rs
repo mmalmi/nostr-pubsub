@@ -51,6 +51,32 @@ struct StoredPeerRating {
     rating: Rating,
 }
 
+/// Raw retained-state and deterministic work counters for [`PeerReputation`].
+///
+/// The retained counts describe the state held at the instant of the snapshot.
+/// Work counters are cumulative and saturating. `graph_rebuild_rating_entries`
+/// counts every retained rating supplied to a graph rebuild, so callers can
+/// apply platform-specific CPU weights without baking them into this crate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PeerReputationSnapshot {
+    pub retained_ratings: usize,
+    pub retained_raters: usize,
+    /// Distinct configured trust roots, including the local root.
+    pub trusted_roots: usize,
+    pub rating_events_considered: u64,
+    pub retained_rating_updates: u64,
+    pub graph_rebuilds: u64,
+    pub graph_rebuild_rating_entries: u64,
+}
+
+#[derive(Debug, Default)]
+struct PeerReputationWork {
+    rating_events_considered: u64,
+    retained_rating_updates: u64,
+    graph_rebuilds: u64,
+    graph_rebuild_rating_entries: u64,
+}
+
 /// A local, replayable trust projection for authenticated pubsub peers.
 ///
 /// Unknown peers remain eligible under the default policy. Ratings affect the
@@ -66,6 +92,7 @@ pub struct PeerReputation {
     latest: BTreeMap<PeerRatingKey, StoredPeerRating>,
     entries_by_rater: BTreeMap<String, usize>,
     next_prune_at_secs: Option<u64>,
+    work: PeerReputationWork,
 }
 
 /// The transport-neutral policies backed by a [`PeerReputation`] projection.
@@ -96,11 +123,17 @@ impl PeerReputationPolicies {
 
     pub async fn check_event(&self, event: &Event, source: &EventSource) -> Result<PolicyDecision> {
         let verified = VerifiedEvent::try_from(event.clone())?;
+        self.check_verified_event(&verified, source).await
+    }
+
+    /// Evaluate an event already verified at the transport trust boundary.
+    pub async fn check_verified_event(
+        &self,
+        event: &VerifiedEvent,
+        source: &EventSource,
+    ) -> Result<PolicyDecision> {
         self.events
-            .check_event(EventPolicyContext {
-                event: &verified,
-                source,
-            })
+            .check_event(EventPolicyContext { event, source })
             .await
     }
 }
@@ -141,6 +174,7 @@ impl PeerReputation {
                 latest: BTreeMap::new(),
                 entries_by_rater: BTreeMap::new(),
                 next_prune_at_secs: None,
+                work: PeerReputationWork::default(),
             },
             policies,
         ))
@@ -154,6 +188,21 @@ impl PeerReputation {
     #[must_use]
     pub fn scope(&self) -> &str {
         &self.scope
+    }
+
+    /// Returns retained-state gauges and cumulative deterministic work counts.
+    #[must_use]
+    pub fn snapshot(&self) -> PeerReputationSnapshot {
+        PeerReputationSnapshot {
+            retained_ratings: self.latest.len(),
+            retained_raters: self.entries_by_rater.len(),
+            trusted_roots: self.trusted_raters.len()
+                + usize::from(!self.trusted_raters.contains(&self.root)),
+            rating_events_considered: self.work.rating_events_considered,
+            retained_rating_updates: self.work.retained_rating_updates,
+            graph_rebuilds: self.work.graph_rebuilds,
+            graph_rebuild_rating_entries: self.work.graph_rebuild_rating_entries,
+        }
     }
 
     /// Ingests one rating event using the wall-clock Unix time.
@@ -212,9 +261,12 @@ impl PeerReputation {
     }
 
     fn consider_event(&mut self, event: &Event, now_secs: u64) -> (bool, bool) {
-        if event.kind != Kind::Custom(RATING_KIND) || event.verify().is_err() {
+        self.work.rating_events_considered = self.work.rating_events_considered.saturating_add(1);
+        if event.kind != Kind::Custom(RATING_KIND) {
             return (false, false);
         }
+        // `rating_from_event` verifies the event ID and signature before
+        // parsing, so a second verification here would only duplicate CPU.
         let Ok(mut rating) = rating_from_event(event) else {
             return (false, false);
         };
@@ -277,6 +329,10 @@ impl PeerReputation {
             .latest
             .get(&key)
             .is_some_and(|stored| stored.event_id == event_id);
+        self.work.retained_rating_updates = self
+            .work
+            .retained_rating_updates
+            .saturating_add(u64::from(retained));
         (
             retained,
             (retained && projection_may_change) || limits_exceeded,
@@ -368,7 +424,12 @@ impl PeerReputation {
         }
     }
 
-    fn rebuild(&self) -> Result<()> {
+    fn rebuild(&mut self) -> Result<()> {
+        self.work.graph_rebuilds = self.work.graph_rebuilds.saturating_add(1);
+        self.work.graph_rebuild_rating_entries = self
+            .work
+            .graph_rebuild_rating_entries
+            .saturating_add(u64::try_from(self.latest.len()).unwrap_or(u64::MAX));
         let mut graph = seeded_graph(&self.root, &self.trusted_raters)?;
         let ratings = self
             .latest

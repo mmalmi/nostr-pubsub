@@ -32,6 +32,15 @@ only when the verified signature, ID, kind, and serialized size match the
 inventory. Bounded fulfilled-route provenance absorbs delayed valid answers
 from requested alternatives without scoring them, while unrequested sources
 remain invalid. A want with neither a cached event nor a live route is ignored,
-and related transient state expires or is evicted together. `maintain()` and
-`peerBehaviorObservation()` expose the same valid-frame, invalid-message, and
-unserved-inventory evidence as Rust.
+and related transient state expires or is evicted together. Cached payloads are
+bounded by both count and `maxCachedEventBytes`, whose aggregate default is
+16 MiB. Seen-inventory and delivered-event deduplication have both TTL and count
+bounds. `retainedState()` reports raw cache bytes and state counts, while
+`maintain()` and `peerBehaviorObservation()` expose the same maintenance and
+evidence semantics as Rust.
+
+`publishVerified()`, `replayVerifiedToPeer()`, and `receiveVerifiedFrame()`
+avoid a repeated signature check only for immutable events returned by
+`verifyNostrEvent()`. Use `publish()`, `replayToPeer()`, or `receive()` for
+untrusted input. Type assertions are not a trust boundary and are rejected by
+the verified fast paths.

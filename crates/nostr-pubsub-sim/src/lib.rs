@@ -6,13 +6,14 @@ mod workload;
 
 pub use clock::VirtualScheduler;
 pub use metrics::{
-    LatencySummary, LoadSummary, NodeTrafficLedger, TrafficCounter, TrafficDirection,
-    TrafficProvenance, TrafficScope, basis_points, gini_basis_points, summarize_latencies,
-    summarize_load,
+    DistributionSummary, LatencySummary, LoadSummary, NodeTrafficLedger, TrafficCounter,
+    TrafficDirection, TrafficProvenance, TrafficScope, basis_points, gini_basis_points,
+    summarize_distribution, summarize_latencies, summarize_load,
 };
 pub use simulation::{
-    DirectedServiceLink, PeerSelectionMode, Result, SimulationConfig, SimulationError,
-    SimulationReport, run_simulation,
+    CpuWorkDistribution, DirectedServiceLink, NodeCpuWork, NodeRetainedUsage, PeerSelectionMode,
+    ResourceCohortReport, Result, RetainedUsageDistribution, SimulationConfig, SimulationError,
+    SimulationReport, SimulationResourceReport, run_simulation,
 };
 pub use topology::{
     DiscoverySelectionCounts, HybridSupernodeConfig, NodeRole, PeerMeshConfig,

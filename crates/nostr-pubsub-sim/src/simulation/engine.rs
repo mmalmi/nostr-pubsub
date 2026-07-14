@@ -1,12 +1,14 @@
 use super::{
     CHURN_END_MS, CHURN_START_MS, DirectedServiceLink, FipsPubsubWireMessage, InvWantAction,
     InvWantWireMessage, LinkOutage, MALFORMED_TRAINING_SAMPLES, MeshPeer, NodeRole, OutageCause,
-    Packet, PeerSelectionMode, PubsubDeliveryAction, PubsubDeliveryPolicy, REPUTATION_SWEEP_MS,
-    Result, ScheduledAction, Simulation, SimulationError, SourceId, SubscriptionClass,
-    SubscriptionPurpose, SubscriptionStore, TopologyStrategy, TrafficDirection, TrafficProvenance,
+    Packet, PeerSelectionMode, PubsubDeliveryAction, PubsubDeliveryPolicy, PubsubPeerInterest,
+    REPUTATION_SWEEP_MS, Result, ScheduledAction, Simulation, SimulationError, SourceId,
+    SubscriptionClass, SubscriptionPurpose, TopologyStrategy, TrafficDirection, TrafficProvenance,
     VerifiedEvent, hash_bytes, is_fresh_sybil, is_quiet_attacker, machine_admitted_class,
     message_fault_key, message_traffic_provenance, mix64, profile_subscription_id, pubsub_error,
 };
+use nostr::{Event, Kind};
+use nostr_social_memory::{RATING_KIND, rating_from_event};
 
 impl Simulation {
     pub(super) fn schedule_attack_pressure(&mut self) -> Result<()> {
@@ -229,19 +231,13 @@ impl Simulation {
 
     fn restore_link(&mut self, left: usize, right: usize) -> Result<()> {
         for (provider, subscriber) in [(left, right), (right, left)] {
-            let filters = self.nodes[subscriber].filters.clone();
+            let filters = self.subscription_filters_for(subscriber);
             self.schedule_subscription_message(
                 subscriber,
                 provider,
                 &FipsPubsubWireMessage::req(profile_subscription_id(subscriber), filters),
-                SubscriptionStore::Ordinary,
                 SubscriptionPurpose::Reconnect,
                 TrafficProvenance::Legitimate,
-            )?;
-            self.schedule_reputation_subscription(
-                provider,
-                subscriber,
-                SubscriptionPurpose::Reconnect,
             )?;
         }
         Ok(())
@@ -251,37 +247,34 @@ impl Simulation {
         &mut self,
         source: usize,
         destination: usize,
-        store: SubscriptionStore,
     ) -> Result<()> {
         let mut events = self.nodes[source]
             .local_events
             .values()
-            .filter(|event| {
-                let is_rating = self.reputation_events.contains_key(&event.id.to_hex());
-                is_rating == (store == SubscriptionStore::Rating)
-            })
             .cloned()
             .collect::<Vec<_>>();
         events.sort_by_key(|event| event.id);
         for event in events {
+            self.record_cpu_work(source, |work| {
+                work.signature_checks = work.signature_checks.saturating_add(1);
+            });
             let verified = VerifiedEvent::try_from(event.clone()).map_err(pubsub_error)?;
-            let subscriptions = match store {
-                SubscriptionStore::Ordinary => self.nodes[source].wire.subscriptions(),
-                SubscriptionStore::Rating => self.nodes[source].rating_wire.subscriptions(),
-            };
-            if PubsubDeliveryPolicy::inventory_to_subscribers().action_for_event(
-                subscriptions,
-                &SourceId::new(&self.peer_ids[destination]),
-                &verified,
-            ) != PubsubDeliveryAction::AnnounceInventory
+            let is_rating = self.is_rating_event(source, &verified);
+            if !self.subscription_announces(source, destination, &verified, is_rating)
                 || self.candidate_peer(source, destination)?.is_none()
             {
                 continue;
             }
+            self.record_avoided_signature_check(source);
             let actions = self.nodes[source]
                 .mesh
-                .replay_to_peer(event, &self.peer_ids[destination], self.scheduler.now_ms())
+                .replay_verified_to_peer(
+                    verified,
+                    &self.peer_ids[destination],
+                    self.scheduler.now_ms(),
+                )
                 .map_err(pubsub_error)?;
+            self.observe_core_resource_state(source);
             self.dispatch_actions(source, actions)?;
         }
         Ok(())
@@ -294,18 +287,27 @@ impl Simulation {
             .cloned()
             .ok_or_else(|| SimulationError::Pubsub(format!("missing event {event_id}")))?;
         let peers = self.interested_mesh_peers(metadata.publisher, &metadata.verified)?;
-        self.nodes[metadata.publisher]
-            .local_events
-            .insert(event_id.to_string(), metadata.event.clone());
+        self.retain_local_event(
+            metadata.publisher,
+            event_id.to_string(),
+            metadata.event.clone(),
+        )?;
         if metadata.legitimate && metadata.interested.contains(&metadata.publisher) {
             self.report.local_legitimate_deliveries =
                 self.report.local_legitimate_deliveries.saturating_add(1);
             self.record_delivery(metadata.publisher, event_id, metadata.publish_at_ms);
         }
+        self.record_cpu_work(metadata.publisher, |work| {
+            work.mesh_candidates = work
+                .mesh_candidates
+                .saturating_add(u64::try_from(peers.len()).unwrap_or(u64::MAX));
+            work.avoided_signature_checks = work.avoided_signature_checks.saturating_add(1);
+        });
         let actions = self.nodes[metadata.publisher]
             .mesh
-            .publish(metadata.event, &peers, self.scheduler.now_ms())
+            .publish_verified(metadata.verified, &peers, self.scheduler.now_ms())
             .map_err(pubsub_error)?;
+        self.observe_core_resource_state(metadata.publisher);
         self.dispatch_actions(metadata.publisher, actions)
     }
 
@@ -323,35 +325,31 @@ impl Simulation {
             return Ok(());
         };
         let key = (source, destination, event_id.to_string());
-        let Some(attempts) = self.retry_counts.get_mut(&key) else {
+        let Some(state) = self.retry_counts.get_mut(&key) else {
             return Ok(());
         };
-        if *attempts >= self.config.max_retries {
+        state.scheduled = false;
+        if state.attempts >= self.config.max_retries {
             self.retry_counts.remove(&key);
             return Ok(());
         }
-        *attempts = attempts.saturating_add(1);
-        let attempt = *attempts;
+        state.attempts = state.attempts.saturating_add(1);
         self.report.retry_inventories = self.report.retry_inventories.saturating_add(1);
+        self.record_cpu_work(source, |work| {
+            work.signature_checks = work.signature_checks.saturating_add(1);
+            work.avoided_signature_checks = work.avoided_signature_checks.saturating_add(1);
+        });
+        let verified = VerifiedEvent::try_from(event).map_err(pubsub_error)?;
         let actions = self.nodes[source]
             .mesh
-            .replay_to_peer(event, &self.peer_ids[destination], self.scheduler.now_ms())
+            .replay_verified_to_peer(
+                verified,
+                &self.peer_ids[destination],
+                self.scheduler.now_ms(),
+            )
             .map_err(pubsub_error)?;
+        self.observe_core_resource_state(source);
         self.dispatch_actions(source, actions)?;
-        if attempt < self.config.max_retries {
-            self.scheduler.schedule_after(
-                self.config
-                    .retry_delay_ms
-                    .saturating_mul(u64::from(attempt).saturating_add(1)),
-                ScheduledAction::RetryInventory {
-                    source,
-                    destination,
-                    event_id: event_id.to_string(),
-                },
-            );
-        } else {
-            self.retry_counts.remove(&key);
-        }
         Ok(())
     }
 
@@ -361,6 +359,8 @@ impl Simulation {
             destination,
             payload,
         } = packet;
+        let bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+        self.remove_queued_resource_bytes(destination, bytes);
         if !self.topology.neighbors[destination].contains(&source) {
             self.report.unauthorized_source_drops =
                 self.report.unauthorized_source_drops.saturating_add(1);
@@ -372,7 +372,6 @@ impl Simulation {
             return Ok(());
         }
         let provenance = self.payload_traffic_provenance(&payload);
-        let bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
         self.traffic[destination].record_message(TrafficDirection::Received, provenance, bytes);
         self.record_link_traffic(
             source,
@@ -384,13 +383,33 @@ impl Simulation {
         if self.topology.roles[destination] == NodeRole::Attacker {
             return self.process_attacker_packet(source, destination, &payload);
         }
+        self.process_honest_packet(source, destination, &payload, provenance, bytes)
+    }
+
+    fn process_honest_packet(
+        &mut self,
+        source: usize,
+        destination: usize,
+        payload: &[u8],
+        provenance: TrafficProvenance,
+        bytes: u64,
+    ) -> Result<()> {
         if self.machine_rejects_ingress(source, destination, provenance) {
             return Ok(());
         }
-        let Ok(message) = self.codec.decode(&payload) else {
+        self.record_cpu_work(destination, |work| {
+            work.invwant_decode_bytes = work.invwant_decode_bytes.saturating_add(bytes);
+        });
+        let Ok(message) = self.codec.decode(payload) else {
             self.record_invalid_message(destination, source);
             return Ok(());
         };
+        if let InvWantWireMessage::Inventory { event_id, .. } = &message {
+            self.finish_inventory_retry(source, destination, event_id);
+        }
+        if let InvWantWireMessage::Want { event_id } = &message {
+            self.finish_inventory_retry(destination, source, event_id);
+        }
         if self.mode != PeerSelectionMode::Neutral
             && matches!(&message, InvWantWireMessage::Inventory { .. })
         {
@@ -398,8 +417,12 @@ impl Simulation {
                 .entry((destination, source))
                 .or_insert(self.scheduler.now_ms());
         }
+        let mut verified_frame = None;
         let peers = match &message {
-            InvWantWireMessage::Frame { event, .. } => {
+            InvWantWireMessage::Frame { event_id, event } => {
+                self.record_cpu_work(destination, |work| {
+                    work.signature_checks = work.signature_checks.saturating_add(1);
+                });
                 let Ok(verified) = VerifiedEvent::try_from((**event).clone()) else {
                     self.record_invalid_message(destination, source);
                     return Ok(());
@@ -409,27 +432,44 @@ impl Simulation {
                     self.nodes[destination]
                         .mesh
                         .dismiss_frame(&self.peer_ids[source], &event_id);
+                    self.observe_core_resource_state(destination);
                     self.nodes[destination]
                         .rejected_events
                         .insert(event_id.clone());
                     self.record_policy_drop(&event_id, drop);
                     return Ok(());
                 }
-                if self.reputation_events.contains_key(&event.id.to_hex()) {
-                    self.interested_reputation_peers(destination, &verified)?
-                } else {
-                    self.interested_mesh_peers(destination, &verified)?
-                }
+                let peers = self.interested_mesh_peers(destination, &verified)?;
+                verified_frame = Some((event_id.clone(), verified));
+                peers
             }
             _ => Vec::new(),
         };
         let source_id = self.peer_ids[source].clone();
-        let Ok(actions) = self.nodes[destination].mesh.receive(
-            &source_id,
-            message,
-            &peers,
-            self.scheduler.now_ms(),
-        ) else {
+        self.record_cpu_work(destination, |work| {
+            work.mesh_candidates = work
+                .mesh_candidates
+                .saturating_add(u64::try_from(peers.len()).unwrap_or(u64::MAX));
+        });
+        let result = if let Some((event_id, verified)) = verified_frame {
+            self.record_avoided_signature_check(destination);
+            self.nodes[destination].mesh.receive_verified_frame(
+                &source_id,
+                &event_id,
+                verified,
+                &peers,
+                self.scheduler.now_ms(),
+            )
+        } else {
+            self.nodes[destination].mesh.receive(
+                &source_id,
+                message,
+                &peers,
+                self.scheduler.now_ms(),
+            )
+        };
+        self.observe_core_resource_state(destination);
+        let Ok(actions) = result else {
             self.record_mesh_rejection(destination, source);
             return Ok(());
         };
@@ -442,6 +482,10 @@ impl Simulation {
         destination: usize,
         payload: &[u8],
     ) -> Result<()> {
+        let bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+        self.record_cpu_work(destination, |work| {
+            work.invwant_decode_bytes = work.invwant_decode_bytes.saturating_add(bytes);
+        });
         let Ok(message) = self.codec.decode(payload) else {
             self.report.dropped_at_attackers = self.report.dropped_at_attackers.saturating_add(1);
             return Ok(());
@@ -456,15 +500,14 @@ impl Simulation {
             self.report.dropped_at_attackers = self.report.dropped_at_attackers.saturating_add(1);
             return Ok(());
         }
-        let actions = self.nodes[destination]
-            .mesh
-            .receive(
-                &self.peer_ids[source],
-                message,
-                &[],
-                self.scheduler.now_ms(),
-            )
-            .map_err(pubsub_error)?;
+        let result = self.nodes[destination].mesh.receive(
+            &self.peer_ids[source],
+            message,
+            &[],
+            self.scheduler.now_ms(),
+        );
+        self.observe_core_resource_state(destination);
+        let actions = result.map_err(pubsub_error)?;
         self.dispatch_actions(destination, actions)
     }
 
@@ -485,6 +528,7 @@ impl Simulation {
                     .or_insert(self.scheduler.now_ms());
             }
         }
+        self.observe_core_resource_state(destination);
     }
 
     fn record_mesh_rejection(&mut self, destination: usize, source: usize) {
@@ -520,10 +564,9 @@ impl Simulation {
                         && self.events.get(&event_id).is_some_and(|metadata| {
                             metadata.legitimate && metadata.interested.contains(&source)
                         });
-                    self.nodes[source]
-                        .local_events
-                        .insert(event_id.clone(), event.clone());
+                    self.retain_local_event(source, event_id.clone(), event.clone())?;
                     if self.reputation_events.contains_key(&event_id) {
+                        self.finish_delivery_retries(source, &event_id);
                         self.receive_reputation_event(source, &event)?;
                     } else {
                         self.record_delivery(source, &event_id, self.scheduler.now_ms());
@@ -576,6 +619,9 @@ impl Simulation {
         let payload = self.codec.encode(message).map_err(pubsub_error)?;
         let fault_key = message_fault_key(message);
         let bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+        self.record_cpu_work(source, |work| {
+            work.invwant_encode_bytes = work.invwant_encode_bytes.saturating_add(bytes);
+        });
         let provenance = message_traffic_provenance(message, &self.events, &self.reputation_events);
         self.traffic[source].record_message(TrafficDirection::Sent, provenance, bytes);
         self.record_link_traffic(
@@ -587,11 +633,8 @@ impl Simulation {
         );
         self.report.data_plane_wire_bytes = self.report.data_plane_wire_bytes.saturating_add(bytes);
         match message {
-            InvWantWireMessage::Inventory { event_id, .. } => {
+            InvWantWireMessage::Inventory { .. } => {
                 self.report.inventory_messages = self.report.inventory_messages.saturating_add(1);
-                if self.nodes[source].local_events.contains_key(event_id) {
-                    self.schedule_retry_if_needed(source, destination, event_id);
-                }
             }
             InvWantWireMessage::Want { .. } => {
                 self.report.want_messages = self.report.want_messages.saturating_add(1);
@@ -606,6 +649,7 @@ impl Simulation {
             self.note_disrupted_message(source, destination, message);
             return Ok(());
         }
+        self.add_queued_resource_bytes(destination, bytes);
         self.scheduler.schedule_at(
             arrival_at_ms,
             ScheduledAction::Packet(Packet {
@@ -642,6 +686,7 @@ impl Simulation {
             self.report.dropped_packets = self.report.dropped_packets.saturating_add(1);
             return;
         }
+        self.add_queued_resource_bytes(destination, bytes);
         self.scheduler.schedule_at(
             at_ms,
             ScheduledAction::Packet(Packet {
@@ -682,6 +727,10 @@ impl Simulation {
         };
         self.delivery_times.insert(key.clone(), delivered_at_ms);
         if metadata.legitimate {
+            let useful_payload = (metadata.publisher != node
+                && metadata.interested.contains(&node)
+                && self.topology.roles[node] == NodeRole::Peer)
+                .then_some(metadata.payload_bytes);
             if !metadata.interested.contains(&node) && self.topology.roles[node] == NodeRole::Peer {
                 self.report.uninterested_deliveries =
                     self.report.uninterested_deliveries.saturating_add(1);
@@ -695,6 +744,9 @@ impl Simulation {
                     .report
                     .eventual_disrupted_transfer_recoveries
                     .saturating_add(1);
+            }
+            if let Some(bytes) = useful_payload {
+                self.record_useful_payload(node, bytes);
             }
         } else if self.topology.roles[node] == NodeRole::Peer {
             if !metadata.interested.contains(&node) {
@@ -737,27 +789,23 @@ impl Simulation {
         }
     }
 
-    fn interested_mesh_peers(
+    pub(in crate::simulation) fn interested_mesh_peers(
         &mut self,
         source: usize,
         event: &VerifiedEvent,
     ) -> Result<Vec<MeshPeer>> {
-        let delivery = PubsubDeliveryPolicy::inventory_to_subscribers();
         let signed_spam_class = self
             .events
             .get(&event.as_event().id.to_hex())
             .filter(|metadata| !metadata.legitimate)
             .map(|metadata| metadata.class);
+        let is_rating = self.is_rating_event(source, event);
         let mut peers = Vec::new();
         for destination in self.topology.neighbors[source].clone() {
             if !self.link_is_active(source, destination) {
                 continue;
             }
-            let subscribed = delivery.action_for_event(
-                self.nodes[source].wire.subscriptions(),
-                &SourceId::new(&self.peer_ids[destination]),
-                event,
-            ) == PubsubDeliveryAction::AnnounceInventory;
+            let subscribed = self.subscription_announces(source, destination, event, is_rating);
             if let Some(class) = signed_spam_class
                 && self.topology.roles[destination] == NodeRole::Peer
             {
@@ -795,14 +843,66 @@ impl Simulation {
         Ok(peers)
     }
 
+    fn subscription_announces(
+        &mut self,
+        source: usize,
+        destination: usize,
+        event: &VerifiedEvent,
+        is_rating: bool,
+    ) -> bool {
+        let peer_id = SourceId::new(&self.peer_ids[destination]);
+        let remote_candidates = self.nodes[source]
+            .wire
+            .subscriptions()
+            .peer_filter_count(&peer_id);
+        let local_filters = if is_rating {
+            &self.nodes[destination].rating_filters
+        } else {
+            &self.nodes[destination].filters
+        };
+        let local_candidates = local_filters.len();
+        let locally_subscribed = PubsubPeerInterest::from_filters(local_filters, event)
+            == PubsubPeerInterest::Subscribed;
+        self.record_cpu_work(source, |work| {
+            work.filter_queries = work.filter_queries.saturating_add(2);
+            work.filter_candidates = work.filter_candidates.saturating_add(
+                u64::try_from(remote_candidates.saturating_add(local_candidates))
+                    .unwrap_or(u64::MAX),
+            );
+        });
+        PubsubDeliveryPolicy::inventory_to_subscribers().action_for_event(
+            self.nodes[source].wire.subscriptions(),
+            &peer_id,
+            event,
+        ) == PubsubDeliveryAction::AnnounceInventory
+            && locally_subscribed
+    }
+
+    fn is_rating_event(&mut self, source: usize, event: &VerifiedEvent) -> bool {
+        let event: &Event = event.as_event();
+        if event.kind != Kind::from(RATING_KIND) || !event.content.is_empty() {
+            return false;
+        }
+        self.record_cpu_work(source, |work| {
+            work.signature_checks = work.signature_checks.saturating_add(1);
+        });
+        rating_from_event(event).is_ok()
+    }
+
     pub(in crate::simulation) fn candidate_peer(
-        &self,
+        &mut self,
         source: usize,
         destination: usize,
     ) -> Result<Option<MeshPeer>> {
-        if self.mode == PeerSelectionMode::SharedReputation
-            && let Some(policies) = self.nodes[source].machine_policies.as_ref()
-        {
+        if self.mode == PeerSelectionMode::SharedReputation {
+            self.record_cpu_work(source, |work| {
+                work.graph_queries = work.graph_queries.saturating_add(1);
+            });
+        }
+        if self.mode == PeerSelectionMode::SharedReputation {
+            let Some(policies) = self.nodes[source].machine_policies.as_ref() else {
+                return Ok(Some(MeshPeer::new(&self.peer_ids[destination])));
+            };
             let machine = policies
                 .select_mesh_peer(&self.peer_ids[destination])
                 .map_err(pubsub_error)?;

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::metrics::{TrafficScope, basis_points, summarize_latencies, summarize_load};
 use crate::topology::NodeRole;
 
-use super::{Simulation, SpamIdentity, SubscriptionClass, class_name};
+use super::{Result, Simulation, SpamIdentity, SubscriptionClass, class_name};
 
 struct DeliveryObservations {
     delivered: usize,
@@ -12,13 +12,15 @@ struct DeliveryObservations {
 }
 
 impl Simulation {
-    pub(super) fn finalize_report(&mut self) {
+    pub(super) fn finalize_report(&mut self) -> Result<()> {
         let observations = self.delivery_observations();
         let delivered = observations.delivered;
         self.finalize_delivery_metrics(observations);
         self.finalize_adversarial_metrics();
         self.finalize_service_metrics();
         self.finalize_efficiency_metrics(delivered);
+        self.finalize_resource_metrics()?;
+        Ok(())
     }
 
     fn delivery_observations(&self) -> DeliveryObservations {

@@ -1,6 +1,8 @@
 import type { Event, VerifiedEvent } from 'nostr-tools/core';
 import type { Filter } from 'nostr-tools/filter';
-import { verifyEvent } from 'nostr-tools/pure';
+import { verifiedSymbol, verifyEvent } from 'nostr-tools/pure';
+
+const verifiedEventCopies = new WeakSet<NostrVerifiedEvent>();
 
 export type NostrEvent = Event;
 export type NostrFilter = Filter;
@@ -30,7 +32,24 @@ export class PubsubError extends Error {
 }
 
 export function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent {
-  let candidate: NostrEvent;
+  const candidate = cloneNostrEvent(event);
+  if (!verifyEvent(candidate)) {
+    throw PubsubError.validation('invalid Nostr event id or signature');
+  }
+  return freezeVerifiedEvent(candidate);
+}
+
+/** Defensive immutable copy for an event already checked at a trust boundary. */
+export function copyVerifiedNostrEvent(event: NostrVerifiedEvent): NostrVerifiedEvent {
+  if (!verifiedEventCopies.has(event)) {
+    throw PubsubError.validation('verified mesh paths require verifyNostrEvent output');
+  }
+  const candidate = cloneNostrEvent(event) as NostrVerifiedEvent;
+  candidate[verifiedSymbol] = true;
+  return freezeVerifiedEvent(candidate);
+}
+
+function cloneNostrEvent(event: NostrEvent): NostrEvent {
   try {
     if (
       !Array.isArray(event.tags) ||
@@ -40,7 +59,7 @@ export function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent {
     ) {
       throw new TypeError('invalid tags');
     }
-    candidate = {
+    return {
       id: event.id,
       pubkey: event.pubkey,
       created_at: event.created_at,
@@ -52,7 +71,9 @@ export function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent {
   } catch {
     throw PubsubError.validation('invalid Nostr event structure');
   }
+}
 
+function freezeVerifiedEvent(candidate: NostrVerifiedEvent): NostrVerifiedEvent {
   if (
     !Number.isSafeInteger(candidate.created_at) ||
     candidate.created_at < 0 ||
@@ -62,11 +83,9 @@ export function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent {
   ) {
     throw PubsubError.validation('invalid Nostr event timestamp or kind');
   }
-  if (!verifyEvent(candidate)) {
-    throw PubsubError.validation('invalid Nostr event id or signature');
-  }
 
   for (const tag of candidate.tags) Object.freeze(tag);
   Object.freeze(candidate.tags);
+  verifiedEventCopies.add(candidate);
   return Object.freeze(candidate);
 }

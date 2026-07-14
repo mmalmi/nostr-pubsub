@@ -17,6 +17,7 @@ const MIN_EVENTUAL_DISRUPTED_TRANSFER_RECOVERY_BPS: u32 = 3_000;
 const MIN_PEER_MESH_SPAM_SUPPRESSION_BPS: u32 = 5_000;
 const MIN_HYBRID_SPAM_SUPPRESSION_BPS: u32 = 5_000;
 const MIN_PERSISTENT_MACHINE_SPAM_SUPPRESSION_BPS: u32 = 5_000;
+const MIN_VERIFIED_PATH_SIGNATURE_REDUCTION_BPS: u32 = 2_000;
 const SPAM_IDENTITIES: [&str; 2] = ["persistent", "fresh-sybil"];
 const SUBSCRIPTION_CLASSES: [&str; 8] = [
     "author-feed",
@@ -63,6 +64,7 @@ fn production_like_thousand_node_adversarial_matrix() {
                 assert_signed_spam_identity_metrics(report, &case);
                 assert_legitimate_delivery_is_safe(report, &case);
                 assert_service_accounting_is_populated(report, &case);
+                assert_honest_resource_accounting(report, &case);
             }
             assert_shared_reputation_improves_spam_resistance(&reports, &case);
             assert_machine_reputation_used_real_transport(&reports.shared, &case);
@@ -99,6 +101,7 @@ fn thousand_node_supernode_discovery_strategy_matrix() {
         eprintln!("{}", report_context(&report, &case));
         assert_legitimate_delivery_is_safe(&report, &case);
         assert_service_accounting_is_populated(&report, &case);
+        assert_honest_resource_accounting(&report, &case);
         assert_supernode_report(&report, &case);
         outcomes.insert((
             report.honest_supernode_links,
@@ -120,6 +123,95 @@ fn thousand_node_supernode_discovery_strategy_matrix() {
     assert!(
         outcomes.len() >= 3,
         "discovery strategies must produce materially different selections: {outcomes:?}"
+    );
+}
+
+#[test]
+#[ignore = "bounded retained-state gate with tenfold adversarial duration and load"]
+fn protocol_state_is_bounded_after_tenfold_spam() {
+    let baseline = run(
+        retained_state_stress_config(1),
+        PeerSelectionMode::SharedReputation,
+    );
+    let stressed = run(
+        retained_state_stress_config(10),
+        PeerSelectionMode::SharedReputation,
+    );
+    let baseline_resources = baseline.resource_usage.honest_peers;
+    let stressed_resources = stressed.resource_usage.honest_peers;
+    let context = format!(
+        "baseline={{spam_events:{} fake_inv:{} state_p95:{} state_max:{} protocol_p95:{} protocol_max:{}}} stressed={{spam_events:{} fake_inv:{} state_p95:{} state_max:{} protocol_p95:{} protocol_max:{}}}",
+        baseline.spam_events,
+        baseline.injected_attack_inventories,
+        baseline_resources.final_retained.state_entries.p95,
+        baseline_resources.final_retained.state_entries.max,
+        baseline_resources.final_retained.protocol_content_bytes.p95,
+        baseline_resources.final_retained.protocol_content_bytes.max,
+        stressed.spam_events,
+        stressed.injected_attack_inventories,
+        stressed_resources.final_retained.state_entries.p95,
+        stressed_resources.final_retained.state_entries.max,
+        stressed_resources.final_retained.protocol_content_bytes.p95,
+        stressed_resources.final_retained.protocol_content_bytes.max,
+    );
+    eprintln!("{context}");
+
+    assert_eq!(stressed.spam_events, baseline.spam_events * 10, "{context}");
+    assert!(
+        stressed.injected_attack_inventories >= baseline.injected_attack_inventories * 8,
+        "fixed unauthorized probes make total injected inventories slightly less than 10x: {context}"
+    );
+    assert_legitimate_delivery_is_safe(&stressed, "tenfold-retained-state");
+    for report in [&baseline, &stressed] {
+        let resources = report.resource_usage;
+        assert!(resources.quiescence_at_ms >= report.virtual_duration_ms);
+        assert_eq!(resources.honest_all.final_retained.queued_wire_bytes.max, 0);
+        assert_eq!(
+            resources.honest_peers.final_retained.cached_event_bytes.max,
+            0
+        );
+        assert!(resources.honest_peers.peak_retained.cached_event_bytes.max <= 16 * 1024 * 1024);
+    }
+    assert_ten_percent_growth_bound(
+        baseline_resources.final_retained.protocol_content_bytes.p95,
+        stressed_resources.final_retained.protocol_content_bytes.p95,
+        &context,
+    );
+    assert_ten_percent_growth_bound(
+        baseline_resources.final_retained.state_entries.p95,
+        stressed_resources.final_retained.state_entries.p95,
+        &context,
+    );
+    assert_ten_percent_growth_bound(
+        baseline_resources.final_retained.state_entries.max,
+        stressed_resources.final_retained.state_entries.max,
+        &context,
+    );
+}
+
+fn retained_state_stress_config(multiplier: usize) -> SimulationConfig {
+    SimulationConfig {
+        node_count: 64,
+        attacker_count: 16,
+        fanout: 6,
+        fake_inventories_per_attack_link: 6 * multiplier,
+        signed_spam_rounds: 8 * multiplier,
+        max_processed_actions: 5_000_000,
+        seed: RELEASE_SEEDS[0],
+        topology: TopologyStrategy::PeerMesh,
+        loss_basis_points: 0,
+        churn_basis_points: 0,
+        supernode_count: 4,
+        false_supernode_count: 2,
+        ..SimulationConfig::default()
+    }
+}
+
+fn assert_ten_percent_growth_bound(baseline: u64, stressed: u64, context: &str) {
+    let allowed = baseline.saturating_add(baseline.saturating_add(9) / 10);
+    assert!(
+        stressed <= allowed,
+        "tenfold spam grew quiescent retained state more than 10% ({baseline} -> {stressed}, allowed {allowed}): {context}"
     );
 }
 
@@ -702,6 +794,74 @@ fn assert_service_accounting_is_populated(report: &SimulationReport, case: &str)
         "role and link delivery credits must conserve: {context}"
     );
     assert!(role_service_bytes(report, NodeRole::Peer) > 0, "{context}");
+}
+
+fn assert_honest_resource_accounting(report: &SimulationReport, case: &str) {
+    let context = report_context(report, case);
+    let resources = report.resource_usage;
+    let all = resources.honest_all;
+    let peers = resources.honest_peers;
+    let supernodes = resources.honest_supernodes;
+    assert_eq!(
+        all.combined_bytes.count, report.honest_node_count,
+        "{context}"
+    );
+    assert_eq!(
+        peers
+            .combined_bytes
+            .count
+            .saturating_add(supernodes.combined_bytes.count),
+        report.honest_node_count,
+        "{context}"
+    );
+    assert_eq!(
+        all.combined_bytes.total,
+        all.sent_bytes
+            .total
+            .saturating_add(all.received_bytes.total),
+        "endpoint I/O must conserve: {context}"
+    );
+    assert_eq!(
+        all.adversarial_combined_bytes.total, resources.honest_adversarial_combined_bytes,
+        "honest adversarial I/O must conserve: {context}"
+    );
+    assert!(peers.cpu_work.codec_bytes.p95 > 0, "{context}");
+    assert!(peers.cpu_work.signature_checks.p95 > 0, "{context}");
+    assert!(peers.cpu_work.avoided_signature_checks.p95 > 0, "{context}");
+    if report.mode == PeerSelectionMode::SharedReputation {
+        let without_fast_paths = peers.cpu_work.signature_checks_without_verified_paths.p95;
+        let reduction = without_fast_paths.saturating_sub(peers.cpu_work.signature_checks.p95);
+        assert!(
+            basis_points(reduction, without_fast_paths)
+                >= MIN_VERIFIED_PATH_SIGNATURE_REDUCTION_BPS,
+            "verified paths must reduce honest-peer p95 signature work by at least 20%: {context}"
+        );
+    }
+    assert!(peers.cpu_work.filter_candidates.p95 > 0, "{context}");
+    assert!(peers.peak_retained.exact_content_bytes.p95 > 0, "{context}");
+    assert!(peers.peak_retained.state_entries.p95 > 0, "{context}");
+    assert_eq!(all.final_retained.queued_wire_bytes.max, 0, "{context}");
+    assert!(
+        peers.peak_retained.exact_content_bytes.max >= peers.final_retained.exact_content_bytes.max,
+        "{context}"
+    );
+    assert!(
+        peers.peak_retained.cached_event_bytes.max <= 16 * 1024 * 1024,
+        "ordinary peer cache cap exceeded: {context}"
+    );
+    assert!(resources.attacker_adversarial_sent_bytes > 0, "{context}");
+    assert!(
+        resources.victim_bandwidth_amplification_basis_points > 0,
+        "{context}"
+    );
+    if report.topology == TopologyStrategy::HybridSupernodes {
+        assert_eq!(supernodes.combined_bytes.count, report.supernode_count);
+        assert!(supernodes.cpu_work.codec_bytes.p95 > 0, "{context}");
+        assert!(
+            supernodes.peak_retained.cached_event_bytes.max <= 256 * 1024 * 1024,
+            "supernode cache cap exceeded: {context}"
+        );
+    }
 }
 
 fn assert_supernode_discovery_and_service(reports: &ModeReports, case: &str) {

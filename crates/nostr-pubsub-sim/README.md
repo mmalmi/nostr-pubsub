@@ -31,11 +31,14 @@ representative subscription shapes:
 8. NIP-34 repository announcement: kind 30617 plus author and repository `d`.
 
 Subscriptions traverse the production FIPS pubsub `REQ`/`CLOSE` codec,
-adapter, and bounded subscription store. Publications traverse the production
-`InvWantMesh`, inventory/want/frame codec, routing, deduplication, retry, and
-filter-based subscriber selection. Supernodes use the same paths with a larger
-fanout, larger connection capacity, an all-kinds mesh, and a subscribe-all
-filter.
+adapter, and bounded subscription store. Each directed link has one combined
+subscription: its ordinary profile filters and, in shared-reputation mode, its
+machine-rating filters occupy the same `REQ` and store entry. Event-class
+admission still decides which part applies. Publications traverse the
+production `InvWantMesh`, inventory/want/frame codec, routing, deduplication,
+retry, and filter-based subscriber selection. Supernodes use the same paths
+with a larger fanout, larger connection capacity, an all-kinds mesh, and a
+subscribe-all filter.
 
 Ordinary peers keep only their organic profile filters: attackers do not add a
 filter to a victim to manufacture interest. Where attacker identity does not
@@ -85,14 +88,14 @@ without manufacturing an ordinary data-path failure; it is still accounted as
 spam. The simulator demonstrates this risk, not a defense against a compromised
 trust anchor.
 
-Ordinary and rating `REQ`/`CLOSE` control frames also traverse the virtual
-scheduler and production FIPS adapter. Legitimate controls retry after loss or a
-down link within the configured retry bound; malformed, unauthorized, and flood
-traffic does not. Reconnect replay begins only after the reconnect subscription
-arrives and is accepted. A retry counts as recovered only after its intended
-store state change and any reconnect replay complete. Attempted and received
-control traffic contributes to the same node/link service accounting, and
-control loss contributes to the packet-drop KPI.
+The combined profile-and-rating `REQ`/`CLOSE` control frames also traverse the
+virtual scheduler and production FIPS adapter. Legitimate controls retry after
+loss or a down link within the configured retry bound; malformed, unauthorized,
+and flood traffic does not. Reconnect replay begins only after the reconnect
+subscription arrives and is accepted. A retry counts as recovered only after
+its intended store state change and any reconnect replay complete. Attempted
+and received control traffic contributes to the same node/link service
+accounting, and control loss contributes to the packet-drop KPI.
 
 ## Topologies and supernode discovery
 
@@ -158,6 +161,76 @@ The CSV report has one row per topology and peer-selection mode. It covers:
   close/reopen behavior;
 - initial-topology discovery precision and honest coverage, false-only
   selections, supernode maximum/mean load, and load Gini concentration.
+
+### Honest-node resource measurement
+
+Resource distributions are reported separately for all honest nodes, ordinary
+honest peers, and honest supernodes. Use p50 to understand normal cost, but use
+p95, p99, and maximum as the optimization and denial-of-service signals:
+
+- bandwidth is the exact encoded pubsub payload bytes sent and received by each
+  simulated node, including inv/want data and FIPS subscription/control
+  payloads. `combined_bytes` is endpoint I/O (`sent + received`), so one payload
+  crossing a link appears at both endpoints; it is not unique network traffic.
+  These numbers exclude FIPS stream framing, transport encryption, IP headers,
+  and substrate retransmission. Measure or estimate those separately. Useful
+  payload credits only successful remote legitimate deliveries to interested
+  ordinary peers. Attacker-sent adversarial bytes versus honest adversarial
+  endpoint I/O gives the victim bandwidth-amplification ratio;
+- CPU is a deterministic, per-node vector of production-path work: encoded and
+  decoded codec bytes, signature checks, filter queries and candidates, mesh
+  candidates, graph queries, rating events considered, and reputation rebuild
+  entries. It separately counts checks skipped by verified-event APIs and
+  reports the exact no-fast-path signature-check counterfactual, so the p95 CPU
+  optimization gate does not depend on wall-clock noise. Filter candidates are
+  a conservative upper bound because matching may short-circuit. The simulator
+  deliberately assigns no universal weights. Calibrate these primitives with
+  production-code microbenchmarks on each target class of hardware, then
+  validate matched release scenarios with process CPU counters and a profiler.
+  The whole simulator's CPU time includes scheduler and shared simulation
+  overhead and must not be divided by its simulated node count;
+- retained memory reports simultaneous high-water and final values for exact
+  encoded content: cached event payloads, canonical subscription `REQ` state,
+  local filters and events, and queued wire payloads. State-entry counts cover
+  mesh routes and deduplication plus subscriptions, filters, ratings, raters,
+  and trust roots. Encoded content is a lower bound, not Rust heap usage: struct,
+  hash-table, allocation, and allocator overhead are excluded. Calibrate entry
+  footprints and validate RSS or heap profiles in an isolated production-shaped
+  node process. Do not divide the multi-node simulator's RSS by node count.
+
+`virtual_ms` is protocol time for delivery latency, churn, outages, retry, and
+reputation convergence. The virtual clock has no sleeps and says nothing about
+CPU duration or throughput of the simulator itself.
+
+### KPI priority and optimization targets
+
+Optimize in this order. A cheaper system is not an improvement if it censors
+honest traffic or stops delivering it:
+
+1. protocol/security correctness: exact accounting, no forged-rating bypass,
+   and zero honest-observer false removals;
+2. legitimate availability: at least 95% aggregate and 90% worst subscription
+   cohort delivery in the release matrix;
+3. adversarial tail cost: honest-peer and honest-supernode p99/maximum CPU-work,
+   retained memory, and bandwidth, not only averages;
+4. attack leverage: victim bandwidth amplification and persistent
+   machine-admitted spam suppression, with at least 50% suppression;
+5. useful-delivery efficiency: bytes and calibrated CPU per interested remote
+   delivery;
+6. tail latency, disrupted-transfer recovery, and machine-removal convergence;
+7. supernode load concentration and dependence on any one topology;
+8. median clean-load cost and simulator runtime.
+
+For an optimization candidate, compare identical seeds and topologies against a
+recorded shared-reputation baseline. The working resource goal is at least a
+20% reduction in either the dominant honest-peer p95 CPU-work component or
+bytes per useful delivery, without more than a 10% regression in calibrated
+process CPU/RSS or delivery latency. A 10x longer or heavier spam workload
+should add no more than 10% to quiescent production pubsub retained state after
+expiry; application-owned local history is reported separately and is not
+mistaken for expiring mesh state. Keep ordinary-peer cached event payloads
+within 16 MiB and supernode payloads within 256 MiB. Correctness and delivery
+thresholds above are hard constraints, not terms in a weighted score.
 
 Traffic ledgers retain legitimate/adversarial workload provenance in both
 directions for every directed link and aggregate it by peer, supernode, and

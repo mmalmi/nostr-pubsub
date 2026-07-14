@@ -14,4 +14,6 @@ export declare class PubsubError extends Error {
     static storage(message: string): PubsubError;
 }
 export declare function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent;
+/** Defensive immutable copy for an event already checked at a trust boundary. */
+export declare function copyVerifiedNostrEvent(event: NostrVerifiedEvent): NostrVerifiedEvent;
 //# sourceMappingURL=types.d.ts.map

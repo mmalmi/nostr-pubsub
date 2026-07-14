@@ -357,6 +357,34 @@ fn clean_and_disabled_attack_configs_generate_no_signed_spam() {
 }
 
 #[test]
+fn shared_mode_installs_one_combined_subscription_per_directed_link() {
+    let mut simulation = Simulation::new(
+        SimulationConfig {
+            node_count: 32,
+            attacker_count: 0,
+            topology: TopologyStrategy::PeerMesh,
+            false_supernode_count: 0,
+            loss_basis_points: 0,
+            churn_basis_points: 0,
+            ..SimulationConfig::default()
+        },
+        PeerSelectionMode::SharedReputation,
+    )
+    .unwrap();
+    let directed_links = simulation.topology.edge_count().saturating_mul(2);
+
+    simulation.install_subscriptions().unwrap();
+    simulation.drain_scheduler().unwrap();
+
+    assert_eq!(simulation.report.subscription_messages, directed_links);
+    simulation.exercise_machine_lifecycle().unwrap();
+    simulation.drain_scheduler().unwrap();
+    assert_eq!(simulation.report.machine_lifecycle_ratings_published, 3);
+    assert!(simulation.report.machine_transported_transitions > 0);
+    assert!(simulation.report.machine_reversible_lifecycles > 0);
+}
+
+#[test]
 fn ordinary_peers_keep_only_their_organic_profile_filters() {
     for topology in [
         TopologyStrategy::PeerMesh,

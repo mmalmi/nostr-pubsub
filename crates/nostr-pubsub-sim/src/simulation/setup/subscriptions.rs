@@ -1,8 +1,7 @@
 use super::super::{
     Filter, FipsPubsubWireMessage, NodeRole, PubsubPeerInterest, Result, Simulation,
     SimulationError, SpamIdentity, SubscriptionFrame, SubscriptionId, SubscriptionPurpose,
-    SubscriptionStore, TrafficProvenance, is_quiet_attacker, machine_admitted_class,
-    profile_subscription_id,
+    TrafficProvenance, is_quiet_attacker, machine_admitted_class, profile_subscription_id,
 };
 
 impl Simulation {
@@ -85,7 +84,7 @@ impl Simulation {
 
     pub(in crate::simulation) fn install_subscriptions(&mut self) -> Result<()> {
         for subscriber in 0..self.config.node_count {
-            let filters = self.nodes[subscriber].filters.clone();
+            let filters = self.subscription_filters_for(subscriber);
             let provenance = if subscriber < self.config.attacker_count {
                 TrafficProvenance::Adversarial
             } else {
@@ -99,7 +98,6 @@ impl Simulation {
                         profile_subscription_id(subscriber),
                         filters.clone(),
                     ),
-                    SubscriptionStore::Ordinary,
                     SubscriptionPurpose::Install,
                     provenance,
                 )?;
@@ -130,7 +128,6 @@ impl Simulation {
                     attacker,
                     target,
                     &message,
-                    SubscriptionStore::Ordinary,
                     SubscriptionPurpose::Flood,
                     TrafficProvenance::Adversarial,
                 )?;
@@ -143,7 +140,6 @@ impl Simulation {
                 attacker,
                 target,
                 &oversized,
-                SubscriptionStore::Ordinary,
                 SubscriptionPurpose::Flood,
                 TrafficProvenance::Adversarial,
             )?;
@@ -151,7 +147,6 @@ impl Simulation {
                 attacker,
                 target,
                 br#"["REQ","broken""#.to_vec(),
-                SubscriptionStore::Ordinary,
                 SubscriptionPurpose::Flood,
                 TrafficProvenance::Adversarial,
             ));
@@ -174,7 +169,6 @@ impl Simulation {
                     SubscriptionId::new(format!("unauthorized-{attacker}-{target}")),
                     vec![Filter::new()],
                 ),
-                SubscriptionStore::Ordinary,
                 SubscriptionPurpose::Flood,
                 TrafficProvenance::Adversarial,
             )?;

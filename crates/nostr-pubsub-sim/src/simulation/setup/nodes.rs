@@ -53,11 +53,8 @@ pub(super) fn build_node(
             FipsPubsubWireCodec::new(DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES).map_err(pubsub_error)?,
             PubsubPeerSubscriptionStore::new(limits),
         ),
-        rating_wire: FipsPubsubWireAdapter::new(
-            FipsPubsubWireCodec::new(DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES).map_err(pubsub_error)?,
-            PubsubPeerSubscriptionStore::new(limits),
-        ),
         filters,
+        rating_filters: Vec::new(),
         machine_reputation,
         machine_policies,
         machine_trusted_raters,
@@ -159,6 +156,11 @@ pub(super) fn mesh_options(config: &SimulationConfig, role: NodeRole) -> InvWant
         max_hops: config.max_hops,
         max_event_bytes: 256 * 1024,
         max_cached_events: 128,
+        max_cached_event_bytes: if role == NodeRole::Supernode {
+            256 * 1024 * 1024
+        } else {
+            16 * 1024 * 1024
+        },
         max_seen_events: 8_192,
         max_pending_peers_per_event: fanout.max(128),
         route_ttl_ms: 60,

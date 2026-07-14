@@ -11,6 +11,11 @@ impl Simulation {
         destination: usize,
         provenance: TrafficProvenance,
     ) -> bool {
+        if self.mode == PeerSelectionMode::SharedReputation {
+            self.record_cpu_work(destination, |work| {
+                work.graph_queries = work.graph_queries.saturating_add(1);
+            });
+        }
         let rejected = self.mode == PeerSelectionMode::SharedReputation
             && self.nodes[destination]
                 .machine_policies
@@ -84,7 +89,7 @@ impl Simulation {
     }
 
     pub(super) fn admit_event(
-        &self,
+        &mut self,
         destination: usize,
         source: usize,
         event: &VerifiedEvent,
@@ -106,11 +111,19 @@ impl Simulation {
         if !machine_admitted {
             return Ok(None);
         }
-        let Some(policies) = self.nodes[destination].machine_policies.as_ref() else {
+        if self.nodes[destination].machine_policies.is_none() {
             return Ok(None);
-        };
+        }
+        self.record_cpu_work(destination, |work| {
+            work.graph_queries = work.graph_queries.saturating_add(1);
+        });
+        self.record_avoided_signature_check(destination);
+        let policies = self.nodes[destination]
+            .machine_policies
+            .as_ref()
+            .expect("machine policy checked above");
         let decision =
-            poll_ready(policies.check_event(event.as_event(), &source))?.map_err(pubsub_error)?;
+            poll_ready(policies.check_verified_event(event, &source))?.map_err(pubsub_error)?;
         Ok(matches!(decision, PolicyDecision::Drop { .. })
             .then_some(AdmissionDrop::MachineReputation))
     }

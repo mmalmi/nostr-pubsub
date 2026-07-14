@@ -7,14 +7,14 @@ use nostr_pubsub::{
 };
 use nostr_pubsub_social_graph::PeerRatingPublisher;
 
-use super::{
-    EventMetadata, POST_RECONNECT_REPUTATION_SWEEP_MS, POST_ROUTE_REPUTATION_SWEEP_MS,
-    PeerSelectionMode, REPUTATION_SWEEP_MS, Result, SIM_PROTOCOL, SIM_VERSION, ScheduledAction,
-    SimNode, Simulation, SimulationConfig, SimulationReport, basis_points, mix64, pubsub_error,
-    simulation_keys,
-};
 #[cfg(test)]
 use super::WorkloadPair;
+use super::{
+    EventMetadata, NodeResourceLedger, POST_RECONNECT_REPUTATION_SWEEP_MS,
+    POST_ROUTE_REPUTATION_SWEEP_MS, PeerSelectionMode, REPUTATION_SWEEP_MS, Result, SIM_PROTOCOL,
+    SIM_VERSION, ScheduledAction, SimNode, Simulation, SimulationConfig, SimulationReport,
+    basis_points, mix64, pubsub_error, simulation_keys,
+};
 use crate::clock::VirtualScheduler;
 use crate::metrics::NodeTrafficLedger;
 use crate::topology::{SupernodeDiscoveryStrategy, TopologyResult, TopologyStrategy};
@@ -45,13 +45,14 @@ impl Simulation {
         validate_config(&config)?;
         let prepared = prepare_simulation(&config, mode)?;
         let mut simulation = assemble_simulation(config, mode, prepared)?;
+        simulation.initialize_rating_filters()?;
+        simulation.initialize_resource_usage()?;
         simulation.populate_interest_sets()?;
         Ok(simulation)
     }
 
     pub(super) fn run(mut self) -> Result<SimulationReport> {
         self.install_subscriptions()?;
-        self.install_reputation_subscriptions()?;
         self.drain_scheduler()?;
         self.exercise_subscription_lifecycle()?;
         self.drain_scheduler()?;
@@ -75,7 +76,7 @@ impl Simulation {
         self.schedule_churn();
         self.schedule_publications();
         self.drain_scheduler()?;
-        self.finalize_report();
+        self.finalize_report()?;
         Ok(self.report)
     }
 }
@@ -162,6 +163,7 @@ fn assemble_simulation(
     } = prepared;
     let report = initial_report(&config, mode, &topology, &nodes);
     let traffic = vec![NodeTrafficLedger::default(); config.node_count];
+    let node_resources = vec![NodeResourceLedger::default(); config.node_count];
     Ok(Simulation {
         codec: InvWantCodec::new(SIM_PROTOCOL, SIM_VERSION, DEFAULT_INV_WANT_MAX_WIRE_BYTES),
         fips_codec: FipsPubsubWireCodec::new(DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES)
@@ -182,6 +184,7 @@ fn assemble_simulation(
         forged_rating_published: false,
         poisoned_rating_published: false,
         traffic,
+        node_resources,
         link_traffic: BTreeMap::new(),
         delivery_credits: BTreeMap::new(),
         report,
@@ -388,6 +391,7 @@ const EMPTY_REPORT_TEMPLATE: SimulationReport = SimulationReport {
     sent_link_protocol_bytes: 0,
     sent_role_protocol_bytes: 0,
     protocol_bytes_per_interested_delivery: 0,
+    resource_usage: super::SimulationResourceReport::EMPTY,
     protocol_service_by_link: BTreeMap::new(),
     protocol_service_by_role: BTreeMap::new(),
     interested_delivery_credit_by_link: BTreeMap::new(),

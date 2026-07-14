@@ -1,5 +1,3 @@
-use std::collections::hash_map::Entry;
-
 use super::{InvWantWireMessage, ScheduledAction, Simulation, link_key};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,17 +59,23 @@ impl Simulation {
             return;
         }
         let key = (source, destination, event_id.to_string());
-        if let Entry::Vacant(entry) = self.retry_counts.entry(key) {
-            entry.insert(0);
-            self.scheduler.schedule_after(
-                self.config.retry_delay_ms,
-                ScheduledAction::RetryInventory {
-                    source,
-                    destination,
-                    event_id: event_id.to_string(),
-                },
-            );
+        let state = self.retry_counts.entry(key.clone()).or_default();
+        if state.scheduled {
+            return;
         }
+        if state.attempts >= self.config.max_retries {
+            self.retry_counts.remove(&key);
+            return;
+        }
+        state.scheduled = true;
+        self.scheduler.schedule_after(
+            self.config.retry_delay_ms,
+            ScheduledAction::RetryInventory {
+                source,
+                destination,
+                event_id: event_id.to_string(),
+            },
+        );
     }
 
     pub(super) fn note_disrupted_message(
@@ -80,6 +84,11 @@ impl Simulation {
         destination: usize,
         message: &InvWantWireMessage,
     ) {
+        let (retry_source, retry_destination, event_id) =
+            retry_inventory_route(source, destination, message);
+        if self.nodes[retry_source].local_events.contains_key(event_id) {
+            self.schedule_retry_if_needed(retry_source, retry_destination, event_id);
+        }
         let (target, event_id) = disrupted_delivery_target(source, destination, message);
         let key = (target, event_id.to_string());
         if self
@@ -108,6 +117,28 @@ impl Simulation {
     pub(super) fn finish_delivery_retries(&mut self, node: usize, event_id: &str) {
         self.retry_counts
             .retain(|(_, destination, candidate), _| *destination != node || candidate != event_id);
+    }
+
+    pub(super) fn finish_inventory_retry(
+        &mut self,
+        source: usize,
+        destination: usize,
+        event_id: &str,
+    ) {
+        self.retry_counts
+            .remove(&(source, destination, event_id.to_string()));
+    }
+}
+
+fn retry_inventory_route(
+    source: usize,
+    destination: usize,
+    message: &InvWantWireMessage,
+) -> (usize, usize, &str) {
+    match message {
+        InvWantWireMessage::Inventory { event_id, .. }
+        | InvWantWireMessage::Frame { event_id, .. } => (source, destination, event_id),
+        InvWantWireMessage::Want { event_id } => (destination, source, event_id),
     }
 }
 

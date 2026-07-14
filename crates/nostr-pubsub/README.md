@@ -16,6 +16,9 @@ building blocks for:
 - bounded recovery through at most three matching inventory providers
 - targeted cached-event replay for late peers through the same
   inventory/WANT/frame proof
+- count- and byte-bounded cached payloads, with a 16 MiB aggregate default
+- TTL- and count-bounded seen-inventory and delivered-event deduplication
+- raw cache-byte and state-count snapshots through `retained_state()`
 - priority-aware peer fanout with explicit unknown-peer exploration capacity
 - peer subscription tracking so inventory is sent only after a matching filter
 - bounded FIPS payload-frame codecs for standard Nostr `REQ`/`CLOSE`/`EVENT`
@@ -24,6 +27,12 @@ building blocks for:
 adapter updates bounded peer subscriptions and never returns an unverified
 event. FIPS transports remain responsible for stream framing, admission,
 liveness, and backpressure.
+
+Callers that already hold a `VerifiedEvent` from their trust boundary can use
+`publish_verified`, `replay_verified_to_peer`, or `receive_verified_frame` to
+avoid checking the same signature again. Untrusted events and decoded wire
+input must use the normal verifying methods; a fast path is not a replacement
+for boundary verification.
 
 `InvWantMesh` accepts only canonical lowercase 64-hex event IDs. An inventory
 must fit the local kind, payload-size, and hop bounds; another provider's copy
@@ -37,6 +46,9 @@ answer is verified and ignored rather than scored as malicious. A `WANT` with
 neither a cached event nor a live route is not retained. Route expiry or
 seen-inventory eviction removes its reverse route, pending peers, and
 forwarded-want marker together, and forwarding always decrements the hop limit.
+Cached event payloads are limited by both `max_cached_events` and
+`max_cached_event_bytes`; the latter defaults to 16 MiB. Delivered-event and
+seen-inventory deduplication expire by TTL and retain hard count bounds.
 
 Product crates keep their own app-specific event meanings. This crate provides
 the shared pubsub vocabulary. Peer-quality inputs are local transport or pubsub

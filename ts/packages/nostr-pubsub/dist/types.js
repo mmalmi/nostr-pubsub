@@ -1,4 +1,5 @@
-import { verifyEvent } from 'nostr-tools/pure';
+import { verifiedSymbol, verifyEvent } from 'nostr-tools/pure';
+const verifiedEventCopies = new WeakSet();
 export class PubsubError extends Error {
     kind;
     constructor(kind, message) {
@@ -14,13 +15,28 @@ export class PubsubError extends Error {
     }
 }
 export function verifyNostrEvent(event) {
-    let candidate;
+    const candidate = cloneNostrEvent(event);
+    if (!verifyEvent(candidate)) {
+        throw PubsubError.validation('invalid Nostr event id or signature');
+    }
+    return freezeVerifiedEvent(candidate);
+}
+/** Defensive immutable copy for an event already checked at a trust boundary. */
+export function copyVerifiedNostrEvent(event) {
+    if (!verifiedEventCopies.has(event)) {
+        throw PubsubError.validation('verified mesh paths require verifyNostrEvent output');
+    }
+    const candidate = cloneNostrEvent(event);
+    candidate[verifiedSymbol] = true;
+    return freezeVerifiedEvent(candidate);
+}
+function cloneNostrEvent(event) {
     try {
         if (!Array.isArray(event.tags) ||
             event.tags.some((tag) => !Array.isArray(tag) || tag.some((item) => typeof item !== 'string'))) {
             throw new TypeError('invalid tags');
         }
-        candidate = {
+        return {
             id: event.id,
             pubkey: event.pubkey,
             created_at: event.created_at,
@@ -33,6 +49,8 @@ export function verifyNostrEvent(event) {
     catch {
         throw PubsubError.validation('invalid Nostr event structure');
     }
+}
+function freezeVerifiedEvent(candidate) {
     if (!Number.isSafeInteger(candidate.created_at) ||
         candidate.created_at < 0 ||
         !Number.isSafeInteger(candidate.kind) ||
@@ -40,12 +58,10 @@ export function verifyNostrEvent(event) {
         candidate.kind > 65_535) {
         throw PubsubError.validation('invalid Nostr event timestamp or kind');
     }
-    if (!verifyEvent(candidate)) {
-        throw PubsubError.validation('invalid Nostr event id or signature');
-    }
     for (const tag of candidate.tags)
         Object.freeze(tag);
     Object.freeze(candidate.tags);
+    verifiedEventCopies.add(candidate);
     return Object.freeze(candidate);
 }
 //# sourceMappingURL=types.js.map

@@ -6,6 +6,7 @@ use super::super::{
     build_iris_drive_broad_root, build_targeted_approval_rating, class_name, is_fresh_sybil,
     is_quiet_attacker, pubsub_error,
 };
+use nostr::JsonUtil;
 
 type BuiltWorkloads = (HashMap<String, EventMetadata>, Vec<WorkloadPair>);
 
@@ -355,6 +356,8 @@ fn insert_event_metadata(
     publish_at_ms: u64,
 ) -> Result<()> {
     let verified = VerifiedEvent::try_from(event.clone()).map_err(pubsub_error)?;
+    let payload_bytes =
+        u64::try_from(event.try_as_json().map_err(pubsub_error)?.len()).unwrap_or(u64::MAX);
     events.insert(
         event.id.to_hex(),
         EventMetadata {
@@ -364,6 +367,7 @@ fn insert_event_metadata(
             publisher,
             event,
             verified,
+            payload_bytes,
             publish_at_ms,
             interested: BTreeSet::new(),
         },

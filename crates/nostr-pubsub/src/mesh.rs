@@ -1,12 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use nostr::Event;
 use serde::{Deserialize, Serialize};
 
 use crate::{DEFAULT_INV_WANT_HOP_LIMIT, PubsubError, Result};
 
+#[path = "mesh_resources.rs"]
+mod resources;
+#[path = "mesh_verified.rs"]
+mod verified;
+use resources::CachedEvent;
+pub use resources::InvWantMeshRetainedState;
+
 pub const DEFAULT_INV_WANT_FANOUT: usize = 8;
 pub const DEFAULT_INV_WANT_MAX_EVENT_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_INV_WANT_MAX_CACHE_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_INV_WANT_MAX_WIRE_BYTES: usize = DEFAULT_INV_WANT_MAX_EVENT_BYTES + 4096;
 
 const DEFAULT_ROUTE_TTL_MS: u64 = 2 * 60 * 1_000;
@@ -174,6 +182,7 @@ pub struct InvWantMeshOptions {
     pub max_hops: u8,
     pub max_event_bytes: usize,
     pub max_cached_events: usize,
+    pub max_cached_event_bytes: usize,
     pub max_seen_events: usize,
     pub max_pending_peers_per_event: usize,
     pub route_ttl_ms: u64,
@@ -190,6 +199,7 @@ impl Default for InvWantMeshOptions {
             max_hops: DEFAULT_INV_WANT_HOP_LIMIT,
             max_event_bytes: DEFAULT_INV_WANT_MAX_EVENT_BYTES,
             max_cached_events: 1_024,
+            max_cached_event_bytes: DEFAULT_INV_WANT_MAX_CACHE_BYTES,
             max_seen_events: 4_096,
             max_pending_peers_per_event: 64,
             route_ttl_ms: DEFAULT_ROUTE_TTL_MS,
@@ -209,12 +219,6 @@ pub enum InvWantAction {
         source_peer: String,
         event: Event,
     },
-}
-
-#[derive(Debug, Clone)]
-struct CachedEvent {
-    event: Event,
-    expires_at_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -273,12 +277,14 @@ pub struct InvWantMesh {
     options: InvWantMeshOptions,
     cached_events: HashMap<String, CachedEvent>,
     cache_order: VecDeque<String>,
+    cached_event_bytes: u64,
     seen_inventories: HashMap<String, u64>,
     seen_order: VecDeque<String>,
-    delivered_events: HashSet<String>,
+    delivered_events: HashMap<String, u64>,
     delivered_order: VecDeque<String>,
     upstream_routes: HashMap<String, UpstreamRoute>,
     pending_downstream: HashMap<String, PendingPeers>,
+    pending_peer_count: usize,
     want_forwarded: HashMap<String, u64>,
     next_prune_at_ms: Option<u64>,
     peer_behaviors: HashMap<String, PeerBehavior>,
@@ -293,6 +299,8 @@ impl InvWantMesh {
         options.max_hops = options.max_hops.max(1);
         options.max_event_bytes = options.max_event_bytes.max(1);
         options.max_cached_events = options.max_cached_events.max(1);
+        options.max_cached_event_bytes =
+            options.max_cached_event_bytes.max(options.max_event_bytes);
         options.max_seen_events = options.max_seen_events.max(1);
         options.max_pending_peers_per_event = options.max_pending_peers_per_event.max(1);
         options.route_ttl_ms = options.route_ttl_ms.max(1);
@@ -301,12 +309,14 @@ impl InvWantMesh {
             options,
             cached_events: HashMap::new(),
             cache_order: VecDeque::new(),
+            cached_event_bytes: 0,
             seen_inventories: HashMap::new(),
             seen_order: VecDeque::new(),
-            delivered_events: HashSet::new(),
+            delivered_events: HashMap::new(),
             delivered_order: VecDeque::new(),
             upstream_routes: HashMap::new(),
             pending_downstream: HashMap::new(),
+            pending_peer_count: 0,
             want_forwarded: HashMap::new(),
             next_prune_at_ms: None,
             peer_behaviors: HashMap::new(),
@@ -368,7 +378,7 @@ impl InvWantMesh {
             && (route.peer_id == peer_id || route.alternate_peers.contains(peer_id))
         {
             route.fulfilled = true;
-            self.pending_downstream.remove(event_id);
+            self.remove_pending_event(event_id);
         }
     }
 
@@ -381,7 +391,7 @@ impl InvWantMesh {
         self.prune(now_ms);
         let (event_id, payload_bytes) = self.validate_event(&event)?;
         let event_kind = u16::from(event.kind);
-        self.store_event(event, now_ms);
+        self.store_event(event, payload_bytes, now_ms);
         if !self.remember_inventory(&event_id, now_ms) {
             return Ok(Vec::new());
         }
@@ -406,7 +416,7 @@ impl InvWantMesh {
         self.prune(now_ms);
         let (event_id, payload_bytes) = self.validate_event(&event)?;
         let event_kind = u16::from(event.kind);
-        self.store_event(event, now_ms);
+        self.store_event(event, payload_bytes, now_ms);
         Ok(vec![InvWantAction::Send {
             peer_id: peer_id.to_string(),
             message: InvWantWireMessage::Inventory {
@@ -446,7 +456,7 @@ impl InvWantMesh {
                 self.receive_want(source_peer, event_id, now_ms)
             }
             InvWantWireMessage::Frame { event_id, event } => {
-                self.receive_frame(source_peer, &event_id, &event, peers, now_ms)
+                self.receive_frame(source_peer, &event_id, &event, peers, now_ms, true)
             }
         };
         if result.is_err() {
@@ -564,8 +574,10 @@ impl InvWantMesh {
                 peers: BTreeSet::new(),
                 expires_at_ms: now_ms.saturating_add(self.options.route_ttl_ms),
             });
-        if pending.peers.len() < self.options.max_pending_peers_per_event {
-            pending.peers.insert(source_peer.to_string());
+        if pending.peers.len() < self.options.max_pending_peers_per_event
+            && pending.peers.insert(source_peer.to_string())
+        {
+            self.pending_peer_count = self.pending_peer_count.saturating_add(1);
         }
 
         let already_forwarded = self
@@ -590,6 +602,7 @@ impl InvWantMesh {
         event: &Event,
         peers: &[MeshPeer],
         now_ms: u64,
+        verify_signature: bool,
     ) -> Result<Vec<InvWantAction>> {
         validate_event_id(event_id)?;
         let route = self
@@ -602,7 +615,11 @@ impl InvWantMesh {
         {
             return Err(validation("inv/want frame was not requested from source"));
         }
-        let (verified_id, payload_bytes) = self.validate_event(event)?;
+        let (verified_id, payload_bytes) = if verify_signature {
+            self.validate_event(event)?
+        } else {
+            self.validate_verified_event(event)?
+        };
         if verified_id != event_id {
             return Err(validation(
                 "inv/want frame id does not match signed event id",
@@ -621,19 +638,19 @@ impl InvWantMesh {
             VALID_FRAME_REWARD,
             PeerBehaviorEvidence::ValidFrame,
         );
-        self.store_event(event.clone(), now_ms);
+        self.store_event(event.clone(), payload_bytes, now_ms);
         if let Some(route) = self.upstream_routes.get_mut(event_id) {
             route.fulfilled = true;
         }
 
         let mut actions = Vec::new();
-        if self.remember_delivered(event_id) {
+        if self.remember_delivered(event_id, now_ms) {
             actions.push(InvWantAction::Deliver {
                 source_peer: source_peer.to_string(),
                 event: event.clone(),
             });
         }
-        if let Some(pending) = self.pending_downstream.remove(event_id) {
+        if let Some(pending) = self.remove_pending_event(event_id) {
             actions.extend(
                 pending
                     .peers
@@ -666,6 +683,10 @@ impl InvWantMesh {
         event
             .verify()
             .map_err(|error| validation(format!("invalid signed Nostr event: {error}")))?;
+        self.validate_verified_event(event)
+    }
+
+    fn validate_verified_event(&self, event: &Event) -> Result<(String, u32)> {
         self.validate_kind(u16::from(event.kind))?;
         let payload = serde_json::to_vec(event)
             .map_err(|error| validation(format!("invalid inv/want JSON: {error}")))?;
@@ -704,28 +725,6 @@ impl InvWantMesh {
         Ok(())
     }
 
-    fn store_event(&mut self, event: Event, now_ms: u64) {
-        let event_id = event.id.to_hex();
-        let expires_at_ms = now_ms.saturating_add(self.options.event_ttl_ms);
-        if !self.cached_events.contains_key(&event_id) {
-            while self.cached_events.len() >= self.options.max_cached_events {
-                let Some(oldest) = self.cache_order.pop_front() else {
-                    break;
-                };
-                self.cached_events.remove(&oldest);
-            }
-            self.cache_order.push_back(event_id.clone());
-        }
-        self.cached_events.insert(
-            event_id,
-            CachedEvent {
-                event,
-                expires_at_ms,
-            },
-        );
-        self.track_expiry(expires_at_ms);
-    }
-
     fn remember_inventory(&mut self, event_id: &str, now_ms: u64) -> bool {
         if self
             .seen_inventories
@@ -741,7 +740,7 @@ impl InvWantMesh {
                 };
                 self.seen_inventories.remove(&oldest);
                 self.upstream_routes.remove(&oldest);
-                self.pending_downstream.remove(&oldest);
+                self.remove_pending_event(&oldest);
                 self.want_forwarded.remove(&oldest);
             }
             self.seen_order.push_back(event_id.to_string());
@@ -750,20 +749,6 @@ impl InvWantMesh {
         self.seen_inventories
             .insert(event_id.to_string(), expires_at_ms);
         self.track_expiry(expires_at_ms);
-        true
-    }
-
-    fn remember_delivered(&mut self, event_id: &str) -> bool {
-        if !self.delivered_events.insert(event_id.to_string()) {
-            return false;
-        }
-        self.delivered_order.push_back(event_id.to_string());
-        while self.delivered_events.len() > self.options.max_seen_events {
-            let Some(oldest) = self.delivered_order.pop_front() else {
-                break;
-            };
-            self.delivered_events.remove(&oldest);
-        }
         true
     }
 
@@ -860,20 +845,26 @@ impl InvWantMesh {
                 PeerBehaviorEvidence::UnservedInventory,
             );
         }
-        self.cached_events
-            .retain(|_, cached| cached.expires_at_ms > now_ms);
-        self.cache_order
-            .retain(|event_id| self.cached_events.contains_key(event_id));
+        self.prune_cached_events(now_ms);
         self.seen_inventories
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
         self.seen_order
             .retain(|event_id| self.seen_inventories.contains_key(event_id));
+        self.delivered_events
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.delivered_order
+            .retain(|event_id| self.delivered_events.contains_key(event_id));
         self.upstream_routes
             .retain(|_, route| route.expires_at_ms > now_ms);
         let upstream_routes = &self.upstream_routes;
         self.pending_downstream.retain(|event_id, pending| {
             pending.expires_at_ms > now_ms && upstream_routes.contains_key(event_id)
         });
+        self.pending_peer_count = self
+            .pending_downstream
+            .values()
+            .map(|pending| pending.peers.len())
+            .sum();
         self.want_forwarded.retain(|event_id, expires_at_ms| {
             *expires_at_ms > now_ms && upstream_routes.contains_key(event_id)
         });
@@ -882,6 +873,7 @@ impl InvWantMesh {
             .values()
             .map(|cached| cached.expires_at_ms)
             .chain(self.seen_inventories.values().copied())
+            .chain(self.delivered_events.values().copied())
             .chain(
                 self.upstream_routes
                     .values()

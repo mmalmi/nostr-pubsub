@@ -6,7 +6,14 @@ mod network;
 mod report;
 mod reputation_flow;
 mod reputation_probes;
+mod resources;
 mod setup;
+
+use resources::NodeResourceLedger;
+pub use resources::{
+    CpuWorkDistribution, NodeCpuWork, NodeRetainedUsage, ResourceCohortReport,
+    RetainedUsageDistribution, SimulationResourceReport,
+};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -18,9 +25,9 @@ use nostr::{Event, EventBuilder, Filter, Keys, Kind, Timestamp};
 use nostr_pubsub::{
     DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, EventSource, FipsPubsubWireAdapter, FipsPubsubWireCodec,
     FipsPubsubWireMessage, InvWantAction, InvWantCodec, InvWantMesh, InvWantMeshOptions,
-    InvWantWireMessage, MeshPeer, PolicyDecision, PubsubDeliveryAction,
-    PubsubDeliveryPolicy, PubsubPeerInterest, PubsubPeerSubscriptionStore,
-    PubsubSubscriptionLimits, SourceId, SubscriptionId, VerifiedEvent,
+    InvWantWireMessage, MeshPeer, PolicyDecision, PubsubDeliveryAction, PubsubDeliveryPolicy,
+    PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubSubscriptionLimits, SourceId,
+    SubscriptionId, VerifiedEvent,
 };
 use nostr_pubsub_social_graph::{
     PeerRatingPublisher, PeerReputation, PeerReputationConfig, PeerReputationPolicies,
@@ -282,6 +289,7 @@ pub struct SimulationReport {
     pub sent_link_protocol_bytes: u64,
     pub sent_role_protocol_bytes: u64,
     pub protocol_bytes_per_interested_delivery: u64,
+    pub resource_usage: SimulationResourceReport,
     /// Attempted and received Inv/WANT and FIPS control traffic per directed link.
     pub protocol_service_by_link: BTreeMap<DirectedServiceLink, NodeTrafficLedger>,
     /// Inv/WANT and FIPS control service aggregated by the carrier's node role.
@@ -320,8 +328,8 @@ impl SimulationReport {
 struct SimNode {
     mesh: InvWantMesh,
     wire: FipsPubsubWireAdapter,
-    rating_wire: FipsPubsubWireAdapter,
     filters: Vec<Filter>,
+    rating_filters: Vec<Filter>,
     machine_reputation: Option<PeerReputation>,
     machine_policies: Option<PeerReputationPolicies>,
     machine_trusted_raters: BTreeSet<String>,
@@ -338,12 +346,6 @@ struct Packet {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubscriptionStore {
-    Ordinary,
-    Rating,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubscriptionPurpose {
     Install,
     LifecycleClose,
@@ -357,7 +359,6 @@ struct SubscriptionFrame {
     source: usize,
     destination: usize,
     payload: Vec<u8>,
-    store: SubscriptionStore,
     purpose: SubscriptionPurpose,
     traffic_provenance: TrafficProvenance,
     attempt: u8,
@@ -368,7 +369,6 @@ impl SubscriptionFrame {
         source: usize,
         destination: usize,
         payload: Vec<u8>,
-        store: SubscriptionStore,
         purpose: SubscriptionPurpose,
         traffic_provenance: TrafficProvenance,
     ) -> Self {
@@ -376,7 +376,6 @@ impl SubscriptionFrame {
             source,
             destination,
             payload,
-            store,
             purpose,
             traffic_provenance,
             attempt: 0,
@@ -413,6 +412,7 @@ struct EventMetadata {
     publisher: usize,
     event: Event,
     verified: VerifiedEvent,
+    payload_bytes: u64,
     publish_at_ms: u64,
     interested: BTreeSet<usize>,
 }
@@ -480,6 +480,12 @@ struct WorkloadPair {
     spam_event_id: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct RetryState {
+    attempts: u8,
+    scheduled: bool,
+}
+
 struct Simulation {
     config: SimulationConfig,
     mode: PeerSelectionMode,
@@ -504,11 +510,12 @@ struct Simulation {
     delivery_times: HashMap<(usize, String), u64>,
     down_links: HashSet<LinkOutage>,
     fault_attempts: HashMap<(usize, usize, u64), u64>,
-    retry_counts: HashMap<(usize, usize, String), u8>,
+    retry_counts: HashMap<(usize, usize, String), RetryState>,
     retry_needed: HashSet<(usize, String)>,
     disrupted_transfers: HashSet<(usize, String)>,
     bad_observed_at: HashMap<(usize, usize), u64>,
     traffic: Vec<NodeTrafficLedger>,
+    node_resources: Vec<NodeResourceLedger>,
     link_traffic: BTreeMap<DirectedServiceLink, NodeTrafficLedger>,
     delivery_credits: BTreeMap<DirectedServiceLink, usize>,
     report: SimulationReport,

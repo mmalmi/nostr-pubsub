@@ -1,10 +1,7 @@
 use std::time::Duration;
 
 use nostr::{Alphabet, Event, Filter, Kind, SingleLetterTag};
-use nostr_pubsub::{
-    FipsPubsubWireMessage, MeshPeer, PeerBehaviorObservation, PubsubDeliveryAction,
-    PubsubDeliveryPolicy, SourceId, SubscriptionId, VerifiedEvent,
-};
+use nostr_pubsub::{PeerBehaviorObservation, VerifiedEvent};
 use nostr_pubsub_social_graph::{
     DEFAULT_PEER_RATING_SCOPE, PeerRatingPublisher, PeerRatingPublisherConfig,
     PeerReputationPolicies,
@@ -15,9 +12,8 @@ use crate::topology::NodeRole;
 
 use super::{
     MachineLifecyclePhase, PeerSelectionMode, ReputationEventMetadata, ReputationEventOrigin,
-    Result, SIM_UNIX_BASE, ScheduledAction, Simulation, SimulationConfig, SubscriptionPurpose,
-    SubscriptionStore, TrafficProvenance, peer_rating_event, peer_rating_event_with_samples,
-    pubsub_error,
+    Result, SIM_UNIX_BASE, ScheduledAction, Simulation, SimulationConfig, peer_rating_event,
+    peer_rating_event_with_samples, pubsub_error,
 };
 
 const RATING_BATCH_SIZE: usize = 2;
@@ -62,38 +58,33 @@ pub(super) fn build_reputation_publishers(
 }
 
 impl Simulation {
-    pub(super) fn install_reputation_subscriptions(&mut self) -> Result<()> {
-        if self.mode != PeerSelectionMode::SharedReputation {
-            return Ok(());
-        }
-        for subscriber in self.config.attacker_count..self.config.node_count {
-            for provider in self.topology.neighbors[subscriber].clone() {
-                self.schedule_reputation_subscription(
-                    provider,
-                    subscriber,
-                    SubscriptionPurpose::Install,
-                )?;
-            }
+    pub(super) fn initialize_rating_filters(&mut self) -> Result<()> {
+        for subscriber in 0..self.config.node_count {
+            self.nodes[subscriber].rating_filters = self.rating_filters_for(subscriber)?;
         }
         Ok(())
     }
 
-    pub(in crate::simulation) fn schedule_reputation_subscription(
-        &mut self,
-        provider: usize,
-        subscriber: usize,
-        purpose: SubscriptionPurpose,
-    ) -> Result<()> {
-        if self.mode != PeerSelectionMode::SharedReputation {
-            return Ok(());
+    pub(in crate::simulation) fn subscription_filters_for(&self, subscriber: usize) -> Vec<Filter> {
+        let mut filters = self.nodes[subscriber].filters.clone();
+        filters.extend(self.nodes[subscriber].rating_filters.clone());
+        filters
+    }
+
+    fn rating_filters_for(&self, subscriber: usize) -> Result<Vec<Filter>> {
+        let mut filters = Vec::new();
+        if self.mode != PeerSelectionMode::SharedReputation
+            || subscriber < self.config.attacker_count
+        {
+            return Ok(filters);
         }
-        let mut filters = vec![reputation_filter(
+        filters.push(reputation_filter(
             std::iter::once(self.keys[subscriber].public_key()).chain(
                 self.topology.neighbors[subscriber]
                     .iter()
                     .map(|peer| self.keys[*peer].public_key()),
             ),
-        )];
+        ));
         let trusted_raters = self.nodes[subscriber]
             .machine_trusted_raters
             .iter()
@@ -102,17 +93,7 @@ impl Simulation {
         if !trusted_raters.is_empty() {
             filters.push(trusted_rater_filter(trusted_raters));
         }
-        self.schedule_subscription_message(
-            subscriber,
-            provider,
-            &FipsPubsubWireMessage::req(
-                SubscriptionId::new(format!("fips-peer-ratings-{subscriber}")),
-                filters,
-            ),
-            SubscriptionStore::Rating,
-            purpose,
-            TrafficProvenance::Legitimate,
-        )
+        Ok(filters)
     }
 
     pub(super) fn exercise_machine_lifecycle(&mut self) -> Result<()> {
@@ -151,7 +132,7 @@ impl Simulation {
                 publisher,
                 subject,
                 now_ms,
-                event,
+                &event,
                 ReputationEventOrigin::MachineLifecycle(phase),
             )?;
             self.drain_scheduler()?;
@@ -187,6 +168,7 @@ impl Simulation {
         let now_ms = self.scheduler.now_ms();
         for node in self.config.attacker_count..self.config.node_count {
             self.nodes[node].mesh.maintain(now_ms);
+            self.observe_core_resource_state(node);
         }
         for observer in self.config.attacker_count..self.config.node_count {
             let mut candidates = self.topology.neighbors[observer]
@@ -235,19 +217,18 @@ impl Simulation {
                 }
             }
             for (subject, observed_at_ms, event, quiet_blackhole) in due {
-                let published_event = event.clone();
                 self.publish_reputation_event(
                     observer,
                     subject,
                     observed_at_ms,
-                    event,
+                    &event,
                     ReputationEventOrigin::HonestObservation { quiet_blackhole },
                 )?;
                 let recorded =
                     self.reputation_publishers[observer]
                         .as_mut()
                         .is_some_and(|publisher| {
-                            publisher.record_published_event(&published_event, publisher_ms)
+                            publisher.record_published_event(&event, publisher_ms)
                         });
                 if recorded {
                     self.report.machine_ratings_published =
@@ -296,39 +277,19 @@ impl Simulation {
         self.apply_reputation_event(node, event, true)
     }
 
-    pub(super) fn interested_reputation_peers(
-        &self,
-        source: usize,
-        event: &VerifiedEvent,
-    ) -> Result<Vec<MeshPeer>> {
-        let delivery = PubsubDeliveryPolicy::inventory_to_subscribers();
-        let mut peers = Vec::new();
-        for destination in self.topology.neighbors[source].iter().copied() {
-            if !self.link_is_active(source, destination)
-                || delivery.action_for_event(
-                    self.nodes[source].rating_wire.subscriptions(),
-                    &SourceId::new(&self.peer_ids[destination]),
-                    event,
-                ) != PubsubDeliveryAction::AnnounceInventory
-            {
-                continue;
-            }
-            if let Some(peer) = self.candidate_peer(source, destination)? {
-                peers.push(peer);
-            }
-        }
-        Ok(peers)
-    }
-
     pub(super) fn publish_reputation_event(
         &mut self,
         publisher: usize,
         subject: usize,
         observed_at_ms: u64,
-        event: Event,
+        event: &Event,
         origin: ReputationEventOrigin,
     ) -> Result<()> {
         let event_id = event.id.to_hex();
+        self.record_cpu_work(publisher, |work| {
+            work.signature_checks = work.signature_checks.saturating_add(1);
+            work.avoided_signature_checks = work.avoided_signature_checks.saturating_add(1);
+        });
         let verified = VerifiedEvent::try_from(event.clone()).map_err(pubsub_error)?;
         self.reputation_events.insert(
             event_id.clone(),
@@ -338,17 +299,21 @@ impl Simulation {
                 origin,
             },
         );
-        self.nodes[publisher]
-            .local_events
-            .insert(event_id, event.clone());
+        self.retain_local_event(publisher, event_id, event.clone())?;
         if !origin.is_spam() {
-            self.apply_reputation_event(publisher, &event, false)?;
+            self.apply_reputation_event(publisher, event, false)?;
         }
-        let peers = self.interested_reputation_peers(publisher, &verified)?;
+        let peers = self.interested_mesh_peers(publisher, &verified)?;
+        self.record_cpu_work(publisher, |work| {
+            work.mesh_candidates = work
+                .mesh_candidates
+                .saturating_add(u64::try_from(peers.len()).unwrap_or(u64::MAX));
+        });
         let actions = self.nodes[publisher]
             .mesh
-            .publish(event, &peers, self.scheduler.now_ms())
+            .publish_verified(verified, &peers, self.scheduler.now_ms())
             .map_err(pubsub_error)?;
+        self.observe_core_resource_state(publisher);
         self.dispatch_actions(publisher, actions)
     }
 
@@ -364,8 +329,14 @@ impl Simulation {
         let Some(policies) = self.nodes[node].machine_policies.clone() else {
             return Ok(());
         };
+        self.record_cpu_work(node, |work| {
+            work.graph_queries = work.graph_queries.saturating_add(1);
+        });
         let before = peer_projection(&policies, &self.peer_ids[metadata.subject])?;
         let now_secs = virtual_unix_secs(self.scheduler.now_ms());
+        self.record_cpu_work(node, |work| {
+            work.signature_checks = work.signature_checks.saturating_add(1);
+        });
         let Some(reputation) = self.nodes[node].machine_reputation.as_mut() else {
             return Ok(());
         };
@@ -378,10 +349,14 @@ impl Simulation {
         let ingested = reputation
             .ingest_event_at(event, now_secs)
             .map_err(pubsub_error)?;
+        self.observe_core_resource_state(node);
         self.record_reputation_ingest(metadata.origin, transported, ingested);
         if !ingested {
             return Ok(());
         }
+        self.record_cpu_work(node, |work| {
+            work.graph_queries = work.graph_queries.saturating_add(1);
+        });
         let after = peer_projection(&policies, &self.peer_ids[metadata.subject])?;
         self.record_machine_projection_transition(node, &metadata, before, after, transported);
         Ok(())
@@ -690,7 +665,7 @@ mod tests {
             ..SimulationConfig::default()
         };
         let mut simulation = Simulation::new(config, PeerSelectionMode::SharedReputation).unwrap();
-        simulation.install_reputation_subscriptions().unwrap();
+        simulation.install_subscriptions().unwrap();
         simulation.drain_scheduler().unwrap();
         let (publisher, receiver, subject) =
             trusted_transport_triangle(&simulation).expect("connected rating transport triangle");
@@ -723,7 +698,7 @@ mod tests {
                 publisher,
                 subject,
                 0,
-                negative,
+                &negative,
                 ReputationEventOrigin::HonestObservation {
                     quiet_blackhole: false,
                 },
@@ -734,6 +709,15 @@ mod tests {
         assert!(simulation.report.machine_ratings_received > 0);
         assert!(simulation.report.machine_ratings_ingested > 0);
         assert!(simulation.report.machine_transported_transitions > 0);
+        assert_eq!(
+            simulation.report.retry_inventories,
+            0,
+            "a successfully received rating must cancel its scheduled inventory retries; inventory={} want={} frame={}",
+            simulation.report.inventory_messages,
+            simulation.report.want_messages,
+            simulation.report.frame_messages,
+        );
+        assert!(simulation.retry_counts.is_empty());
         assert!(
             simulation.nodes[receiver]
                 .machine_policies
@@ -755,12 +739,12 @@ mod tests {
             ..SimulationConfig::default()
         };
         let mut simulation = Simulation::new(config, PeerSelectionMode::SharedReputation).unwrap();
-        simulation.install_reputation_subscriptions().unwrap();
+        simulation.install_subscriptions().unwrap();
         simulation.drain_scheduler().unwrap();
         let (publisher, receiver, subject) = simulation
             .poisoned_probe_plan()
             .expect("a configured machine rater can be compromised");
-        assert_poison_plan_is_routable(&simulation, publisher, receiver, subject);
+        assert_poison_plan_is_routable(&mut simulation, publisher, receiver, subject);
 
         let inventory_before = simulation.report.inventory_messages;
         let want_before = simulation.report.want_messages;
@@ -788,7 +772,7 @@ mod tests {
     }
 
     fn assert_poison_plan_is_routable(
-        simulation: &Simulation,
+        simulation: &mut Simulation,
         publisher: usize,
         receiver: usize,
         subject: usize,
@@ -804,7 +788,7 @@ mod tests {
         let verified_poison = VerifiedEvent::try_from(poison).unwrap();
         assert_eq!(
             simulation.nodes[publisher]
-                .rating_wire
+                .wire
                 .subscriptions()
                 .peer_interest(
                     &SourceId::new(&simulation.peer_ids[receiver]),
@@ -813,10 +797,10 @@ mod tests {
             PubsubPeerInterest::Subscribed,
         );
         assert!(
-            !simulation
-                .interested_reputation_peers(publisher, &verified_poison)
+            simulation
+                .candidate_peer(publisher, receiver)
                 .unwrap()
-                .is_empty(),
+                .is_some(),
         );
         assert!(
             simulation.nodes[receiver]

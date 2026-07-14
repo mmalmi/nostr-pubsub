@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 mod reputation;
+mod stats;
 pub use reputation::*;
 
 pub const FIPS_NOSTR_PUBSUB_SERVICE_PORT: u16 = 7368;
@@ -656,16 +657,14 @@ impl ClientInner {
             .lock()
             .map_err(|_| poisoned("FIPS peer subscription state"))?;
         let mut targets = Vec::new();
-        for peer in subscriptions.interested_peers(event) {
-            if excluded_peer == Some(&peer) {
+        for (peer, subscription) in subscriptions.matching_peer_subscriptions(event) {
+            if excluded_peer == Some(peer) {
                 continue;
             }
-            for subscription in subscriptions.matching_subscriptions(&peer, event) {
-                targets.push((
-                    peer.as_str().to_string(),
-                    SubscriptionId::new(subscription.subscription_id.clone()),
-                ));
-            }
+            targets.push((
+                peer.as_str().to_string(),
+                SubscriptionId::new(subscription.subscription_id.clone()),
+            ));
         }
         Ok(targets)
     }

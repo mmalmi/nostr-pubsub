@@ -527,6 +527,83 @@ fn reputation_prune_forgets_stale_policy_state() {
 }
 
 #[test]
+fn reputation_snapshot_tracks_retained_state_and_rebuild_work() {
+    let root = Keys::generate();
+    let trusted = Keys::generate();
+    let subject = Keys::generate();
+    let attacker = Keys::generate();
+    let root_hex = root.public_key().to_hex();
+    let trusted_hex = trusted.public_key().to_hex();
+    let subject_hex = subject.public_key().to_hex();
+    let now = 2_000_000_000;
+    let (mut reputation, _) = PeerReputation::new(
+        &root_hex,
+        PeerReputationConfig {
+            trusted_raters: BTreeSet::from([trusted_hex]),
+            ..PeerReputationConfig::default()
+        },
+    )
+    .expect("peer reputation");
+
+    assert_eq!(
+        reputation.snapshot(),
+        PeerReputationSnapshot {
+            trusted_roots: 2,
+            ..PeerReputationSnapshot::default()
+        }
+    );
+
+    let forged = rating_event(&attacker, &root_hex, &subject_hex, 0, now);
+    let accepted = rating_event(&root, &root_hex, &subject_hex, 0, now);
+    assert_eq!(
+        reputation
+            .replay_at([&forged, &accepted], now)
+            .expect("adversarial replay"),
+        1
+    );
+    assert_eq!(
+        reputation.snapshot(),
+        PeerReputationSnapshot {
+            retained_ratings: 1,
+            retained_raters: 1,
+            trusted_roots: 2,
+            rating_events_considered: 2,
+            retained_rating_updates: 1,
+            graph_rebuilds: 1,
+            graph_rebuild_rating_entries: 1,
+        }
+    );
+
+    assert!(
+        !reputation
+            .ingest_event_at(&accepted, now)
+            .expect("stale duplicate")
+    );
+    let after_duplicate = reputation.snapshot();
+    assert_eq!(after_duplicate.rating_events_considered, 3);
+    assert_eq!(after_duplicate.retained_rating_updates, 1);
+    assert_eq!(after_duplicate.graph_rebuilds, 1);
+
+    assert_eq!(
+        reputation
+            .prune(now + PEER_RATING_MAX_AGE.as_secs() + 1)
+            .expect("expire retained rating"),
+        1
+    );
+    assert_eq!(
+        reputation.snapshot(),
+        PeerReputationSnapshot {
+            trusted_roots: 2,
+            rating_events_considered: 3,
+            retained_rating_updates: 1,
+            graph_rebuilds: 2,
+            graph_rebuild_rating_entries: 1,
+            ..PeerReputationSnapshot::default()
+        }
+    );
+}
+
+#[test]
 fn publisher_prune_forgets_stale_subjects() {
     let root = Keys::generate();
     let subject = Keys::generate().public_key().to_hex();
@@ -545,6 +622,46 @@ fn publisher_prune_forgets_stale_subjects() {
         1
     );
     assert!(publisher.should_publish_event(&event, 1_000 + duration_ms(PEER_RATING_MAX_AGE) + 1));
+}
+
+#[test]
+fn untrusted_rating_flood_snapshot_stays_bounded_and_accounts_rebuild_entries() {
+    let root = deterministic_keys(40_000).public_key().to_hex();
+    let rater = deterministic_keys(40_001);
+    let rater_hex = rater.public_key().to_hex();
+    let now = 2_000_000_000;
+    let (mut reputation, _) =
+        PeerReputation::new(&root, PeerReputationConfig::default()).expect("reputation");
+    let events = (0..=PEER_RATING_MAX_ENTRIES_PER_RATER)
+        .map(|index| {
+            rating_event(
+                &rater,
+                &rater_hex,
+                &deterministic_keys(41_000 + index).public_key().to_hex(),
+                100,
+                now - (PEER_RATING_MAX_ENTRIES_PER_RATER - index) as u64,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        reputation
+            .replay_at(&events, now)
+            .expect("bounded untrusted flood"),
+        events.len()
+    );
+    assert_eq!(
+        reputation.snapshot(),
+        PeerReputationSnapshot {
+            retained_ratings: PEER_RATING_MAX_ENTRIES_PER_RATER,
+            retained_raters: 1,
+            trusted_roots: 1,
+            rating_events_considered: events.len() as u64,
+            retained_rating_updates: events.len() as u64,
+            graph_rebuilds: 1,
+            graph_rebuild_rating_entries: PEER_RATING_MAX_ENTRIES_PER_RATER as u64,
+        }
+    );
 }
 
 #[test]

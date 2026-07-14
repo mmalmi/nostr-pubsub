@@ -2,10 +2,7 @@ use nostr_pubsub::FipsPubsubWireMessage;
 
 use crate::topology::NodeRole;
 
-use super::{
-    Result, Simulation, SubscriptionPurpose, SubscriptionStore, TrafficProvenance,
-    profile_subscription_id,
-};
+use super::{Result, Simulation, SubscriptionPurpose, TrafficProvenance, profile_subscription_id};
 
 impl Simulation {
     pub(super) fn exercise_subscription_lifecycle(&mut self) -> Result<()> {
@@ -25,7 +22,6 @@ impl Simulation {
                 subscriber,
                 provider,
                 &FipsPubsubWireMessage::close(profile_subscription_id(subscriber)),
-                SubscriptionStore::Ordinary,
                 SubscriptionPurpose::LifecycleClose,
                 TrafficProvenance::Legitimate,
             )?;
@@ -39,12 +35,11 @@ impl Simulation {
         subscriber: usize,
         observed_close: bool,
     ) -> Result<()> {
-        let filters = self.nodes[subscriber].filters.clone();
+        let filters = self.subscription_filters_for(subscriber);
         self.schedule_subscription_message(
             subscriber,
             provider,
             &FipsPubsubWireMessage::req(profile_subscription_id(subscriber), filters),
-            SubscriptionStore::Ordinary,
             SubscriptionPurpose::LifecycleReopen { observed_close },
             TrafficProvenance::Legitimate,
         )

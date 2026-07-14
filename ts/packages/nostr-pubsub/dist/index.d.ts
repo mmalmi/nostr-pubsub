@@ -8,6 +8,7 @@ export { deliveryActionForEvent, deliveryActionForPeer, inventoryToPeersDelivery
 export { DEFAULT_INV_WANT_HOP_LIMIT, createContentKey, createFrame, createInventory, createWant, inventoryFromFrame, invWantMessageKey, invWantMessageStreamId, wantFromInventory, type InvWantMessage, type PubsubContentKey, type PubsubFrame, type PubsubInventory, type PubsubWant, } from './invwant.js';
 export { DEFAULT_INV_WANT_FANOUT, DEFAULT_INV_WANT_MAX_EVENT_BYTES, DEFAULT_INV_WANT_MAX_WIRE_BYTES, InvWantCodec, meshEventJsonBytes, type InvWantWireMessage, } from './mesh-codec.js';
 export { InvWantMesh, defaultInvWantMeshOptions, type InvWantAction, type InvWantMeshOptions, type PeerBehaviorObservation, } from './mesh.js';
+export { DEFAULT_INV_WANT_MAX_CACHE_BYTES, type InvWantMeshRetainedState, } from './mesh-resources.js';
 export { meshPeer, selectMeshPeers, type MeshPeer, } from './mesh-peer.js';
 export { InMemoryEventBus, type EventBus, type PublishReport, type QueryEvent, type QueryReport, } from './event-bus.js';
 export { fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRoutePriority, withRouteReason, type RouteAttempt, type RouteQuerySource, type RoutedQueryOptions, type RoutedQueryReport, type SourceRoute, } from './routing.js';

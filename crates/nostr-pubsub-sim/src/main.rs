@@ -193,6 +193,58 @@ const CSV_COLUMNS: &[&str] = &[
     "attacker_sent_adversarial_bytes",
     "attacker_received_legitimate_bytes",
     "attacker_received_adversarial_bytes",
+    "honest_peer_sent_bytes_p50",
+    "honest_peer_sent_bytes_p95",
+    "honest_peer_sent_bytes_p99",
+    "honest_peer_sent_bytes_max",
+    "honest_peer_received_bytes_p95",
+    "honest_peer_received_bytes_p99",
+    "honest_peer_received_bytes_max",
+    "honest_peer_combined_bytes_p50",
+    "honest_peer_combined_bytes_p95",
+    "honest_peer_combined_bytes_p99",
+    "honest_peer_combined_bytes_max",
+    "honest_peer_adversarial_bytes_p95",
+    "honest_peer_adversarial_bytes_max",
+    "honest_peer_useful_payload_bytes_total",
+    "honest_peer_codec_bytes_p50",
+    "honest_peer_codec_bytes_p95",
+    "honest_peer_codec_bytes_p99",
+    "honest_peer_codec_bytes_max",
+    "honest_peer_signature_checks_p95",
+    "honest_peer_signature_checks_p99",
+    "honest_peer_signature_checks_max",
+    "honest_peer_avoided_signature_checks_p95",
+    "honest_peer_signature_checks_without_verified_paths_p95",
+    "honest_peer_filter_candidates_p95",
+    "honest_peer_filter_candidates_p99",
+    "honest_peer_filter_candidates_max",
+    "honest_peer_graph_queries_p95",
+    "honest_peer_graph_queries_p99",
+    "honest_peer_graph_queries_max",
+    "honest_peer_reputation_rebuild_entries_p95",
+    "honest_peer_reputation_rebuild_entries_max",
+    "honest_peer_peak_content_bytes_p50",
+    "honest_peer_peak_content_bytes_p95",
+    "honest_peer_peak_content_bytes_p99",
+    "honest_peer_peak_content_bytes_max",
+    "honest_peer_peak_state_entries_p95",
+    "honest_peer_peak_state_entries_p99",
+    "honest_peer_peak_state_entries_max",
+    "honest_peer_final_content_bytes_p95",
+    "honest_peer_final_content_bytes_max",
+    "honest_peer_final_queued_bytes_max",
+    "honest_supernode_combined_bytes_p95",
+    "honest_supernode_combined_bytes_p99",
+    "honest_supernode_combined_bytes_max",
+    "honest_supernode_codec_bytes_p95",
+    "honest_supernode_codec_bytes_max",
+    "honest_supernode_peak_content_bytes_p95",
+    "honest_supernode_peak_content_bytes_max",
+    "attacker_adversarial_sent_bytes",
+    "honest_adversarial_combined_bytes",
+    "victim_bandwidth_amplification_bps",
+    "resource_quiescence_ms",
     "virtual_ms",
 ];
 
@@ -217,9 +269,81 @@ fn report_csv(report: &SimulationReport) -> String {
     values.extend(reputation_values(report));
     values.extend(subscription_topology_values(report));
     values.extend(role_service_values(report));
+    values.extend(resource_values(report));
     values.push(report.virtual_duration_ms.to_string());
     assert_eq!(CSV_COLUMNS.len(), values.len(), "CSV schema/row mismatch");
     values.join(",")
+}
+
+fn resource_values(report: &SimulationReport) -> Vec<String> {
+    let peer = report.resource_usage.honest_peers;
+    let supernode = report.resource_usage.honest_supernodes;
+    vec![
+        peer.sent_bytes.p50.to_string(),
+        peer.sent_bytes.p95.to_string(),
+        peer.sent_bytes.p99.to_string(),
+        peer.sent_bytes.max.to_string(),
+        peer.received_bytes.p95.to_string(),
+        peer.received_bytes.p99.to_string(),
+        peer.received_bytes.max.to_string(),
+        peer.combined_bytes.p50.to_string(),
+        peer.combined_bytes.p95.to_string(),
+        peer.combined_bytes.p99.to_string(),
+        peer.combined_bytes.max.to_string(),
+        peer.adversarial_combined_bytes.p95.to_string(),
+        peer.adversarial_combined_bytes.max.to_string(),
+        peer.useful_payload_bytes.total.to_string(),
+        peer.cpu_work.codec_bytes.p50.to_string(),
+        peer.cpu_work.codec_bytes.p95.to_string(),
+        peer.cpu_work.codec_bytes.p99.to_string(),
+        peer.cpu_work.codec_bytes.max.to_string(),
+        peer.cpu_work.signature_checks.p95.to_string(),
+        peer.cpu_work.signature_checks.p99.to_string(),
+        peer.cpu_work.signature_checks.max.to_string(),
+        peer.cpu_work.avoided_signature_checks.p95.to_string(),
+        peer.cpu_work
+            .signature_checks_without_verified_paths
+            .p95
+            .to_string(),
+        peer.cpu_work.filter_candidates.p95.to_string(),
+        peer.cpu_work.filter_candidates.p99.to_string(),
+        peer.cpu_work.filter_candidates.max.to_string(),
+        peer.cpu_work.graph_queries.p95.to_string(),
+        peer.cpu_work.graph_queries.p99.to_string(),
+        peer.cpu_work.graph_queries.max.to_string(),
+        peer.cpu_work.reputation_rebuild_entries.p95.to_string(),
+        peer.cpu_work.reputation_rebuild_entries.max.to_string(),
+        peer.peak_retained.exact_content_bytes.p50.to_string(),
+        peer.peak_retained.exact_content_bytes.p95.to_string(),
+        peer.peak_retained.exact_content_bytes.p99.to_string(),
+        peer.peak_retained.exact_content_bytes.max.to_string(),
+        peer.peak_retained.state_entries.p95.to_string(),
+        peer.peak_retained.state_entries.p99.to_string(),
+        peer.peak_retained.state_entries.max.to_string(),
+        peer.final_retained.exact_content_bytes.p95.to_string(),
+        peer.final_retained.exact_content_bytes.max.to_string(),
+        peer.final_retained.queued_wire_bytes.max.to_string(),
+        supernode.combined_bytes.p95.to_string(),
+        supernode.combined_bytes.p99.to_string(),
+        supernode.combined_bytes.max.to_string(),
+        supernode.cpu_work.codec_bytes.p95.to_string(),
+        supernode.cpu_work.codec_bytes.max.to_string(),
+        supernode.peak_retained.exact_content_bytes.p95.to_string(),
+        supernode.peak_retained.exact_content_bytes.max.to_string(),
+        report
+            .resource_usage
+            .attacker_adversarial_sent_bytes
+            .to_string(),
+        report
+            .resource_usage
+            .honest_adversarial_combined_bytes
+            .to_string(),
+        report
+            .resource_usage
+            .victim_bandwidth_amplification_basis_points
+            .to_string(),
+        report.resource_usage.quiescence_at_ms.to_string(),
+    ]
 }
 
 fn identity_config_values(report: &SimulationReport) -> Vec<String> {

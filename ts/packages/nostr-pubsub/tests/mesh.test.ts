@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Event } from 'nostr-tools/core';
 import vectors from '../../../../crates/nostr-pubsub/tests/data/interop-vectors.json';
 import {
+  DEFAULT_INV_WANT_MAX_CACHE_BYTES,
   InvWantCodec,
   InvWantMesh,
   meshEventJsonBytes,
@@ -225,6 +226,9 @@ describe('bounded inv/want mesh', () => {
         20 * 60 * 1_000 + 1,
       ),
     ).toHaveLength(1);
+    expect(onlyMessage(provider.replayVerifiedToPeer(
+      event, 'verified-peer', 20 * 60 * 1_000 + 2,
+    ))).toMatchObject({ type: 'inventory', eventId: event.id });
 
     expect(
       selectMeshPeers(
@@ -240,6 +244,109 @@ describe('bounded inv/want mesh', () => {
         1,
       ).map((peer) => peer.id),
     ).toEqual(['good-a', 'good-b', 'newcomer']);
+  });
+
+  it('hard-bounds cached payload bytes and reports exact retained state', () => {
+    const [first, second] = Object.values(vectors.events)
+      .slice(0, 2)
+      .map((candidate) => verifyNostrEvent(candidate as Event));
+    const firstBytes = meshEventJsonBytes(first);
+    const secondBytes = meshEventJsonBytes(second);
+    const provider = new InvWantMesh({
+      maxEventBytes: Math.max(firstBytes, secondBytes),
+      maxCachedEvents: 8,
+      maxCachedEventBytes: firstBytes + secondBytes - 1,
+      allowedKinds: new Set([first.kind, second.kind]),
+    });
+
+    expect(provider.publishVerified(first, [], 1)).toEqual([]);
+    expect(() => provider.publishVerified(
+      { ...first, content: 'type-cast is not a trust boundary' }, [], 2,
+    )).toThrow(/verifyNostrEvent output/);
+    expect(provider.publishVerified(second, [], 2)).toEqual([]);
+    expect(provider.retainedState()).toMatchObject({
+      cachedEvents: 1,
+      cachedEventBytes: secondBytes,
+    });
+    expect(provider.receive(
+      'late-peer', { type: 'want', eventId: first.id }, [], 3,
+    )).toEqual([]);
+
+    provider.maintain(10 * 60 * 1_000 + 3);
+    expect(provider.retainedState().cachedEventBytes).toBe(0);
+    expect(new InvWantMesh().options.maxCachedEventBytes)
+      .toBe(DEFAULT_INV_WANT_MAX_CACHE_BYTES);
+  });
+
+  it('tracks routing, deduplication, pending peers, wants, and behavior exactly', () => {
+    const provider = mesh();
+    const middle = mesh();
+    const inventory = onlyMessage(provider.publishVerified(event, [meshPeer('middle')], 1));
+    const upstreamWant = onlyMessage(middle.receive('provider', inventory, [], 2));
+
+    for (const downstream of ['downstream-a', 'downstream-b', 'downstream-a']) {
+      expect(middle.receive(
+        downstream, { type: 'want', eventId: event.id }, [], 3,
+      )).toEqual([]);
+    }
+    expect(middle.retainedState()).toEqual({
+      cachedEvents: 0,
+      cachedEventBytes: 0,
+      seenInventories: 1,
+      deliveredEvents: 0,
+      upstreamRoutes: 1,
+      pendingEvents: 1,
+      pendingPeers: 2,
+      forwardedWants: 1,
+      peerBehaviors: 0,
+    });
+
+    const frame = onlyMessage(provider.receive('middle', upstreamWant, [], 4));
+    if (frame.type !== 'frame') throw new Error('provider must answer WANT with FRAME');
+    const verified = verifyNostrEvent(frame.event);
+    expect(deliveredIds(middle.receiveVerifiedFrame(
+      'provider', event.id, verified, [], 5,
+    ))).toEqual([event.id]);
+    expect(middle.retainedState()).toMatchObject({
+      cachedEvents: 1,
+      cachedEventBytes: meshEventJsonBytes(event),
+      deliveredEvents: 1,
+      pendingEvents: 0,
+      pendingPeers: 0,
+      peerBehaviors: 1,
+    });
+
+    const expiring = mesh({ routeTtlMs: 10, eventTtlMs: 20 });
+    expiring.receive('provider', inventoryFor(event, 4), [], 1);
+    expiring.receive('downstream', { type: 'want', eventId: event.id }, [], 2);
+    expect(expiring.retainedState().pendingPeers).toBe(1);
+    expiring.maintain(20);
+    expect(expiring.retainedState()).toMatchObject({ pendingEvents: 0, pendingPeers: 0 });
+  });
+
+  it('expires delivered-event dedup and accepts a fresh delivery after the TTL', () => {
+    const provider = mesh({ routeTtlMs: 10, eventTtlMs: 20 });
+    const consumer = mesh({ routeTtlMs: 10, eventTtlMs: 20 });
+    const firstInventory = onlyMessage(provider.publish(event, [meshPeer('consumer')], 1));
+    const firstWant = onlyMessage(consumer.receive('provider', firstInventory, [], 2));
+    const firstFrame = onlyMessage(provider.receive('consumer', firstWant, [], 3));
+    expect(deliveredIds(consumer.receive('provider', firstFrame, [], 4))).toEqual([event.id]);
+    expect(consumer.retainedState().deliveredEvents).toBe(1);
+
+    expect(consumer.receive('provider', firstFrame, [], 5)).toEqual([]);
+    expect(consumer.retainedState().deliveredEvents).toBe(1);
+    consumer.maintain(24);
+    expect(consumer.retainedState()).toMatchObject({
+      cachedEvents: 0,
+      cachedEventBytes: 0,
+      deliveredEvents: 0,
+    });
+
+    const secondInventory = onlyMessage(provider.publish(event, [meshPeer('consumer')], 24));
+    const secondWant = onlyMessage(consumer.receive('provider', secondInventory, [], 25));
+    const secondFrame = onlyMessage(provider.receive('consumer', secondWant, [], 26));
+    expect(deliveredIds(consumer.receive('provider', secondFrame, [], 27))).toEqual([event.id]);
+    expect(consumer.retainedState().deliveredEvents).toBe(1);
   });
 
   it('maintenance penalizes expired inventories that were never served', () => {

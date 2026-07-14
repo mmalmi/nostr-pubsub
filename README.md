@@ -35,7 +35,15 @@ invalid. A `WANT` without a cached event or live route is ignored, while
 seen-inventory, reverse-route, pending-peer, and forwarded-want state expires
 or is evicted together. Forwarding decrements the locally bounded hop budget.
 Fanout, event and wire size, caches, route lifetime, pending peers, and delivery
-deduplication are bounded.
+deduplication are bounded. The event cache has both count and aggregate payload
+limits, with a 16 MiB default byte cap. Seen-inventory and delivered-event
+deduplication have TTL and count bounds, and `retained_state()` exposes raw
+cache bytes and state counts for memory accounting.
+
+`publish_verified`, `replay_verified_to_peer`, and `receive_verified_frame`
+avoid repeating signature checks when the caller already holds a
+`VerifiedEvent` produced at its trust boundary. Untrusted events and wire input
+must use the normal verifying paths; the fast paths do not move the boundary.
 
 Mesh peer selection accepts optional locally observed quality scores. Unknown
 peers are represented separately from low-quality peers, and fanout reserves
@@ -98,8 +106,10 @@ filter retention, bounded peer subscriptions, delivery policy, the verified
 bounded `InvWantMesh` and byte-compatible `InvWantCodec`, in-memory event buses,
 routed queries with source policy, and the bounded FIPS wire boundary. Its mesh
 uses the same strict inventory/frame admission, three-provider recovery,
-transient-state eviction, hop enforcement, maintenance scoring, and separate
-valid-frame, invalid-message, and unserved-inventory evidence counters as Rust.
+transient-state eviction, aggregate cache-byte cap, retained-state snapshot,
+TTL-plus-count deduplication, verified-event fast paths, hop enforcement,
+maintenance scoring, and separate valid-frame, invalid-message, and
+unserved-inventory evidence counters as Rust.
 
 Iris browser apps can later consume it with a local dependency such as:
 

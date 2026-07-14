@@ -7,11 +7,12 @@ use fips_core::{
     register_sim_network, unregister_sim_network,
 };
 use nostr::{
-    Alphabet, Event, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, TagKind, Timestamp,
-    ToBech32,
+    Alphabet, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, SingleLetterTag, Tag, TagKind,
+    Timestamp, ToBech32,
 };
 use nostr_pubsub::{
-    EventBus, EventSourceKind, PolicyDecision, PubsubProvider, QueryOptions, VerifiedEvent,
+    EventBus, EventSourceKind, PolicyDecision, PubsubPeerSubscriptionSnapshot, PubsubProvider,
+    QueryOptions, VerifiedEvent,
 };
 use nostr_social_graph::Rating;
 use nostr_social_memory::RatingEventExt;
@@ -178,7 +179,7 @@ async fn connected_fips_peers_subscribe_and_receive_cached_update_announcements(
             tree_name.to_string(),
         );
     let mut subscription = client_a
-        .subscribe(vec![filter])
+        .subscribe(vec![filter.clone()])
         .await
         .expect("subscribe to release tree");
     let received = timeout(Duration::from_secs(2), subscription.recv())
@@ -204,6 +205,9 @@ async fn connected_fips_peers_subscribe_and_receive_cached_update_announcements(
     })
     .await
     .expect("publisher observes peer subscription");
+
+    let retained_filter = filter.clone().limit(FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS);
+    assert_peer_subscription_snapshot(&client_b, subscription.id(), &retained_filter);
 
     let next_announcement = VerifiedEvent::try_from(
         EventBuilder::new(Kind::Custom(30_064), "")
@@ -233,11 +237,56 @@ async fn connected_fips_peers_subscribe_and_receive_cached_update_announcements(
     assert_eq!(received.event, next_announcement);
 
     subscription.close();
+    wait_for_no_peer_subscriptions(&client_b).await;
     client_a.shutdown().await;
     client_b.shutdown().await;
     endpoint_a.shutdown().await.expect("shutdown endpoint A");
     endpoint_b.shutdown().await.expect("shutdown endpoint B");
     unregister_sim_network(&network_id);
+}
+
+fn assert_peer_subscription_snapshot(
+    client: &FipsPubsubClient,
+    subscription_id: &nostr_pubsub::SubscriptionId,
+    filter: &Filter,
+) {
+    let encoded_req_bytes = FipsPubsubWireCodec::new(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES)
+        .expect("FIPS codec")
+        .encode_frame(&FipsPubsubWireMessage::req(
+            subscription_id.clone(),
+            vec![filter.clone()],
+        ))
+        .expect("encode canonical REQ")
+        .len();
+    assert_eq!(
+        client
+            .peer_subscription_snapshot()
+            .expect("retained peer subscriptions"),
+        PubsubPeerSubscriptionSnapshot {
+            peer_count: 1,
+            subscription_count: 1,
+            filter_count: 1,
+            encoded_filter_bytes: filter.as_json().len(),
+            encoded_req_bytes,
+        }
+    );
+}
+
+async fn wait_for_no_peer_subscriptions(client: &FipsPubsubClient) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if client
+                .peer_subscription_snapshot()
+                .expect("retained peer subscriptions")
+                == PubsubPeerSubscriptionSnapshot::default()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("publisher removes closed peer subscription");
 }
 
 #[tokio::test]

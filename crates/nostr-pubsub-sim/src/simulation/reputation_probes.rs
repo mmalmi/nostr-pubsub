@@ -44,7 +44,7 @@ impl Simulation {
             publisher,
             subject,
             self.scheduler.now_ms(),
-            event,
+            &event,
             ReputationEventOrigin::ForgedProbe,
         )
     }
@@ -72,7 +72,7 @@ impl Simulation {
             publisher,
             subject,
             self.scheduler.now_ms(),
-            event,
+            &event,
             ReputationEventOrigin::PoisonedProbe,
         )
     }
@@ -124,7 +124,7 @@ impl Simulation {
             })
             .filter(|peer| {
                 self.nodes[publisher]
-                    .rating_wire
+                    .wire
                     .subscriptions()
                     .peer_subscription_count(&SourceId::new(&self.peer_ids[*peer]))
                     > 0

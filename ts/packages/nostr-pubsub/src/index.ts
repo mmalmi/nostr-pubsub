@@ -104,6 +104,11 @@ export {
 } from './mesh.js';
 
 export {
+  DEFAULT_INV_WANT_MAX_CACHE_BYTES,
+  type InvWantMeshRetainedState,
+} from './mesh-resources.js';
+
+export {
   meshPeer,
   selectMeshPeers,
   type MeshPeer,
