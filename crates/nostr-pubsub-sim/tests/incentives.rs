@@ -156,6 +156,26 @@ fn assert_strategy_comparison(
     );
     assert!(batch.same_mint_settlements > 0, "{batch:?}");
     assert!(batch.cross_mint_settlements > 0, "{batch:?}");
+    assert!(peer.meets_strategy_selection_gate(), "{peer:?}");
+    assert!(batch.meets_strategy_selection_gate(), "{batch:?}");
+    assert!(!direct.meets_payment_overhead_goal(), "{direct:?}");
+    assert!(!spilman.meets_payment_overhead_goal(), "{spilman:?}");
+    let recommended = reports
+        .iter()
+        .filter(|report| report.meets_strategy_selection_gate())
+        .min_by_key(|report| {
+            (
+                report.authorization_denied_sat,
+                report.unpaid_exposure_sat,
+                report.payment_bytes,
+            )
+        })
+        .expect("at least one strategy must pass settlement and overhead goals");
+    eprintln!(
+        "recommended modeled strategy: {}",
+        recommended.strategy_name
+    );
+    assert_eq!(recommended.strategy, IncentiveStrategy::AcceptedMintBatch);
     assert_selected_resource_gates(simulation, batch, simulation.topology);
     assert!(
         batch.honest_node_payment_messages.p95 < direct.honest_node_payment_messages.p95,
