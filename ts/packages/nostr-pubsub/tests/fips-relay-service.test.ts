@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Event } from 'nostr-tools/core';
 import { finalizeEvent } from 'nostr-tools/pure';
-import vectors from '../test-data/interop-vectors.json';
+import vectors from '../../../../crates/nostr-pubsub/tests/data/interop-vectors.json';
 import {
   FIPS_NOSTR_PUBSUB_SERVICE_PORT,
   FipsNostrRelayService,

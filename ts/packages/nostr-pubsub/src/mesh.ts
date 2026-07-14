@@ -6,11 +6,25 @@ import {
   type InvWantWireMessage,
 } from './mesh-codec.js';
 import { meshPeer, selectMeshPeers, type MeshPeer } from './mesh-peer.js';
+import {
+  boundedPositive,
+  clamp,
+  nonNegative,
+  requireEventId,
+  requireKind,
+  requireNow,
+  requireUnsignedByte,
+  retainMap,
+  retainOrder,
+  saturatingAdd,
+  validation,
+} from './mesh-state.js';
 import type { NostrEvent, NostrVerifiedEvent } from './types.js';
-import { PubsubError, verifyNostrEvent } from './types.js';
+import { verifyNostrEvent } from './types.js';
 
 const DEFAULT_ROUTE_TTL_MS = 2 * 60 * 1_000;
 const DEFAULT_EVENT_TTL_MS = 10 * 60 * 1_000;
+const MAX_UPSTREAM_PROVIDERS_PER_EVENT = 3;
 const MAX_TRACKED_PEER_BEHAVIORS = 4_096;
 const MIN_PEER_BEHAVIOR_SAMPLES = 3;
 const VALID_FRAME_REWARD = 20;
@@ -41,10 +55,12 @@ interface CachedEvent {
 
 interface UpstreamRoute {
   peerId: string;
+  alternatePeerIds: Set<string>;
   eventKind: number;
   payloadBytes: number;
   hopLimit: number;
   expiresAtMs: number;
+  fulfilled: boolean;
 }
 
 interface PendingPeers {
@@ -52,10 +68,18 @@ interface PendingPeers {
   expiresAtMs: number;
 }
 
-interface PeerBehavior {
+export interface PeerBehaviorObservation {
   score: number;
   samples: number;
+  validFrames: number;
+  invalidMessages: number;
+  unservedInventories: number;
 }
+
+type PeerBehaviorEvidence = keyof Pick<
+  PeerBehaviorObservation,
+  'validFrames' | 'invalidMessages' | 'unservedInventories'
+>;
 
 export function defaultInvWantMeshOptions(): InvWantMeshOptions {
   return {
@@ -83,7 +107,7 @@ export class InvWantMesh {
   private readonly upstreamRoutes = new Map<string, UpstreamRoute>();
   private readonly pendingDownstream = new Map<string, PendingPeers>();
   private readonly wantForwarded = new Map<string, number>();
-  private readonly peerBehaviors = new Map<string, PeerBehavior>();
+  private readonly peerBehaviors = new Map<string, PeerBehaviorObservation>();
   private readonly peerBehaviorOrder: string[] = [];
 
   constructor(options: Partial<InvWantMeshOptions> = {}) {
@@ -106,20 +130,31 @@ export class InvWantMesh {
   }
 
   peerBehaviorScore(peerId: string): number | undefined {
+    return this.peerBehaviorObservation(peerId)?.score;
+  }
+
+  peerBehaviorObservation(peerId: string): PeerBehaviorObservation | undefined {
     const behavior = this.peerBehaviors.get(peerId);
     return behavior !== undefined && behavior.samples >= MIN_PEER_BEHAVIOR_SAMPLES
-      ? behavior.score
+      ? { ...behavior }
       : undefined;
   }
 
   recordInvalidMessage(peerId: string): void {
-    this.recordPeerBehavior(peerId, INVALID_MESSAGE_PENALTY);
+    this.recordPeerBehavior(peerId, INVALID_MESSAGE_PENALTY, 'invalidMessages');
+  }
+
+  /** Prune expired state and score requested inventories that were never served. */
+  maintain(nowMs: number): void {
+    requireNow(nowMs);
+    this.prune(nowMs);
   }
 
   dismissFrame(peerId: string, eventId: string): void {
-    if (this.upstreamRoutes.get(eventId)?.peerId === peerId) {
-      this.upstreamRoutes.delete(eventId);
-      this.wantForwarded.delete(eventId);
+    const route = this.upstreamRoutes.get(eventId);
+    if (route !== undefined && routeHasProvider(route, peerId)) {
+      route.fulfilled = true;
+      this.pendingDownstream.delete(eventId);
     }
   }
 
@@ -187,17 +222,26 @@ export class InvWantMesh {
     this.validateEventLength(message.payloadBytes);
     requireUnsignedByte(message.hopLimit, 'hop limit');
     if (message.hopLimit === 0) return [];
+    if (message.hopLimit > this.options.maxHops) {
+      throw validation(`inv/want hop limit ${message.hopLimit} exceeds local maximum ${this.options.maxHops}`);
+    }
+    if (this.cachedEvents.has(message.eventId)) return [];
     if (!this.rememberInventory(message.eventId, nowMs)) {
       const route = this.upstreamRoutes.get(message.eventId);
-      if (route === undefined || route.peerId !== sourcePeer || this.cachedEvents.has(message.eventId)) {
+      if (route === undefined || route.fulfilled) {
         return [];
       }
-      if (
-        route.eventKind !== message.eventKind ||
-        route.payloadBytes !== message.payloadBytes ||
-        route.hopLimit !== message.hopLimit
-      ) {
-        throw validation('retried inv/want inventory changed kind, size, or hop limit');
+      if (route.eventKind !== message.eventKind || route.payloadBytes !== message.payloadBytes) {
+        throw validation('retried inv/want inventory changed kind or size');
+      }
+      route.hopLimit = Math.max(route.hopLimit, message.hopLimit);
+      if (!routeHasProvider(route, sourcePeer)) {
+        if (route.alternatePeerIds.size + 1 >= MAX_UPSTREAM_PROVIDERS_PER_EVENT) return [];
+        route.alternatePeerIds.add(sourcePeer);
+        const extendedExpiry = saturatingAdd(nowMs, this.options.routeTtlMs);
+        route.expiresAtMs = extendedExpiry;
+        this.seenInventories.set(message.eventId, extendedExpiry);
+        this.wantForwarded.set(message.eventId, extendedExpiry);
       }
       return [send(sourcePeer, { type: 'want', eventId: message.eventId })];
     }
@@ -205,10 +249,12 @@ export class InvWantMesh {
     if (!this.upstreamRoutes.has(message.eventId)) {
       this.upstreamRoutes.set(message.eventId, {
         peerId: sourcePeer,
+        alternatePeerIds: new Set(),
         eventKind: message.eventKind,
         payloadBytes: message.payloadBytes,
         hopLimit: message.hopLimit,
         expiresAtMs,
+        fulfilled: false,
       });
     }
     this.wantForwarded.set(message.eventId, expiresAtMs);
@@ -219,6 +265,9 @@ export class InvWantMesh {
     requireEventId(eventId);
     const cached = this.cachedEvents.get(eventId);
     if (cached !== undefined) return [send(sourcePeer, { type: 'frame', eventId, event: cached.event })];
+    const route = this.upstreamRoutes.get(eventId);
+    if (route === undefined) return [];
+    if (route.fulfilled) return [];
 
     let pending = this.pendingDownstream.get(eventId);
     if (pending === undefined) {
@@ -226,8 +275,7 @@ export class InvWantMesh {
       this.pendingDownstream.set(eventId, pending);
     }
     if (pending.peers.size < this.options.maxPendingPeersPerEvent) pending.peers.add(sourcePeer);
-    const route = this.upstreamRoutes.get(eventId);
-    if (route === undefined || (this.wantForwarded.get(eventId) ?? 0) > nowMs) return [];
+    if ((this.wantForwarded.get(eventId) ?? 0) > nowMs) return [];
     this.wantForwarded.set(eventId, route.expiresAtMs);
     return [send(route.peerId, { type: 'want', eventId })];
   }
@@ -240,20 +288,21 @@ export class InvWantMesh {
     nowMs: number,
   ): InvWantAction[] {
     requireEventId(eventId);
+    const route = this.upstreamRoutes.get(eventId);
+    if (route === undefined) throw validation('unsolicited inv/want frame');
+    if (!this.wantForwarded.has(eventId) || !routeHasProvider(route, sourcePeer)) {
+      throw validation('inv/want frame was not requested from source');
+    }
     const verified = this.validateEvent(event);
     const payloadBytes = meshEventJsonBytes(verified);
     if (verified.id !== eventId) throw validation('inv/want frame id does not match signed event id');
-    const route = this.upstreamRoutes.get(eventId);
-    if (
-      route !== undefined &&
-      (route.eventKind !== verified.kind || route.payloadBytes !== payloadBytes)
-    ) {
+    if (route.eventKind !== verified.kind || route.payloadBytes !== payloadBytes) {
       throw validation('inv/want frame does not match announced kind or payload size');
     }
-    if (route?.peerId === sourcePeer && this.wantForwarded.has(eventId)) {
-      this.recordPeerBehavior(sourcePeer, VALID_FRAME_REWARD);
-    }
+    if (route.fulfilled) return [];
+    this.recordPeerBehavior(sourcePeer, VALID_FRAME_REWARD, 'validFrames');
     this.storeEvent(verified, nowMs);
+    route.fulfilled = true;
 
     const actions: InvWantAction[] = [];
     if (this.rememberDelivered(eventId)) actions.push({ type: 'deliver', sourcePeer, event: verified });
@@ -264,9 +313,7 @@ export class InvWantMesh {
       }
       this.pendingDownstream.delete(eventId);
     }
-    this.upstreamRoutes.delete(eventId);
-    this.wantForwarded.delete(eventId);
-    if (route !== undefined && route.hopLimit > 1) {
+    if (route.hopLimit > 1) {
       actions.push(...this.sendToSelectedPeers(peers, sourcePeer, {
         type: 'inventory',
         eventId,
@@ -325,6 +372,9 @@ export class InvWantMesh {
         const oldest = this.seenOrder.shift();
         if (oldest === undefined) break;
         this.seenInventories.delete(oldest);
+        this.upstreamRoutes.delete(oldest);
+        this.pendingDownstream.delete(oldest);
+        this.wantForwarded.delete(oldest);
       }
       this.seenOrder.push(eventId);
     }
@@ -367,7 +417,7 @@ export class InvWantMesh {
     });
   }
 
-  private recordPeerBehavior(peerId: string, delta: number): void {
+  private recordPeerBehavior(peerId: string, delta: number, evidence: PeerBehaviorEvidence): void {
     if (!this.peerBehaviors.has(peerId)) {
       while (this.peerBehaviors.size >= MAX_TRACKED_PEER_BEHAVIORS) {
         const oldest = this.peerBehaviorOrder.shift();
@@ -376,23 +426,32 @@ export class InvWantMesh {
       }
       this.peerBehaviorOrder.push(peerId);
     }
-    const behavior = this.peerBehaviors.get(peerId) ?? { score: 0, samples: 0 };
+    const behavior = this.peerBehaviors.get(peerId) ?? {
+      score: 0, samples: 0, validFrames: 0, invalidMessages: 0, unservedInventories: 0,
+    };
     behavior.samples = Math.min(0xffff_ffff, behavior.samples + 1);
     behavior.score = clamp(behavior.score + delta, -100, 100);
+    behavior[evidence] = Math.min(0xffff_ffff, behavior[evidence] + 1);
     this.peerBehaviors.set(peerId, behavior);
   }
 
   private prune(nowMs: number): void {
     for (const route of this.upstreamRoutes.values()) {
-      if (route.expiresAtMs <= nowMs) this.recordPeerBehavior(route.peerId, UNSERVED_INVENTORY_PENALTY);
+      if (route.fulfilled || route.expiresAtMs > nowMs) continue;
+      this.recordPeerBehavior(route.peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
+      for (const peerId of route.alternatePeerIds) {
+        this.recordPeerBehavior(peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
+      }
     }
     retainMap(this.cachedEvents, (cached) => cached.expiresAtMs > nowMs);
     retainOrder(this.cacheOrder, this.cachedEvents);
     retainMap(this.seenInventories, (expiry) => expiry > nowMs);
     retainOrder(this.seenOrder, this.seenInventories);
     retainMap(this.upstreamRoutes, (route) => route.expiresAtMs > nowMs);
-    retainMap(this.pendingDownstream, (pending) => pending.expiresAtMs > nowMs);
-    retainMap(this.wantForwarded, (expiry) => expiry > nowMs);
+    retainMap(this.pendingDownstream, (pending, eventId) =>
+      pending.expiresAtMs > nowMs && this.upstreamRoutes.has(eventId));
+    retainMap(this.wantForwarded, (expiry, eventId) =>
+      expiry > nowMs && this.upstreamRoutes.has(eventId));
   }
 }
 
@@ -400,57 +459,6 @@ function send(peerId: string, message: InvWantWireMessage): InvWantAction {
   return { type: 'send', peerId, message };
 }
 
-function requireEventId(eventId: string): void {
-  if (!/^[0-9a-fA-F]{64}$/.test(eventId)) throw validation(`invalid inv/want event id ${eventId}`);
-}
-
-function requireKind(kind: number): number {
-  if (!Number.isSafeInteger(kind) || kind < 0 || kind > 65_535) {
-    throw validation(`invalid inv/want event kind ${kind}`);
-  }
-  return kind;
-}
-
-function requireUnsignedByte(value: number, field: string): void {
-  if (!Number.isSafeInteger(value) || value < 0 || value > 255) {
-    throw validation(`invalid inv/want ${field} ${value}`);
-  }
-}
-
-function requireNow(value: number): void {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw validation(`invalid inv/want timestamp ${value}`);
-  }
-}
-
-function boundedPositive(value: number, maximum = Number.MAX_SAFE_INTEGER): number {
-  if (!Number.isSafeInteger(value)) throw validation(`invalid positive integer ${value}`);
-  return clamp(Math.max(1, value), 1, maximum);
-}
-
-function nonNegative(value: number): number {
-  if (!Number.isSafeInteger(value)) throw validation(`invalid non-negative integer ${value}`);
-  return Math.max(0, value);
-}
-
-function saturatingAdd(left: number, right: number): number {
-  return Math.min(Number.MAX_SAFE_INTEGER, left + right);
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.max(minimum, Math.min(maximum, value));
-}
-
-function retainMap<K, V>(map: Map<K, V>, predicate: (value: V) => boolean): void {
-  for (const [key, value] of map) if (!predicate(value)) map.delete(key);
-}
-
-function retainOrder<V>(order: string[], map: Map<string, V>): void {
-  let write = 0;
-  for (const id of order) if (map.has(id)) order[write++] = id;
-  order.length = write;
-}
-
-function validation(message: string): PubsubError {
-  return PubsubError.validation(message);
+function routeHasProvider(route: UpstreamRoute, peerId: string): boolean {
+  return route.peerId === peerId || route.alternatePeerIds.has(peerId);
 }

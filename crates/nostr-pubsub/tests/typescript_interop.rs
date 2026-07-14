@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use nostr::Event;
@@ -676,8 +676,5 @@ fn action_name(action: PubsubDeliveryAction) -> &'static str {
 }
 
 fn load_vectors() -> InteropVectors {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ts/packages/nostr-pubsub/test-data/interop-vectors.json");
-    let data = fs::read_to_string(path).unwrap();
-    serde_json::from_str(&data).unwrap()
+    serde_json::from_str(include_str!("data/interop-vectors.json")).unwrap()
 }

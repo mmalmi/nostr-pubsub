@@ -22,3 +22,16 @@ The application owns Nostr relay connections, peer-advert meaning, FIPS peer
 admission, and transport framing. This package does not contain a default relay
 or gateway. See the repository `docs/inv-want-wire.md` for compatibility and
 security boundaries.
+
+`InvWantMesh` matches the Rust production state machine: inventories use
+canonical lowercase event IDs and local kind, size, and hop bounds; repeated
+inventories must keep identical event kind and size, while remaining hop
+budgets may differ by path under the local cap; and recovery uses no more than
+three providers. Frames are accepted only from a provider sent a `WANT` and
+only when the verified signature, ID, kind, and serialized size match the
+inventory. Bounded fulfilled-route provenance absorbs delayed valid answers
+from requested alternatives without scoring them, while unrequested sources
+remain invalid. A want with neither a cached event nor a live route is ignored,
+and related transient state expires or is evicted together. `maintain()` and
+`peerBehaviorObservation()` expose the same valid-frame, invalid-message, and
+unserved-inventory evidence as Rust.

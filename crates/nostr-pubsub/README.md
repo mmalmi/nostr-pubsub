@@ -12,6 +12,8 @@ building blocks for:
 - inv/want content keys, inventory announcements, wants, and frames
 - a bounded signed-event `InvWantMesh` state machine with reverse wants,
   exactly-once local delivery, and configurable protocol envelopes
+- strict inventory, `WANT`, and frame admission with canonical event IDs
+- bounded recovery through at most three matching inventory providers
 - targeted cached-event replay for late peers through the same
   inventory/WANT/frame proof
 - priority-aware peer fanout with explicit unknown-peer exploration capacity
@@ -22,6 +24,19 @@ building blocks for:
 adapter updates bounded peer subscriptions and never returns an unverified
 event. FIPS transports remain responsible for stream framing, admission,
 liveness, and backpressure.
+
+`InvWantMesh` accepts only canonical lowercase 64-hex event IDs. An inventory
+must fit the local kind, payload-size, and hop bounds; another provider's copy
+must repeat the original kind and size, but may carry a different remaining hop
+budget after traversing a different path. Every budget is capped locally. The
+mesh sends `WANT` to at most three such providers, rejects frames from every
+other source, and accepts a requested frame only when its verified signed event
+has the announced ID, kind, and exact serialized size. Fulfilled route state
+retains the requested-provider set until its bounded expiry, so a delayed valid
+answer is verified and ignored rather than scored as malicious. A `WANT` with
+neither a cached event nor a live route is not retained. Route expiry or
+seen-inventory eviction removes its reverse route, pending peers, and
+forwarded-want marker together, and forwarding always decrements the hop limit.
 
 Product crates keep their own app-specific event meanings. This crate provides
 the shared pubsub vocabulary. Peer-quality inputs are local transport or pubsub
@@ -34,7 +49,15 @@ signed frame. Inventories outside the configured kind subscription, invalid or
 mismatched frames, and accepted inventories left unserved through route expiry
 are negative evidence. Silent peers remain unknown. Applications should run
 author/social admission before delivering a frame to the mesh; a locally
-rejected valid frame can be dismissed without provider credit or penalty.
+rejected valid frame can be dismissed without provider credit or penalty while
+retaining bounded provenance for already-requested late answers.
+
+After the mesh's confidence floor is met, `PeerBehaviorObservation` exposes the
+score together with its sample count and separate valid-frame,
+invalid-message, and unserved-inventory counts. Consumers can therefore require
+the evidence appropriate to a machine-rating policy instead of treating every
+negative score as the same failure mode. The TypeScript mesh mirrors these
+admission, recovery, maintenance, and evidence semantics.
 
 Consumers select exactly one `PubsubProvider`: `local-only` for a local peer
 provider or `direct-relay` for direct relay sockets. Provider construction is

@@ -23,6 +23,12 @@ relay ingress and other providers as well as FIPS frames.
 Maintenance also expires bounded reputation and publication-cadence state;
 the periodic FIPS snapshot creates fresh local observations, while pubsub
 subscriptions and replay distribute rating events that already exist.
+Wall-clock `new`, `ingest_event`, and `observe_event` methods remain convenient
+for ordinary runtimes. Virtual-clock runtimes can instead use the additive
+`new_at`, `ingest_event_at`, and `observe_event_at` methods with explicit Unix
+seconds. Maintenance accepts milliseconds and uses that same supplied time for
+pruning, publication cadence, and completed-event ingestion through
+`maintenance_events` and `complete_maintenance_event`.
 
 This crate never opens a Nostr relay socket and never falls back to one. Select
 `nostr-pubsub-relay` explicitly when direct relay access is desired.

@@ -22,6 +22,13 @@ export type InvWantAction = {
     sourcePeer: string;
     event: NostrVerifiedEvent;
 };
+export interface PeerBehaviorObservation {
+    score: number;
+    samples: number;
+    validFrames: number;
+    invalidMessages: number;
+    unservedInventories: number;
+}
 export declare function defaultInvWantMeshOptions(): InvWantMeshOptions;
 /** Transport-neutral bounded inv/want state machine matching Rust's `InvWantMesh`. */
 export declare class InvWantMesh {
@@ -39,7 +46,10 @@ export declare class InvWantMesh {
     private readonly peerBehaviorOrder;
     constructor(options?: Partial<InvWantMeshOptions>);
     peerBehaviorScore(peerId: string): number | undefined;
+    peerBehaviorObservation(peerId: string): PeerBehaviorObservation | undefined;
     recordInvalidMessage(peerId: string): void;
+    /** Prune expired state and score requested inventories that were never served. */
+    maintain(nowMs: number): void;
     dismissFrame(peerId: string, eventId: string): void;
     publish(event: NostrEvent, peers: readonly MeshPeer[], nowMs: number): InvWantAction[];
     replayToPeer(event: NostrEvent, peerId: string, nowMs: number): InvWantAction[];

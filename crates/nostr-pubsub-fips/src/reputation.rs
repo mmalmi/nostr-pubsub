@@ -52,10 +52,30 @@ pub struct FipsPubsubPolicy {
 }
 
 impl FipsPeerReputation {
+    /// Restores reputation using the wall-clock Unix time.
     pub fn new<'a>(
         endpoint: Arc<FipsEndpoint>,
         stored_events: impl IntoIterator<Item = &'a Event>,
         options: FipsPeerReputationOptions,
+    ) -> Result<Self> {
+        Self::new_inner(endpoint, stored_events, options, None)
+    }
+
+    /// Restores reputation at an explicit Unix timestamp in seconds.
+    pub fn new_at<'a>(
+        endpoint: Arc<FipsEndpoint>,
+        stored_events: impl IntoIterator<Item = &'a Event>,
+        options: FipsPeerReputationOptions,
+        now_secs: u64,
+    ) -> Result<Self> {
+        Self::new_inner(endpoint, stored_events, options, Some(now_secs))
+    }
+
+    fn new_inner<'a>(
+        endpoint: Arc<FipsEndpoint>,
+        stored_events: impl IntoIterator<Item = &'a Event>,
+        options: FipsPeerReputationOptions,
+        now_secs: Option<u64>,
     ) -> Result<Self> {
         if options.evaluation_interval.is_zero() {
             return Err(PubsubError::Validation(
@@ -64,13 +84,27 @@ impl FipsPeerReputation {
         }
         let stored_events = stored_events.into_iter().collect::<Vec<_>>();
         let (mut reputation, policies) = PeerReputation::new(endpoint.npub(), options.reputation)?;
-        reputation.replay(stored_events.iter().copied())?;
-        let publisher = PeerRatingPublisher::from_events(
-            reputation.root(),
-            reputation.scope(),
-            options.publication,
-            stored_events.iter().copied(),
-        )?;
+        if let Some(now_secs) = now_secs {
+            reputation.replay_at(stored_events.iter().copied(), now_secs)?;
+        } else {
+            reputation.replay(stored_events.iter().copied())?;
+        }
+        let publisher = if let Some(now_secs) = now_secs {
+            PeerRatingPublisher::from_events_at(
+                reputation.root(),
+                reputation.scope(),
+                options.publication,
+                stored_events.iter().copied(),
+                now_secs.saturating_mul(1_000),
+            )?
+        } else {
+            PeerRatingPublisher::from_events(
+                reputation.root(),
+                reputation.scope(),
+                options.publication,
+                stored_events.iter().copied(),
+            )?
+        };
         Ok(Self {
             endpoint,
             reputation,
@@ -104,6 +138,11 @@ impl FipsPeerReputation {
         self.reputation.ingest_event(event)
     }
 
+    /// Ingests one rating event at an explicit Unix timestamp in seconds.
+    pub fn ingest_event_at(&mut self, event: &Event, now_secs: u64) -> Result<bool> {
+        self.reputation.ingest_event_at(event, now_secs)
+    }
+
     pub async fn publication_candidates(&self, now_ms: u64) -> Result<Vec<Event>> {
         let events = self
             .endpoint
@@ -123,6 +162,7 @@ impl FipsPeerReputation {
 }
 
 impl FipsPubsubPolicy {
+    /// Restores the policy using the wall-clock Unix time.
     pub fn new<'a>(
         endpoint: Arc<FipsEndpoint>,
         stored_events: impl IntoIterator<Item = &'a Event>,
@@ -134,6 +174,19 @@ impl FipsPubsubPolicy {
         })
     }
 
+    /// Restores the policy at an explicit Unix timestamp in seconds.
+    pub fn new_at<'a>(
+        endpoint: Arc<FipsEndpoint>,
+        stored_events: impl IntoIterator<Item = &'a Event>,
+        options: FipsPubsubPolicyOptions,
+        now_secs: u64,
+    ) -> Result<Self> {
+        Ok(Self {
+            reputation: FipsPeerReputation::new_at(endpoint, stored_events, options, now_secs)?,
+            next_evaluation_ms: None,
+        })
+    }
+
     #[must_use]
     pub fn peer_policy(&self) -> Arc<dyn MeshPeerPolicy> {
         self.reputation.peer_policy()
@@ -141,6 +194,11 @@ impl FipsPubsubPolicy {
 
     pub fn observe_event(&mut self, event: &Event) -> Result<bool> {
         self.reputation.ingest_event(event)
+    }
+
+    /// Observes one rating event at an explicit Unix timestamp in seconds.
+    pub fn observe_event_at(&mut self, event: &Event, now_secs: u64) -> Result<bool> {
+        self.reputation.ingest_event_at(event, now_secs)
     }
 
     /// Applies transport-neutral author admission before an event enters the
@@ -171,7 +229,7 @@ impl FipsPubsubPolicy {
         now_ms: u64,
     ) -> Result<()> {
         if published {
-            self.reputation.ingest_event(event)?;
+            self.reputation.ingest_event_at(event, now_ms / 1_000)?;
             let _ = self.reputation.record_published_event(event, now_ms);
         }
         Ok(())

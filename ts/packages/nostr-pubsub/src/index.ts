@@ -100,6 +100,7 @@ export {
   defaultInvWantMeshOptions,
   type InvWantAction,
   type InvWantMeshOptions,
+  type PeerBehaviorObservation,
 } from './mesh.js';
 
 export {

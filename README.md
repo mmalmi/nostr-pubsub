@@ -22,18 +22,28 @@ larger or costed payloads, or combine both per stream. Inventory is still gated
 by matching Nostr subscriptions before any inv/want announcement is sent.
 
 The Rust core also contains `InvWantMesh`, the bounded production state machine
-for signed Nostr-event inventory/want/frame propagation. It verifies complete
-frames, deduplicates inventories and deliveries, caches events for downstream
-wants, expires reverse routes, and limits fanout, hop count, event size, cache
-size, and pending peers. The transport supplies its protocol namespace and
-connected peer set; applications remain responsible for choosing which peer
-subscriptions or coarse streams should see an inventory.
+for signed Nostr-event inventory/want/frame propagation. Inventories require a
+canonical lowercase event ID and locally allowed kind, size, and hop limit;
+copies must repeat the signed event's kind and serialized size, while their
+remaining hop budgets may differ by path and remain locally capped. The mesh
+can request the same event from at most three providers for bounded blackhole
+recovery. It accepts a frame only from a provider sent a `WANT`, then verifies
+the event signature and exact announced ID, kind, and serialized size. After
+one provider answers, bounded fulfilled-route provenance makes delayed answers
+from the other requested providers harmless; every unrequested source remains
+invalid. A `WANT` without a cached event or live route is ignored, while
+seen-inventory, reverse-route, pending-peer, and forwarded-want state expires
+or is evicted together. Forwarding decrements the locally bounded hop budget.
+Fanout, event and wire size, caches, route lifetime, pending peers, and delivery
+deduplication are bounded.
 
 Mesh peer selection accepts optional locally observed quality scores. Unknown
 peers are represented separately from low-quality peers, and fanout reserves
 configurable exploration capacity for them. The core does not infer social
 identity, ingest third-party ratings, or make an admission decision from these
-scores.
+scores. Once the local confidence floor is met, `PeerBehaviorObservation`
+exposes the score and its valid-frame, invalid-message, unserved-inventory, and
+total sample counts so a policy can distinguish evidence types.
 
 The core crate also defines the retention contract for bounded event caches:
 which Nostr filters a local store should retain and how many matching events it
@@ -69,7 +79,9 @@ than the first peerfinding path.
   subscribers.
 - `nostr-pubsub-relay`: optional `nostr-sdk` backend for actual Nostr relays.
 - `nostr-pubsub-sim`: deterministic adversarial simulations that execute the
-  production `InvWantMesh` and codec across up to thousands of virtual peers.
+  production `InvWantMesh`, FIPS subscriptions, social and machine admission,
+  and forged versus authorized-poisoned rating paths across up to thousands of
+  virtual peers.
 - `nostr-pubsub-social-graph`: social-graph policy adapter for filtering and
   prioritizing event authors or sources.
 
@@ -84,7 +96,10 @@ as an ESM package named `nostr-pubsub`. It mirrors the Rust core primitives that
 browser apps need before wiring real transports: source route defaults, Nostr
 filter retention, bounded peer subscriptions, delivery policy, the verified
 bounded `InvWantMesh` and byte-compatible `InvWantCodec`, in-memory event buses,
-routed queries with source policy, and the bounded FIPS wire boundary.
+routed queries with source policy, and the bounded FIPS wire boundary. Its mesh
+uses the same strict inventory/frame admission, three-provider recovery,
+transient-state eviction, hop enforcement, maintenance scoring, and separate
+valid-frame, invalid-message, and unserved-inventory evidence counters as Rust.
 
 Iris browser apps can later consume it with a local dependency such as:
 
@@ -92,7 +107,7 @@ Iris browser apps can later consume it with a local dependency such as:
 "nostr-pubsub": "link:../nostr-pubsub/ts/packages/nostr-pubsub"
 ```
 
-Interop vectors live in `ts/packages/nostr-pubsub/test-data/interop-vectors.json`
+Interop vectors live in `crates/nostr-pubsub/tests/data/interop-vectors.json`
 and are read by both Vitest and Rust integration tests. Update the shared vector
 file when changing behavior that must remain compatible across Rust/FIPS peers
 and browser callers. The inv/want contract is documented in
@@ -100,11 +115,18 @@ and browser callers. The inv/want contract is documented in
 
 ## Checks
 
+Reviewability is enforced: every Rust source file is at most 1,000 lines, and
+every TypeScript package source file is at most 500 lines.
+
 ```sh
 cargo test --workspace
+cargo test -p nostr-pubsub-sim --test source_size
 cargo clippy --workspace --all-targets -- -D warnings
 pnpm --dir ts --filter nostr-pubsub build
+pnpm --dir ts --filter nostr-pubsub check
 pnpm --dir ts --filter nostr-pubsub test
-cargo test -p nostr-pubsub --test typescript_interop
+cargo test -p nostr-pubsub@0.1.8 --test typescript_interop
 cargo run -p nostr-pubsub-sim -- --nodes 1000 --attackers 200
+cargo test --release -p nostr-pubsub-sim --test release_gate -- \
+  --ignored --nocapture --test-threads=1
 ```

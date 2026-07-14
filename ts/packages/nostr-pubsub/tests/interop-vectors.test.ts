@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Event, VerifiedEvent } from 'nostr-tools/core';
 import type { Filter } from 'nostr-tools/filter';
-import vectors from '../test-data/interop-vectors.json';
+import vectors from '../../../../crates/nostr-pubsub/tests/data/interop-vectors.json';
 import {
   DEFAULT_INV_WANT_HOP_LIMIT,
   FipsPubsubWireAdapter,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Event } from 'nostr-tools/core';
-import vectors from '../test-data/interop-vectors.json';
+import vectors from '../../../../crates/nostr-pubsub/tests/data/interop-vectors.json';
 import {
   InvWantCodec,
   InvWantMesh,
@@ -60,6 +60,151 @@ describe('bounded inv/want mesh', () => {
       event.id,
     ]);
     expect(carol.receive('bob', frameForCarol, [meshPeer('bob')], 8)).toEqual([]);
+    carol.maintain(120_008);
+    expect(() => carol.receive('bob', frameForCarol, [meshPeer('bob')], 120_009))
+      .toThrow(/unsolicited/);
+  });
+
+  it('uses bounded alternate providers to recover a blackhole', () => {
+    const consumer = mesh();
+    const inventory = inventoryFor(event, 4);
+    expect(() => consumer.receive(
+      'unsolicited',
+      { type: 'frame', eventId: event.id, event },
+      [],
+      1,
+    )).toThrow(/unsolicited/);
+
+    for (const [nowMs, provider, hopLimit] of [
+      [2, 'blackhole', 2], [3, 'honest', 4], [4, 'backup', 3],
+    ] as const) {
+      expect(consumer.receive(provider, inventoryFor(event, hopLimit), [], nowMs)).toEqual([
+        { type: 'send', peerId: provider, message: { type: 'want', eventId: event.id } },
+      ]);
+    }
+    expect(consumer.receive('excess', inventory, [], 5)).toEqual([]);
+    expect(() => consumer.receive(
+      'excess',
+      { type: 'frame', eventId: event.id, event },
+      [],
+      6,
+    )).toThrow(/not requested/);
+    expect(deliveredIds(consumer.receive(
+      'honest',
+      { type: 'frame', eventId: event.id, event },
+      [],
+      7,
+    ))).toEqual([event.id]);
+    expect(consumer.receive(
+      'backup',
+      { type: 'frame', eventId: event.id, event },
+      [],
+      8,
+    )).toEqual([]);
+
+    const lateAlternate = mesh({ routeTtlMs: 10, eventTtlMs: 20 });
+    lateAlternate.receive('blackhole', inventory, [], 1);
+    lateAlternate.receive('honest', inventory, [], 9);
+    expect(deliveredIds(lateAlternate.receive(
+      'honest',
+      { type: 'frame', eventId: event.id, event },
+      [],
+      15,
+    ))).toEqual([event.id]);
+  });
+
+  it('absorbs late requested frames without poisoning provider behavior', () => {
+    const signedEvents = Object.values(vectors.events)
+      .map((candidate) => verifyNostrEvent(candidate as Event));
+    const consumer = new InvWantMesh({
+      maxHops: 4,
+      routeTtlMs: 10,
+      eventTtlMs: 20,
+      allowedKinds: new Set(signedEvents.map((candidate) => candidate.kind)),
+    });
+    for (const [sequence, signedEvent] of signedEvents.slice(0, 3).entries()) {
+      const nowMs = sequence * 4 + 1;
+      consumer.receive('primary', inventoryFor(signedEvent, 2), [], nowMs);
+      consumer.receive('alternate', inventoryFor(signedEvent, 4), [], nowMs + 1);
+      expect(deliveredIds(consumer.receive(
+        'primary', { type: 'frame', eventId: signedEvent.id, event: signedEvent }, [], nowMs + 2,
+      ))).toEqual([signedEvent.id]);
+      expect(consumer.receive(
+        'alternate', { type: 'frame', eventId: signedEvent.id, event: signedEvent }, [], nowMs + 3,
+      )).toEqual([]);
+    }
+    consumer.maintain(30);
+    expect(consumer.peerBehaviorObservation('alternate')).toBeUndefined();
+    expect(consumer.peerBehaviorObservation('primary')).toMatchObject({
+      validFrames: 3, invalidMessages: 0, unservedInventories: 0,
+    });
+
+    const rejected = signedEvents[3];
+    consumer.receive('primary', inventoryFor(rejected, 2), [], 31);
+    consumer.receive('alternate', inventoryFor(rejected, 4), [], 32);
+    consumer.dismissFrame('primary', rejected.id);
+    expect(consumer.receive(
+      'alternate', { type: 'frame', eventId: rejected.id, event: rejected }, [], 33,
+    )).toEqual([]);
+    expect(() => consumer.receive(
+      'unrequested', { type: 'frame', eventId: rejected.id, event: rejected }, [], 34,
+    )).toThrow(/not requested/);
+    consumer.maintain(50);
+    expect(consumer.peerBehaviorObservation('alternate')).toBeUndefined();
+  });
+
+  it('evicts transient routes atomically and forgets route-less wants', () => {
+    const consumer = mesh({ maxSeenEvents: 1, routeTtlMs: 10, eventTtlMs: 20 });
+    const second = { ...event, id: '01'.repeat(32) };
+    expect(consumer.receive('ghost', { type: 'want', eventId: event.id }, [], 1)).toEqual([]);
+    consumer.receive('provider-a', inventoryFor(event, 4), [], 2);
+    consumer.receive('waiting', { type: 'want', eventId: event.id }, [], 3);
+    consumer.receive('provider-b', {
+      type: 'inventory', eventId: second.id, eventKind: event.kind, payloadBytes: 512, hopLimit: 4,
+    }, [], 4);
+    expect(() => consumer.receive(
+      'provider-a',
+      { type: 'frame', eventId: event.id, event },
+      [],
+      5,
+    )).toThrow(/unsolicited/);
+
+    consumer.receive('provider-a', inventoryFor(event, 4), [], 6);
+    const actions = consumer.receive(
+      'provider-a',
+      { type: 'frame', eventId: event.id, event },
+      [],
+      7,
+    );
+    expect(actions.some(
+      (action) => action.type === 'send' && action.message.type === 'frame' &&
+        (action.peerId === 'ghost' || action.peerId === 'waiting'),
+    )).toBe(false);
+
+    consumer.receive('provider-c', inventoryFor(event, 4), [], 20);
+    consumer.receive('waiting-after-ttl', { type: 'want', eventId: event.id }, [], 29);
+    consumer.maintain(31);
+    consumer.receive('provider-c', inventoryFor(event, 4), [], 32);
+    const afterTtl = consumer.receive(
+      'provider-c',
+      { type: 'frame', eventId: event.id, event },
+      [],
+      33,
+    );
+    expect(afterTtl.some(
+      (action) => action.type === 'send' && action.peerId === 'waiting-after-ttl' &&
+        action.message.type === 'frame',
+    )).toBe(false);
+  });
+
+  it('requires canonical event IDs and enforces the local hop bound', () => {
+    const consumer = mesh();
+    expect(() => consumer.receive('peer', {
+      type: 'inventory', eventId: 'AB'.repeat(32), eventKind: event.kind, payloadBytes: 512, hopLimit: 4,
+    }, [], 1)).toThrow(/event id/);
+    expect(() => consumer.receive('peer', {
+      type: 'inventory', eventId: 'ab'.repeat(32), eventKind: event.kind, payloadBytes: 512, hopLimit: 5,
+    }, [], 2)).toThrow(/local maximum/);
   });
 
   it('replays cached events and reserves fanout for unknown peers', () => {
@@ -97,6 +242,36 @@ describe('bounded inv/want mesh', () => {
     ).toEqual(['good-a', 'good-b', 'newcomer']);
   });
 
+  it('maintenance penalizes expired inventories that were never served', () => {
+    const consumer = mesh({ routeTtlMs: 10, eventTtlMs: 20 });
+    for (let nowMs = 1; nowMs <= 3; nowMs += 1) {
+      const eventId = nowMs.toString(16).padStart(64, '0');
+      expect(consumer.receive('blackhole', {
+        type: 'inventory',
+        eventId,
+        eventKind: event.kind,
+        payloadBytes: 512,
+        hopLimit: 4,
+      }, [meshPeer('blackhole')], nowMs)).toEqual([
+        { type: 'send', peerId: 'blackhole', message: { type: 'want', eventId } },
+      ]);
+    }
+
+    expect(consumer.peerBehaviorScore('blackhole')).toBeUndefined();
+    consumer.maintain(20);
+    expect(consumer.peerBehaviorScore('blackhole')).toBeLessThan(0);
+    expect(consumer.peerBehaviorObservation('blackhole')?.unservedInventories).toBe(3);
+
+    const malformed = mesh();
+    for (let sample = 0; sample < 3; sample += 1) malformed.recordInvalidMessage('malformed');
+    expect(malformed.peerBehaviorObservation('malformed')).toMatchObject({
+      samples: 3,
+      invalidMessages: 3,
+      validFrames: 0,
+      unservedInventories: 0,
+    });
+  });
+
   it('rejects forged, mismatched, oversized, and wrong-protocol messages', () => {
     const consumer = mesh({ maxEventBytes: meshEventJsonBytes(event) - 1 });
     expect(() => consumer.publish(event, [], 1)).toThrow(/maximum/);
@@ -122,6 +297,16 @@ function onlyMessage(actions: InvWantAction[]): InvWantWireMessage {
   const [action] = actions;
   if (action.type !== 'send') throw new Error('expected send action');
   return action.message;
+}
+
+function inventoryFor(signedEvent: Event, hopLimit: number): InvWantWireMessage {
+  return {
+    type: 'inventory',
+    eventId: signedEvent.id,
+    eventKind: signedEvent.kind,
+    payloadBytes: meshEventJsonBytes(signedEvent),
+    hopLimit,
+  };
 }
 
 function messageFor(actions: InvWantAction[], peerId: string): InvWantWireMessage {
