@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fips_core::config::{NostrDiscoveryConfig, PeerConfig, TransportInstances};
+use fips_core::config::{
+    NostrDiscoveryConfig, NostrPeerfindingSource, PeerConfig, TcpConfig, TransportInstances,
+};
 use fips_core::{
     Config, FipsEndpoint, Identity, IdentityConfig, SimNetwork, SimTransportConfig,
     register_sim_network, unregister_sim_network,
@@ -11,8 +13,8 @@ use nostr::{
     Timestamp, ToBech32,
 };
 use nostr_pubsub::{
-    EventBus, EventSourceKind, PolicyDecision, PubsubPeerSubscriptionSnapshot, PubsubProvider,
-    QueryOptions, VerifiedEvent,
+    EventBus, EventSourceKind, InMemoryEventBus, PolicyDecision, PubsubPeerSubscriptionSnapshot,
+    PubsubProvider, QueryOptions, VerifiedEvent,
 };
 use nostr_social_graph::Rating;
 use nostr_social_memory::RatingEventExt;
@@ -25,6 +27,7 @@ use super::*;
 fn fips_discovery_config_converts_to_bounded_pubsub_retention() {
     let config = NostrDiscoveryConfig {
         enabled: true,
+        peerfinding_source: NostrPeerfindingSource::External,
         app: "fips-test".to_string(),
         advert_cache_max_entries: 17,
         ..NostrDiscoveryConfig::default()
@@ -55,6 +58,7 @@ fn fips_discovery_config_converts_to_bounded_pubsub_retention() {
 async fn verified_pubsub_event_ingests_through_neutral_fips_api() {
     let mut config = Config::new();
     config.node.discovery.nostr.enabled = true;
+    config.node.discovery.nostr.peerfinding_source = NostrPeerfindingSource::External;
     config.node.discovery.nostr.advertise = false;
     config.node.discovery.nostr.advert_relays.clear();
     config.node.discovery.nostr.dm_relays.clear();
@@ -90,6 +94,89 @@ async fn verified_pubsub_event_ingests_through_neutral_fips_api() {
         .await
         .expect("FIPS discovery ingest")
     );
+    endpoint.shutdown().await.expect("endpoint shutdown");
+}
+
+#[tokio::test]
+async fn peerfinder_routes_publication_and_lookup_only_through_event_bus() {
+    let (config_a, discovery_a) = peerfinding_endpoint_config([21; 32], "8.8.8.8:443");
+    let (config_b, discovery_b) = peerfinding_endpoint_config([22; 32], "8.8.4.4:443");
+    let endpoint_a = Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(config_a)
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .expect("bind peerfinder publisher"),
+    );
+    let endpoint_b = Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(config_b)
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .expect("bind peerfinder consumer"),
+    );
+    let publisher =
+        FipsPeerfinder::new(Arc::clone(&endpoint_a), &discovery_a).expect("external publisher");
+    let consumer =
+        FipsPeerfinder::new(Arc::clone(&endpoint_b), &discovery_b).expect("external consumer");
+    let bus = InMemoryEventBus::new();
+
+    let publish_report = publisher
+        .publish_local(&bus)
+        .await
+        .expect("publish through selected bus")
+        .expect("local endpoint is advert eligible");
+    assert!(publish_report.accepted);
+    let refreshed = consumer
+        .refresh(&bus)
+        .await
+        .expect("query through selected bus");
+
+    assert_eq!(
+        refreshed,
+        FipsPeerfindingRefresh {
+            received: 1,
+            accepted: 1,
+        }
+    );
+    assert!(
+        endpoint_a
+            .relay_statuses()
+            .await
+            .expect("publisher relays")
+            .is_empty()
+    );
+    assert!(
+        endpoint_b
+            .relay_statuses()
+            .await
+            .expect("consumer relays")
+            .is_empty()
+    );
+    endpoint_a.shutdown().await.expect("publisher shutdown");
+    endpoint_b.shutdown().await.expect("consumer shutdown");
+}
+
+#[tokio::test]
+async fn peerfinder_rejects_embedded_relay_peerfinding_mode() {
+    let endpoint = Arc::new(
+        Box::pin(FipsEndpoint::builder().without_system_tun().bind())
+            .await
+            .expect("bind endpoint"),
+    );
+    let config = NostrDiscoveryConfig {
+        enabled: true,
+        peerfinding_source: NostrPeerfindingSource::Relays,
+        ..Default::default()
+    };
+
+    assert!(FipsPeerfinder::new(Arc::clone(&endpoint), &config).is_err());
     endpoint.shutdown().await.expect("endpoint shutdown");
 }
 
@@ -608,6 +695,31 @@ fn endpoint_config(
     });
     config.peers = vec![PeerConfig::new(peer_npub, "sim", peer_addr)];
     config
+}
+
+fn peerfinding_endpoint_config(
+    secret: [u8; 32],
+    external_addr: &str,
+) -> (Config, NostrDiscoveryConfig) {
+    let mut config = Config::new();
+    config.node.identity = IdentityConfig {
+        nsec: Some(hex::encode(secret)),
+        persistent: false,
+    };
+    config.node.discovery.nostr.enabled = true;
+    config.node.discovery.nostr.advertise = true;
+    config.node.discovery.nostr.peerfinding_source = NostrPeerfindingSource::External;
+    config.node.discovery.nostr.advert_relays.clear();
+    config.node.discovery.nostr.dm_relays.clear();
+    config.node.discovery.nostr.app = "fips-pubsub-peerfinding-test".to_string();
+    config.transports.tcp = TransportInstances::Single(TcpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        advertise_on_nostr: Some(true),
+        external_addr: Some(external_addr.to_string()),
+        ..Default::default()
+    });
+    let discovery = config.node.discovery.nostr.clone();
+    (config, discovery)
 }
 
 async fn wait_for_connected_peer(endpoint: &FipsEndpoint, expected_npub: &str) {

@@ -33,7 +33,12 @@ pruning, publication cadence, and completed-event ingestion through
 This crate never opens a Nostr relay socket and never falls back to one. Select
 `nostr-pubsub-relay` explicitly when direct relay access is desired.
 
-For peerfinding, `fips_discovery_retention_policy` converts the ordinary FIPS
-Nostr discovery config into an app-scoped, bounded pubsub cache policy.
-`ingest_fips_discovery_event` passes a verified pubsub event through FIPS's
-transport-neutral discovery validation and cache path.
+For peerfinding, configure FIPS with
+`node.discovery.nostr.peerfinding_source: external` and construct a
+`FipsPeerfinder`. Its `publish_local` and `refresh` methods operate only on the
+`EventBus` supplied by the application, so a composed bus can use configured
+relay providers, decentralized FIPS pubsub, or both without exposing any relay
+list to FIPS. `ingest` and `ingest_fips_discovery_event` pass verified pubsub
+events through FIPS's transport-neutral discovery validation and cache path.
+`fips_discovery_retention_policy` supplies the matching app-scoped, bounded
+cache policy for external peerfinding mode.

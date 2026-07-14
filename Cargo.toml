@@ -17,7 +17,7 @@ repository = "https://github.com/mmalmi/nostr-pubsub"
 
 [workspace.dependencies]
 async-trait = "0.1"
-fips-core = "0.3.98"
+fips-core = "0.3.99"
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
 nostr-pubsub = { version = "0.1.9", path = "crates/nostr-pubsub" }
