@@ -135,7 +135,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 pnpm --dir ts --filter nostr-pubsub build
 pnpm --dir ts --filter nostr-pubsub check
 pnpm --dir ts --filter nostr-pubsub test
-cargo test -p nostr-pubsub@0.1.8 --test typescript_interop
+cargo test -p nostr-pubsub@0.1.9 --test typescript_interop
 cargo run -p nostr-pubsub-sim -- --nodes 1000 --attackers 200
 cargo test --release -p nostr-pubsub-sim --test release_gate -- \
   --ignored --nocapture --test-threads=1
