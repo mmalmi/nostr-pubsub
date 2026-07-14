@@ -1,10 +1,15 @@
 mod clock;
+mod incentives;
 mod metrics;
 mod simulation;
 mod topology;
 mod workload;
 
 pub use clock::VirtualScheduler;
+pub use incentives::{
+    IncentiveConfig, IncentiveError, IncentiveReport, IncentiveStrategy, MintDiscoveryScope,
+    compare_incentive_strategies, plan_incentive_strategy,
+};
 pub use metrics::{
     DistributionSummary, LatencySummary, LoadSummary, NodeTrafficLedger, TrafficCounter,
     TrafficDirection, TrafficProvenance, TrafficScope, basis_points, gini_basis_points,
@@ -13,7 +18,7 @@ pub use metrics::{
 pub use simulation::{
     CpuWorkDistribution, DirectedServiceLink, NodeCpuWork, NodeRetainedUsage, PeerSelectionMode,
     ResourceCohortReport, Result, RetainedUsageDistribution, SimulationConfig, SimulationError,
-    SimulationReport, SimulationResourceReport, run_simulation,
+    SimulationReport, SimulationResourceReport, VerifiedDeliveryRecord, run_simulation,
 };
 pub use topology::{
     DiscoverySelectionCounts, HybridSupernodeConfig, NodeRole, PeerMeshConfig,

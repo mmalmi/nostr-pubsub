@@ -1,7 +1,7 @@
 use super::{
-    CHURN_END_MS, CHURN_START_MS, DirectedServiceLink, FipsPubsubWireMessage, InvWantAction,
-    InvWantWireMessage, LinkOutage, MALFORMED_TRAINING_SAMPLES, MeshPeer, NodeRole, OutageCause,
-    Packet, PeerSelectionMode, PubsubDeliveryAction, PubsubDeliveryPolicy, PubsubPeerInterest,
+    CHURN_END_MS, CHURN_START_MS, DirectedServiceLink, FipsPubsubWireMessage, InvWantWireMessage,
+    LinkOutage, MALFORMED_TRAINING_SAMPLES, MeshPeer, NodeRole, OutageCause, Packet,
+    PeerSelectionMode, PubsubDeliveryAction, PubsubDeliveryPolicy, PubsubPeerInterest,
     REPUTATION_SWEEP_MS, Result, ScheduledAction, Simulation, SimulationError, SourceId,
     SubscriptionClass, SubscriptionPurpose, TopologyStrategy, TrafficDirection, TrafficProvenance,
     VerifiedEvent, hash_bytes, is_fresh_sybil, is_quiet_attacker, machine_admitted_class,
@@ -548,67 +548,6 @@ impl Simulation {
 }
 
 impl Simulation {
-    pub(in crate::simulation) fn dispatch_actions(
-        &mut self,
-        source: usize,
-        actions: Vec<InvWantAction>,
-    ) -> Result<()> {
-        for action in actions {
-            match action {
-                InvWantAction::Deliver { source_peer, event } => {
-                    let event_id = event.id.to_hex();
-                    let credit_delivery = !self
-                        .delivery_times
-                        .contains_key(&(source, event_id.clone()))
-                        && self.topology.roles[source] == NodeRole::Peer
-                        && self.events.get(&event_id).is_some_and(|metadata| {
-                            metadata.legitimate && metadata.interested.contains(&source)
-                        });
-                    self.retain_local_event(source, event_id.clone(), event.clone())?;
-                    if self.reputation_events.contains_key(&event_id) {
-                        self.finish_delivery_retries(source, &event_id);
-                        self.receive_reputation_event(source, &event)?;
-                    } else {
-                        self.record_delivery(source, &event_id, self.scheduler.now_ms());
-                        if credit_delivery {
-                            let provider = self.peer_index(&source_peer)?;
-                            let credit = self
-                                .delivery_credits
-                                .entry(DirectedServiceLink {
-                                    source: provider,
-                                    destination: source,
-                                })
-                                .or_default();
-                            *credit = credit.saturating_add(1);
-                        }
-                    }
-                }
-                InvWantAction::Send { peer_id, message } => {
-                    let destination = self.peer_index(&peer_id)?;
-                    if self
-                        .candidate_peer(source, destination)?
-                        .is_some_and(|peer| peer.is_unknown())
-                    {
-                        self.report.unknown_candidate_sends =
-                            self.report.unknown_candidate_sends.saturating_add(1);
-                    }
-                    self.enqueue_message(source, destination, &message)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn enqueue_message(
-        &mut self,
-        source: usize,
-        destination: usize,
-        message: &InvWantWireMessage,
-    ) -> Result<()> {
-        let latency = self.link_latency_ms(source, destination);
-        self.enqueue_message_at(source, destination, message, latency)
-    }
-
     pub(super) fn enqueue_message_at(
         &mut self,
         source: usize,
@@ -914,7 +853,7 @@ impl Simulation {
         Ok(Some(MeshPeer::new(&self.peer_ids[destination])))
     }
 
-    fn peer_index(&self, peer_id: &str) -> Result<usize> {
+    pub(super) fn peer_index(&self, peer_id: &str) -> Result<usize> {
         self.peer_indices
             .get(peer_id)
             .copied()

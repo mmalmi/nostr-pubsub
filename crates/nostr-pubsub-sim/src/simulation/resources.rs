@@ -180,6 +180,8 @@ impl RetainedUsageDistribution {
 pub struct ResourceCohortReport {
     pub sent_bytes: DistributionSummary,
     pub received_bytes: DistributionSummary,
+    /// Endpoint message handling (`sent + received`), used as a CPU proxy.
+    pub combined_messages: DistributionSummary,
     /// Endpoint I/O (`sent + received`), not unique network bytes.
     pub combined_bytes: DistributionSummary,
     pub adversarial_combined_bytes: DistributionSummary,
@@ -193,6 +195,7 @@ impl ResourceCohortReport {
     const EMPTY: Self = Self {
         sent_bytes: EMPTY_DISTRIBUTION,
         received_bytes: EMPTY_DISTRIBUTION,
+        combined_messages: EMPTY_DISTRIBUTION,
         combined_bytes: EMPTY_DISTRIBUTION,
         adversarial_combined_bytes: EMPTY_DISTRIBUTION,
         useful_payload_bytes: EMPTY_DISTRIBUTION,
@@ -407,6 +410,12 @@ pub(super) fn summarize_cohort(
             .map(|index| traffic[*index].total(scope).bytes)
             .collect::<Vec<_>>()
     };
+    let traffic_message_values = |scope| {
+        indices
+            .iter()
+            .map(|index| traffic[*index].total(scope).messages)
+            .collect::<Vec<_>>()
+    };
     let work_values = |field: fn(NodeCpuWork) -> u64| {
         indices
             .iter()
@@ -422,6 +431,7 @@ pub(super) fn summarize_cohort(
     ResourceCohortReport {
         sent_bytes: summarize_distribution(&traffic_values(TrafficScope::Sent)),
         received_bytes: summarize_distribution(&traffic_values(TrafficScope::Received)),
+        combined_messages: summarize_distribution(&traffic_message_values(TrafficScope::Combined)),
         combined_bytes: summarize_distribution(&traffic_values(TrafficScope::Combined)),
         adversarial_combined_bytes: summarize_distribution(
             &indices
@@ -563,6 +573,7 @@ mod tests {
         let summary = summarize_cohort(0..2, &traffic, &resources);
 
         assert_eq!(summary.combined_bytes.total, 70);
+        assert_eq!(summary.combined_messages.total, 3);
         assert_eq!(summary.adversarial_combined_bytes.total, 20);
         assert_eq!(summary.cpu_work.signature_checks.p95, 7);
         assert_eq!(summary.cpu_work.avoided_signature_checks.p95, 5);

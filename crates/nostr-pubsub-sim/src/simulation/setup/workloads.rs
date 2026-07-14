@@ -21,6 +21,8 @@ const SIGNED_SPAM_PHASES_MS: [u64; 8] = [
     2_550,
 ];
 const SIGNED_SPAM_CYCLE_STRIDE_MS: usize = 3_000;
+const LEGITIMATE_PUBLICATION_STRIDE_MS: u64 = 160;
+const LEGITIMATE_CREATED_AT_STRIDE: u64 = 100;
 const HASHTAG_TOPIC: &str = "decentralized-nostr";
 const HASHTREE_NAME: &str = "iris-chat-releases";
 const IRIS_DRIVE_ROOT: &str = "iris-drive/default/root";
@@ -65,6 +67,24 @@ pub(super) fn build_workloads(
             LEGITIMATE_PUBLISH_BASE_MS
                 .saturating_add(u64::try_from(class_index).unwrap_or(0).saturating_mul(4)),
         )?;
+        for round in 1..config.legitimate_publication_rounds {
+            let round = u64::try_from(round).unwrap_or(u64::MAX);
+            let created_at = SIM_UNIX_BASE
+                .saturating_add(round.saturating_mul(LEGITIMATE_CREATED_AT_STRIDE))
+                .saturating_add(u64::try_from(class_index).unwrap_or(0));
+            let event = build_class_workload(class, &keys[publisher], recipient, created_at)?.event;
+            insert_event_metadata(
+                &mut events,
+                event,
+                class,
+                true,
+                None,
+                publisher,
+                LEGITIMATE_PUBLISH_BASE_MS
+                    .saturating_add(round.saturating_mul(LEGITIMATE_PUBLICATION_STRIDE_MS))
+                    .saturating_add(u64::try_from(class_index).unwrap_or(0).saturating_mul(4)),
+            )?;
+        }
         #[cfg(test)]
         let mut spam_event_id = None;
         if config.attacker_count > 0 && config.signed_spam_rounds > 0 {

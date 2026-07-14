@@ -16,6 +16,7 @@ impl Simulation {
         let observations = self.delivery_observations();
         let delivered = observations.delivered;
         self.finalize_delivery_metrics(observations);
+        self.finalize_delivery_paths()?;
         self.finalize_adversarial_metrics();
         self.finalize_service_metrics();
         self.finalize_efficiency_metrics(delivered);
@@ -277,8 +278,29 @@ impl Simulation {
                 .or_default();
             *role_credits = role_credits.saturating_add(*credits);
         }
+        for (link, bytes) in &self.delivery_bytes {
+            let role_bytes = self
+                .report
+                .interested_delivery_bytes_by_source_role
+                .entry(self.topology.roles[link.source])
+                .or_default();
+            *role_bytes = role_bytes.saturating_add(*bytes);
+        }
+        for (link, bytes) in &self.verified_delivery_bytes {
+            let role_bytes = self
+                .report
+                .verified_delivery_bytes_by_source_role
+                .entry(self.topology.roles[link.source])
+                .or_default();
+            *role_bytes = role_bytes.saturating_add(*bytes);
+        }
         self.report.protocol_service_by_link = std::mem::take(&mut self.link_traffic);
         self.report.interested_delivery_credit_by_link = std::mem::take(&mut self.delivery_credits);
+        self.report.interested_delivery_bytes_by_link = std::mem::take(&mut self.delivery_bytes);
+        self.report.verified_delivery_credit_by_link =
+            std::mem::take(&mut self.verified_delivery_credits);
+        self.report.verified_delivery_bytes_by_link =
+            std::mem::take(&mut self.verified_delivery_bytes);
     }
 }
 

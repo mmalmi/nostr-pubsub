@@ -87,15 +87,32 @@ than the first peerfinding path.
   subscribers.
 - `nostr-pubsub-relay`: optional `nostr-sdk` backend for actual Nostr relays.
 - `nostr-pubsub-sim`: deterministic adversarial simulations that execute the
-  production `InvWantMesh`, FIPS subscriptions, social and machine admission,
+  production `InvWantMesh`, FIPS subscriptions, application filters, machine
+  admission/removal,
   and forged versus authorized-poisoned rating paths across up to thousands of
-  virtual peers.
+  virtual peers on a virtual clock.
 - `nostr-pubsub-social-graph`: social-graph policy adapter for filtering and
   prioritizing event authors or sources.
 
 Hashtree mesh/local-relay adapters should live in the hashtree repo because
 they depend on hashtree internals. FIPS, Nostr VPN, and Iris Drive should keep
 their product-specific event interpretation in their own repos.
+
+The simulator publishes real signed events through eight production-shaped
+subscriptions: author feed, hashtag, Hashtree update, targeted machine rating,
+Iris Drive root, FIPS advert, FIPS paid offer, and git repository announcement.
+Repeated publication rounds traverse the real mesh, filter, verification,
+loss/churn, retry, and first-acceptance paths; payment experiments consume those
+verified delivery edges rather than fabricated traffic.
+
+Its optional incentive comparison is explicitly a model, not a Cashu executor.
+It compares direct Cashu, bounded offline peer credit, prefunded Spilman, and
+accepted-mint batching with bilateral useful-service setoff, dust carry, private
+on-demand mint discovery, outages, payment refusal, and fake service claims.
+Reports include delivery paths, spam suppression, honest CPU/memory/bandwidth
+proxies, settled value, fees, unsecured exposure, payment traffic, and mint
+acceptance usefulness. Real CDK/fake-Lightning conservation tests live in
+`cashu-service`; economics remain outside the pubsub protocol crates.
 
 ## TypeScript
 
@@ -139,4 +156,6 @@ cargo test -p nostr-pubsub@0.1.9 --test typescript_interop
 cargo run -p nostr-pubsub-sim -- --nodes 1000 --attackers 200
 cargo test --release -p nostr-pubsub-sim --test release_gate -- \
   --ignored --nocapture --test-threads=1
+cargo test --release -p nostr-pubsub-sim --test incentives \
+  thousand_node_adversarial_incentive_gate -- --ignored --nocapture
 ```

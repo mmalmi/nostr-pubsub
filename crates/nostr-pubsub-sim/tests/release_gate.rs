@@ -5,6 +5,12 @@ use nostr_pubsub_sim::{
     TopologyStrategy, TrafficScope, basis_points, run_simulation,
 };
 
+#[path = "release_gate/service_accounting.rs"]
+mod service_accounting;
+use service_accounting::assert_service_accounting_is_populated;
+#[path = "release_gate/delivery_trails.rs"]
+mod delivery_trails;
+
 const RELEASE_SEEDS: [u64; 3] = [
     0x4e4f_5354_5250_5542,
     0x9e37_79b9_7f4a_7c15,
@@ -224,6 +230,7 @@ fn release_config(seed: u64, topology: TopologyStrategy) -> SimulationConfig {
         max_hops: 16,
         fake_inventories_per_attack_link: 6,
         signed_spam_rounds: 8,
+        legitimate_publication_rounds: 1,
         max_processed_actions: 10_000_000,
         seed,
         topology,
@@ -740,62 +747,6 @@ fn assert_machine_reputation_used_real_transport(report: &SimulationReport, case
     assert!(report.machine_trust_edges > 0, "{context}");
 }
 
-fn assert_service_accounting_is_populated(report: &SimulationReport, case: &str) {
-    let context = report_context(report, case);
-    assert!(report.total_protocol_bytes > 0, "{context}");
-    assert!(
-        report.protocol_bytes_per_interested_delivery > 0,
-        "{context}"
-    );
-    assert!(report.protocol_accounting_is_conserved(), "{context}");
-    assert_eq!(
-        report
-            .data_plane_wire_bytes
-            .saturating_add(report.control_plane_wire_bytes),
-        report.total_protocol_bytes,
-        "data and control planes must conserve bytes: {context}"
-    );
-    assert_eq!(
-        report
-            .legitimate_protocol_bytes
-            .saturating_add(report.adversarial_protocol_bytes),
-        report.total_protocol_bytes,
-        "workload provenance must conserve bytes: {context}"
-    );
-    assert_eq!(report.sent_link_protocol_bytes, report.total_protocol_bytes);
-    assert_eq!(report.sent_role_protocol_bytes, report.total_protocol_bytes);
-    assert!(!report.protocol_service_by_link.is_empty(), "{context}");
-    assert!(
-        !report.interested_delivery_credit_by_link.is_empty(),
-        "{context}"
-    );
-    assert_eq!(
-        report
-            .interested_delivery_credit_by_link
-            .values()
-            .copied()
-            .sum::<usize>(),
-        report
-            .delivered_legitimate
-            .saturating_sub(report.local_legitimate_deliveries),
-        "final-hop credit must equal remote interested delivery: {context}"
-    );
-    assert_eq!(
-        report
-            .interested_delivery_credit_by_source_role
-            .values()
-            .copied()
-            .sum::<usize>(),
-        report
-            .interested_delivery_credit_by_link
-            .values()
-            .copied()
-            .sum::<usize>(),
-        "role and link delivery credits must conserve: {context}"
-    );
-    assert!(role_service_bytes(report, NodeRole::Peer) > 0, "{context}");
-}
-
 fn assert_honest_resource_accounting(report: &SimulationReport, case: &str) {
     let context = report_context(report, case);
     let resources = report.resource_usage;
@@ -821,6 +772,7 @@ fn assert_honest_resource_accounting(report: &SimulationReport, case: &str) {
             .saturating_add(all.received_bytes.total),
         "endpoint I/O must conserve: {context}"
     );
+    assert!(peers.combined_messages.p95 > 0, "{context}");
     assert_eq!(
         all.adversarial_combined_bytes.total, resources.honest_adversarial_combined_bytes,
         "honest adversarial I/O must conserve: {context}"

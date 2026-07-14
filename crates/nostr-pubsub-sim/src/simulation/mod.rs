@@ -1,5 +1,6 @@
 mod admission;
 mod control_transport;
+mod delivery;
 mod engine;
 mod lifecycle;
 mod network;
@@ -9,6 +10,7 @@ mod reputation_probes;
 mod resources;
 mod setup;
 
+pub use delivery::VerifiedDeliveryRecord;
 use resources::NodeResourceLedger;
 pub use resources::{
     CpuWorkDistribution, NodeCpuWork, NodeRetainedUsage, ResourceCohortReport,
@@ -110,6 +112,8 @@ pub struct SimulationConfig {
     pub fake_inventories_per_attack_link: usize,
     /// Signed adversarial publications generated for every subscription class.
     pub signed_spam_rounds: usize,
+    /// Signed legitimate publications generated for every subscription class.
+    pub legitimate_publication_rounds: usize,
     pub max_processed_actions: usize,
     pub seed: u64,
     pub topology: TopologyStrategy,
@@ -134,6 +138,7 @@ impl Default for SimulationConfig {
             max_hops: 16,
             fake_inventories_per_attack_link: 6,
             signed_spam_rounds: 8,
+            legitimate_publication_rounds: 1,
             max_processed_actions: 10_000_000,
             seed: 0x4e4f_5354_5250_5542,
             topology: TopologyStrategy::PeerMesh,
@@ -160,6 +165,8 @@ pub struct SimulationReport {
     pub attacker_count: usize,
     pub honest_node_count: usize,
     pub supernode_count: usize,
+    /// Ground-truth role of each simulated node, indexed by node identifier.
+    pub node_roles: Vec<NodeRole>,
     pub topology_edges: usize,
     pub max_node_degree: usize,
     pub legitimate_events: usize,
@@ -188,6 +195,14 @@ pub struct SimulationReport {
     pub latency_p95_ms: u64,
     pub latency_p99_ms: u64,
     pub max_delivered_latency_ms: u64,
+    /// Remote interested deliveries with reconstructable dissemination paths.
+    pub delivery_path_samples: usize,
+    pub multihop_interested_deliveries: usize,
+    pub multihop_interested_delivery_basis_points: u32,
+    pub delivery_path_hops_p50: u64,
+    pub delivery_path_hops_p95: u64,
+    pub delivery_path_hops_p99: u64,
+    pub delivery_path_hops_max: u64,
     pub undelivered_legitimate: usize,
     pub spam_delivered: usize,
     pub signed_spam_deliveries_by_class: BTreeMap<String, usize>,
@@ -298,6 +313,19 @@ pub struct SimulationReport {
     pub interested_delivery_credit_by_link: BTreeMap<DirectedServiceLink, usize>,
     /// Final-hop interested delivery credits aggregated by the carrier's role.
     pub interested_delivery_credit_by_source_role: BTreeMap<NodeRole, usize>,
+    /// Exact useful application payload bytes credited to each final directed hop.
+    pub interested_delivery_bytes_by_link: BTreeMap<DirectedServiceLink, u64>,
+    /// Final-hop useful payload bytes aggregated by the carrier's role.
+    pub interested_delivery_bytes_by_source_role: BTreeMap<NodeRole, u64>,
+    /// First accepted legitimate frame deliveries on every directed transport hop.
+    pub verified_delivery_credit_by_link: BTreeMap<DirectedServiceLink, usize>,
+    /// Exact application payload bytes carried by first accepted legitimate frames.
+    pub verified_delivery_bytes_by_link: BTreeMap<DirectedServiceLink, u64>,
+    /// Verified-hop payload bytes aggregated by the sending node's role.
+    pub verified_delivery_bytes_by_source_role: BTreeMap<NodeRole, u64>,
+    /// Per-event edges for first accepted legitimate frames that served an
+    /// interested receiver or were forwarded onward.
+    pub verified_delivery_records: Vec<VerifiedDeliveryRecord>,
 }
 
 impl SimulationReport {
@@ -518,6 +546,9 @@ struct Simulation {
     node_resources: Vec<NodeResourceLedger>,
     link_traffic: BTreeMap<DirectedServiceLink, NodeTrafficLedger>,
     delivery_credits: BTreeMap<DirectedServiceLink, usize>,
+    delivery_bytes: BTreeMap<DirectedServiceLink, u64>,
+    verified_delivery_credits: BTreeMap<DirectedServiceLink, usize>,
+    verified_delivery_bytes: BTreeMap<DirectedServiceLink, u64>,
     report: SimulationReport,
 }
 

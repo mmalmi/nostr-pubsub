@@ -17,11 +17,12 @@ pub(super) fn validate_config(config: &SimulationConfig) -> Result<()> {
     if config.fanout == 0
         || config.supernode_fanout == 0
         || config.max_hops == 0
+        || config.legitimate_publication_rounds == 0
         || config.max_processed_actions == 0
         || config.retry_delay_ms == 0
     {
         return Err(SimulationError::InvalidConfig(
-            "fanout, supernode_fanout, max_hops, retry_delay_ms and action budget must be non-zero"
+            "fanout, supernode_fanout, max_hops, legitimate rounds, retry delay and action budget must be non-zero"
                 .to_string(),
         ));
     }

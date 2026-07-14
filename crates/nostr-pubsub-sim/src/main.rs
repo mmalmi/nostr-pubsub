@@ -24,6 +24,7 @@ const CSV_COLUMNS: &[&str] = &[
     "unknown_peer_reserve",
     "max_hops",
     "fake_inventories_per_attack_link",
+    "legitimate_publication_rounds",
     "signed_spam_rounds",
     "action_budget",
     "supernode_fanout",
@@ -110,6 +111,13 @@ const CSV_COLUMNS: &[&str] = &[
     "p95_ms",
     "p99_ms",
     "max_delivered_latency_ms",
+    "delivery_path_samples",
+    "multihop_interested_deliveries",
+    "multihop_interested_delivery_bps",
+    "delivery_path_hops_p50",
+    "delivery_path_hops_p95",
+    "delivery_path_hops_p99",
+    "delivery_path_hops_max",
     "processed_actions",
     "processed_messages",
     "inventory",
@@ -181,6 +189,15 @@ const CSV_COLUMNS: &[&str] = &[
     "peer_interested_delivery_credits",
     "supernode_interested_delivery_credits",
     "attacker_interested_delivery_credits",
+    "interested_delivery_bytes",
+    "peer_interested_delivery_bytes",
+    "supernode_interested_delivery_bytes",
+    "attacker_interested_delivery_bytes",
+    "verified_hop_deliveries",
+    "verified_hop_bytes",
+    "peer_verified_hop_bytes",
+    "supernode_verified_hop_bytes",
+    "attacker_verified_hop_bytes",
     "peer_sent_legitimate_bytes",
     "peer_sent_adversarial_bytes",
     "peer_received_legitimate_bytes",
@@ -200,6 +217,7 @@ const CSV_COLUMNS: &[&str] = &[
     "honest_peer_received_bytes_p95",
     "honest_peer_received_bytes_p99",
     "honest_peer_received_bytes_max",
+    "honest_peer_combined_messages_p95",
     "honest_peer_combined_bytes_p50",
     "honest_peer_combined_bytes_p95",
     "honest_peer_combined_bytes_p99",
@@ -286,6 +304,7 @@ fn resource_values(report: &SimulationReport) -> Vec<String> {
         peer.received_bytes.p95.to_string(),
         peer.received_bytes.p99.to_string(),
         peer.received_bytes.max.to_string(),
+        peer.combined_messages.p95.to_string(),
         peer.combined_bytes.p50.to_string(),
         peer.combined_bytes.p95.to_string(),
         peer.combined_bytes.p99.to_string(),
@@ -359,6 +378,7 @@ fn identity_config_values(report: &SimulationReport) -> Vec<String> {
         report.config.unknown_peer_reserve.to_string(),
         report.config.max_hops.to_string(),
         report.config.fake_inventories_per_attack_link.to_string(),
+        report.config.legitimate_publication_rounds.to_string(),
         report.config.signed_spam_rounds.to_string(),
         report.config.max_processed_actions.to_string(),
         report.config.supernode_fanout.to_string(),
@@ -454,6 +474,13 @@ fn delivery_values(report: &SimulationReport) -> Vec<String> {
         report.latency_p95_ms.to_string(),
         report.latency_p99_ms.to_string(),
         report.max_delivered_latency_ms.to_string(),
+        report.delivery_path_samples.to_string(),
+        report.multihop_interested_deliveries.to_string(),
+        report.multihop_interested_delivery_basis_points.to_string(),
+        report.delivery_path_hops_p50.to_string(),
+        report.delivery_path_hops_p95.to_string(),
+        report.delivery_path_hops_p99.to_string(),
+        report.delivery_path_hops_max.to_string(),
     ]
 }
 
@@ -553,7 +580,53 @@ fn subscription_topology_values(report: &SimulationReport) -> Vec<String> {
         interested_delivery_credits(report, NodeRole::Peer).to_string(),
         interested_delivery_credits(report, NodeRole::Supernode).to_string(),
         interested_delivery_credits(report, NodeRole::Attacker).to_string(),
+        sum_values(&report.interested_delivery_bytes_by_link).to_string(),
+        role_value(
+            &report.interested_delivery_bytes_by_source_role,
+            NodeRole::Peer,
+        )
+        .to_string(),
+        role_value(
+            &report.interested_delivery_bytes_by_source_role,
+            NodeRole::Supernode,
+        )
+        .to_string(),
+        role_value(
+            &report.interested_delivery_bytes_by_source_role,
+            NodeRole::Attacker,
+        )
+        .to_string(),
+        report
+            .verified_delivery_credit_by_link
+            .values()
+            .copied()
+            .fold(0, usize::saturating_add)
+            .to_string(),
+        sum_values(&report.verified_delivery_bytes_by_link).to_string(),
+        role_value(
+            &report.verified_delivery_bytes_by_source_role,
+            NodeRole::Peer,
+        )
+        .to_string(),
+        role_value(
+            &report.verified_delivery_bytes_by_source_role,
+            NodeRole::Supernode,
+        )
+        .to_string(),
+        role_value(
+            &report.verified_delivery_bytes_by_source_role,
+            NodeRole::Attacker,
+        )
+        .to_string(),
     ]
+}
+
+fn sum_values<K: Ord>(values: &std::collections::BTreeMap<K, u64>) -> u64 {
+    values.values().copied().fold(0, u64::saturating_add)
+}
+
+fn role_value(values: &std::collections::BTreeMap<NodeRole, u64>, role: NodeRole) -> u64 {
+    values.get(&role).copied().unwrap_or(0)
 }
 
 fn role_service_values(report: &SimulationReport) -> Vec<String> {
@@ -726,6 +799,9 @@ fn parse_config(
             "--signed-spam-rounds" => {
                 config.signed_spam_rounds = parse_number(&flag, &value)?;
             }
+            "--legitimate-publication-rounds" => {
+                config.legitimate_publication_rounds = parse_number(&flag, &value)?;
+            }
             "--action-budget" | "--message-budget" => {
                 config.max_processed_actions = parse_number(&flag, &value)?;
             }
@@ -848,6 +924,8 @@ mod tests {
                 "11",
                 "--signed-spam-rounds",
                 "5",
+                "--legitimate-publication-rounds",
+                "7",
             ]
             .map(String::from)
             .into_iter(),
@@ -858,6 +936,7 @@ mod tests {
 
         assert_eq!(canonical.fake_inventories_per_attack_link, 11);
         assert_eq!(canonical.signed_spam_rounds, 5);
+        assert_eq!(canonical.legitimate_publication_rounds, 7);
         assert_eq!(legacy.fake_inventories_per_attack_link, 7);
     }
 
