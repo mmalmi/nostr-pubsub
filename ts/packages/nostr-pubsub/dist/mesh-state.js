@@ -50,4 +50,10 @@ export function retainOrder(order, map) {
 export function validation(message) {
     return PubsubError.validation(message);
 }
+export function send(peerId, message) {
+    return { type: 'send', peerId, message };
+}
+export function routeHasProvider(route, peerId) {
+    return route.peerId === peerId || route.alternatePeerIds.has(peerId);
+}
 //# sourceMappingURL=mesh-state.js.map

@@ -164,3 +164,22 @@ export {
   type NostrRelayTransport,
   type NostrRelayTransportHandlers,
 } from './fips-relay-service.js';
+
+export {
+  FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL,
+  FIPS_NOSTR_PUBSUB_INV_WANT_VERSION,
+  FipsInvWantStream,
+  defaultFipsInvWantStreamOptions,
+  type FipsInvWantStreamAction,
+  type FipsInvWantStreamOptions,
+  type MeshPeerPolicy,
+} from './fips-invwant-stream.js';
+
+export { FipsInvWantTcpDriver } from './fips-invwant-tcp-driver.js';
+export {
+  fipsInvWantTcpCapabilityName,
+  fipsInvWantTcpPeerOrderKey,
+  type FipsInvWantTcpDriveReport,
+  type FipsInvWantTcpDriverOptions,
+  type FipsInvWantTcpQueueSnapshot,
+} from './fips-invwant-tcp-types.js';

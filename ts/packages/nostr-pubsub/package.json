@@ -34,6 +34,9 @@
     "dist",
     "LICENSE"
   ],
+  "dependencies": {
+    "@fips/tcp": "github:mmalmi/fips-tcp#65787496818569e598fd5420b3da123900634335&path:ts"
+  },
   "peerDependencies": {
     "nostr-tools": ">=2.17.0 <3"
   },

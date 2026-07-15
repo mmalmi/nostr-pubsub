@@ -2,7 +2,7 @@
 
 Rust `InvWantCodec` and TypeScript `InvWantCodec` carry the same compact JSON
 envelope. A transport selects the protocol namespace and version; the pubsub
-core does not reserve either value or add stream framing.
+core does not reserve either value.
 
 ```json
 {"protocol":"iris.fips.pubsub","version":1,"message":{"type":"want","event_id":"<64 hex characters>"}}
@@ -18,6 +18,14 @@ Field names and serialized field order are compatibility-sensitive because
 some transports authenticate the payload bytes. Shared vectors live in
 `crates/nostr-pubsub/tests/data/interop-vectors.json` and are executed by
 both Rust and Vitest. Change the vectors and both implementations together.
+
+`FipsInvWantStream` in both languages carries each encoded envelope as one
+unsigned 32-bit big-endian byte length followed by exactly that many payload
+bytes. The declared length excludes the four-byte prefix. Decoders retain
+partial prefixes and payloads, drain multiple coalesced records in bounded
+turns, reject declarations above `maxRecordBytes`, and never retain more than
+`maxRecordBytes + 4` bytes for one authenticated peer. This framing belongs to
+the shared reliable stream adapter, not a product wrapper.
 
 The codec only validates envelope structure and bounds. `InvWantMesh` verifies
 the Nostr event ID and Schnorr signature before delivery or forwarding. It also

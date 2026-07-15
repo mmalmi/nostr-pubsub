@@ -19,9 +19,51 @@ for (const action of mesh.publish(signedEvent, [meshPeer(remoteFipsPubkey)], Dat
 ```
 
 The application owns Nostr relay connections, peer-advert meaning, FIPS peer
-admission, and transport framing. This package does not contain a default relay
-or gateway. See the repository `docs/inv-want-wire.md` for compatibility and
-security boundaries.
+admission, and outbound connection policy. This package does not contain a
+default relay or gateway. See the repository `docs/inv-want-wire.md` for
+compatibility and security boundaries.
+
+For reliable authenticated carriage, `FipsInvWantStream` applies the same
+four-byte big-endian record framing and bounds as Rust. `FipsInvWantTcpDriver`
+binds that stream to `@fips/tcp`, accepts only the peer identity supplied by the
+authenticated FSP service context, converges simultaneous connects on one
+stream, and owns bounded partial-read/write queues. Applications explicitly
+choose peers and reconnect timing:
+
+```ts
+import { FipsInvWantStream, FipsInvWantTcpDriver } from 'nostr-pubsub';
+
+const stream = new FipsInvWantStream();
+const driver = FipsInvWantTcpDriver.bind(
+  fipsNode,
+  localFipsPubkey,
+  stream,
+  {
+    serviceNamespace: 'nostr.pubsub',
+    serviceVersion: 1,
+    servicePort: 39_121,
+    maxPeers: 64,
+    maxQueuedRecordsPerPeer: 64,
+    maxQueuedBytesPerPeer: 2 * 1024 * 1024,
+    maxIoBytesPerDrive: 256 * 1024,
+  },
+);
+await driver.connectPeer(remoteFipsPubkey);
+const report = await driver.poll();
+```
+
+`fipsInvWantTcpCapabilityName()` returns the authenticated capability name for
+the configured namespace and version. Capability roster registration remains
+an FSP concern; the TypeScript FIPS API does not yet expose the Rust endpoint's
+lifecycle-bound capability registration. The driver does not advertise through
+plaintext discovery or add a product-local fallback. The existing
+`FipsNostrRelayService` datagram adapter remains available for its separate
+`REQ`/`EVENT`/`CLOSE` contract.
+
+The simultaneous-connect tie-break normalizes FIPS's compressed hex peer keys
+to NIP-19 `npub` strings before ordering them. This deliberately matches the
+Rust driver's ordering; comparing the raw compressed hex would sometimes make
+the two runtimes select and reset opposite streams.
 
 `InvWantMesh` matches the Rust production state machine: inventories use
 canonical lowercase event IDs and local kind, size, and hop bounds; repeated

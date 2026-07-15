@@ -25,6 +25,14 @@ export class BoundedEventCache {
     get(eventId) {
         return this.events.get(eventId)?.event;
     }
+    orderedEvents() {
+        return this.order.flatMap((eventId) => {
+            const cached = this.events.get(eventId);
+            return cached === undefined
+                ? []
+                : [{ event: cached.event, payloadBytes: cached.payloadBytes }];
+        });
+    }
     store(event, payloadBytes, nowMs) {
         const cached = this.events.get(event.id);
         if (cached !== undefined) {

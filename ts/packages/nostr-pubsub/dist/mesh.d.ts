@@ -18,7 +18,6 @@ export declare class InvWantMesh {
     private pendingPeerCount;
     private readonly wantForwarded;
     private readonly peerBehaviors;
-    private readonly peerBehaviorOrder;
     constructor(options?: Partial<InvWantMeshOptions>);
     retainedState(): InvWantMeshRetainedState;
     peerBehaviorScore(peerId: string): number | undefined;
@@ -32,6 +31,10 @@ export declare class InvWantMesh {
     publish(event: NostrEvent, peers: readonly MeshPeer[], nowMs: number): InvWantAction[];
     /** Publish an event whose signature was already checked at the trust boundary. */
     publishVerified(event: NostrVerifiedEvent, peers: readonly MeshPeer[], nowMs: number): InvWantAction[];
+    /** Restore verified durable state without manufacturing transport traffic. */
+    seedVerified(event: NostrVerifiedEvent, nowMs: number): void;
+    /** Replay bounded cached inventories after a peer connects or reconnects. */
+    replayCachedToPeer(peerId: string, nowMs: number): InvWantAction[];
     private publishEvent;
     replayToPeer(event: NostrEvent, peerId: string, nowMs: number): InvWantAction[];
     /** Replay a verified event without repeating signature verification. */
@@ -53,7 +56,6 @@ export declare class InvWantMesh {
     private rememberDelivered;
     private sendToSelectedPeers;
     private peersWithBehavior;
-    private recordPeerBehavior;
     private prune;
 }
 //# sourceMappingURL=mesh.d.ts.map

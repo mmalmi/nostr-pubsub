@@ -2,6 +2,7 @@ import {
   meshEventJsonBytes,
   type InvWantWireMessage,
 } from './mesh-codec.js';
+import { PeerBehaviorTracker } from './mesh-behavior.js';
 import { meshPeer, selectMeshPeers, type MeshPeer } from './mesh-peer.js';
 import { BoundedEventCache, type InvWantMeshRetainedState } from './mesh-resources.js';
 import {
@@ -12,21 +13,20 @@ import {
   requireUnsignedByte,
   retainMap,
   retainOrder,
+  routeHasProvider,
   saturatingAdd,
+  send,
   validation,
 } from './mesh-state.js';
 import {
   INVALID_MESSAGE_PENALTY,
-  MAX_TRACKED_PEER_BEHAVIORS,
   MAX_UPSTREAM_PROVIDERS_PER_EVENT,
-  MIN_PEER_BEHAVIOR_SAMPLES,
   UNSERVED_INVENTORY_PENALTY,
   VALID_FRAME_REWARD,
   defaultInvWantMeshOptions,
   normalizeInvWantMeshOptions,
   type InvWantAction,
   type InvWantMeshOptions,
-  type PeerBehaviorEvidence,
   type PeerBehaviorObservation,
   type PendingPeers,
   type UpstreamRoute,
@@ -49,8 +49,7 @@ export class InvWantMesh {
   private readonly pendingDownstream = new Map<string, PendingPeers>();
   private pendingPeerCount = 0;
   private readonly wantForwarded = new Map<string, number>();
-  private readonly peerBehaviors = new Map<string, PeerBehaviorObservation>();
-  private readonly peerBehaviorOrder: string[] = [];
+  private readonly peerBehaviors = new PeerBehaviorTracker();
 
   constructor(options: Partial<InvWantMeshOptions> = {}) {
     this.options = normalizeInvWantMeshOptions(options);
@@ -78,18 +77,15 @@ export class InvWantMesh {
   }
 
   peerBehaviorScore(peerId: string): number | undefined {
-    return this.peerBehaviorObservation(peerId)?.score;
+    return this.peerBehaviors.score(peerId);
   }
 
   peerBehaviorObservation(peerId: string): PeerBehaviorObservation | undefined {
-    const behavior = this.peerBehaviors.get(peerId);
-    return behavior !== undefined && behavior.samples >= MIN_PEER_BEHAVIOR_SAMPLES
-      ? { ...behavior }
-      : undefined;
+    return this.peerBehaviors.observation(peerId);
   }
 
   recordInvalidMessage(peerId: string): void {
-    this.recordPeerBehavior(peerId, INVALID_MESSAGE_PENALTY, 'invalidMessages');
+    this.peerBehaviors.record(peerId, INVALID_MESSAGE_PENALTY, 'invalidMessages');
   }
 
   /** Prune expired state and score requested inventories that were never served. */
@@ -127,6 +123,27 @@ export class InvWantMesh {
     nowMs: number,
   ): InvWantAction[] {
     return this.publishEvent(event, peers, nowMs, true);
+  }
+
+  /** Restore verified durable state without manufacturing transport traffic. */
+  seedVerified(event: NostrVerifiedEvent, nowMs: number): void {
+    requireNow(nowMs);
+    this.prune(nowMs);
+    const verified = this.acceptEvent(event, true);
+    this.storeEvent(verified, meshEventJsonBytes(verified), nowMs);
+  }
+
+  /** Replay bounded cached inventories after a peer connects or reconnects. */
+  replayCachedToPeer(peerId: string, nowMs: number): InvWantAction[] {
+    requireNow(nowMs);
+    this.prune(nowMs);
+    return this.cachedEvents.orderedEvents().map(({ event, payloadBytes }) => send(peerId, {
+      type: 'inventory',
+      eventId: event.id,
+      eventKind: event.kind,
+      payloadBytes,
+      hopLimit: this.options.maxHops,
+    }));
   }
 
   private publishEvent(
@@ -322,7 +339,7 @@ export class InvWantMesh {
       throw validation('inv/want frame does not match announced kind or payload size');
     }
     if (route.fulfilled) return [];
-    this.recordPeerBehavior(sourcePeer, VALID_FRAME_REWARD, 'validFrames');
+    this.peerBehaviors.record(sourcePeer, VALID_FRAME_REWARD, 'validFrames');
     this.storeEvent(verified, payloadBytes, nowMs);
     route.fulfilled = true;
     route.transportDisruptedPeerIds.clear();
@@ -446,32 +463,14 @@ export class InvWantMesh {
     });
   }
 
-  private recordPeerBehavior(peerId: string, delta: number, evidence: PeerBehaviorEvidence): void {
-    if (!this.peerBehaviors.has(peerId)) {
-      while (this.peerBehaviors.size >= MAX_TRACKED_PEER_BEHAVIORS) {
-        const oldest = this.peerBehaviorOrder.shift();
-        if (oldest === undefined) break;
-        this.peerBehaviors.delete(oldest);
-      }
-      this.peerBehaviorOrder.push(peerId);
-    }
-    const behavior = this.peerBehaviors.get(peerId) ?? {
-      score: 0, samples: 0, validFrames: 0, invalidMessages: 0, unservedInventories: 0,
-    };
-    behavior.samples = Math.min(0xffff_ffff, behavior.samples + 1);
-    behavior.score = clamp(behavior.score + delta, -100, 100);
-    behavior[evidence] = Math.min(0xffff_ffff, behavior[evidence] + 1);
-    this.peerBehaviors.set(peerId, behavior);
-  }
-
   private prune(nowMs: number): void {
     for (const route of this.upstreamRoutes.values()) {
       if (route.fulfilled || route.expiresAtMs > nowMs) continue;
       if (!route.transportDisruptedPeerIds.has(route.peerId))
-        this.recordPeerBehavior(route.peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
+        this.peerBehaviors.record(route.peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
       for (const peerId of route.alternatePeerIds) {
         if (!route.transportDisruptedPeerIds.has(peerId))
-          this.recordPeerBehavior(peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
+          this.peerBehaviors.record(peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
       }
     }
     this.cachedEvents.prune(nowMs);
@@ -487,12 +486,4 @@ export class InvWantMesh {
     retainMap(this.wantForwarded, (expiry, eventId) =>
       expiry > nowMs && this.upstreamRoutes.has(eventId));
   }
-}
-
-function send(peerId: string, message: InvWantWireMessage): InvWantAction {
-  return { type: 'send', peerId, message };
-}
-
-function routeHasProvider(route: UpstreamRoute, peerId: string): boolean {
-  return route.peerId === peerId || route.alternatePeerIds.has(peerId);
 }

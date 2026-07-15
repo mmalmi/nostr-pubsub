@@ -9,6 +9,10 @@ importers:
   .: {}
 
   packages/nostr-pubsub:
+    dependencies:
+      '@fips/tcp':
+        specifier: github:mmalmi/fips-tcp#65787496818569e598fd5420b3da123900634335&path:ts
+        version: https://codeload.github.com/mmalmi/fips-tcp/tar.gz/65787496818569e598fd5420b3da123900634335#path:ts
     devDependencies:
       '@types/node':
         specifier: ^24.10.1
@@ -33,6 +37,10 @@ packages:
 
   '@emnapi/wasi-threads@1.2.2':
     resolution: {integrity: sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA==}
+
+  '@fips/tcp@https://codeload.github.com/mmalmi/fips-tcp/tar.gz/65787496818569e598fd5420b3da123900634335#path:ts':
+    resolution: {gitHosted: true, integrity: sha512-vhr1Y9MtbsOSqIe3Fuy1qO/uf2pwOegIRH8DZfHIVrI2Acx7Q2QT2jgcdmAlRaVK9n8g6TP/kBB9QJqfcSit/A==, path: ts, tarball: https://codeload.github.com/mmalmi/fips-tcp/tar.gz/65787496818569e598fd5420b3da123900634335}
+    version: 0.2.0
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
@@ -512,6 +520,8 @@ snapshots:
     dependencies:
       tslib: 2.8.1
     optional: true
+
+  '@fips/tcp@https://codeload.github.com/mmalmi/fips-tcp/tar.gz/65787496818569e598fd5420b3da123900634335#path:ts': {}
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 

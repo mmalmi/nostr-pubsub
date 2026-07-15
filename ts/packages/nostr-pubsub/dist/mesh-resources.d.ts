@@ -13,6 +13,10 @@ export interface InvWantMeshRetainedState {
     forwardedWants: number;
     peerBehaviors: number;
 }
+export interface CachedInvWantEvent {
+    event: NostrVerifiedEvent;
+    payloadBytes: number;
+}
 /** Exact payload accounting plus count- and byte-bounded FIFO eviction. */
 export declare class BoundedEventCache {
     private readonly maxEvents;
@@ -26,6 +30,7 @@ export declare class BoundedEventCache {
     get payloadBytes(): number;
     has(eventId: string): boolean;
     get(eventId: string): NostrVerifiedEvent | undefined;
+    orderedEvents(): CachedInvWantEvent[];
     store(event: NostrVerifiedEvent, payloadBytes: number, nowMs: number): void;
     prune(nowMs: number): void;
     private evictOldest;

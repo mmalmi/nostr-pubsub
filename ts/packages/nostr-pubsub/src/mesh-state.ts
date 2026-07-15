@@ -1,4 +1,6 @@
 import { PubsubError } from './types.js';
+import type { InvWantWireMessage } from './mesh-codec.js';
+import type { InvWantAction, UpstreamRoute } from './mesh-types.js';
 
 export function requireEventId(eventId: string): void {
   if (!/^[0-9a-f]{64}$/.test(eventId)) throw validation(`invalid inv/want event id ${eventId}`);
@@ -53,4 +55,12 @@ export function retainOrder<V>(order: string[], map: Map<string, V>): void {
 
 export function validation(message: string): PubsubError {
   return PubsubError.validation(message);
+}
+
+export function send(peerId: string, message: InvWantWireMessage): InvWantAction {
+  return { type: 'send', peerId, message };
+}
+
+export function routeHasProvider(route: UpstreamRoute, peerId: string): boolean {
+  return route.peerId === peerId || route.alternatePeerIds.has(peerId);
 }

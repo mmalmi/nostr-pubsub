@@ -23,6 +23,11 @@ interface CachedEvent {
   payloadBytes: number;
 }
 
+export interface CachedInvWantEvent {
+  event: NostrVerifiedEvent;
+  payloadBytes: number;
+}
+
 /** Exact payload accounting plus count- and byte-bounded FIFO eviction. */
 export class BoundedEventCache {
   private readonly events = new Map<string, CachedEvent>();
@@ -49,6 +54,15 @@ export class BoundedEventCache {
 
   get(eventId: string): NostrVerifiedEvent | undefined {
     return this.events.get(eventId)?.event;
+  }
+
+  orderedEvents(): CachedInvWantEvent[] {
+    return this.order.flatMap((eventId) => {
+      const cached = this.events.get(eventId);
+      return cached === undefined
+        ? []
+        : [{ event: cached.event, payloadBytes: cached.payloadBytes }];
+    });
   }
 
   store(event: NostrVerifiedEvent, payloadBytes: number, nowMs: number): void {
