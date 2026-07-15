@@ -30,13 +30,18 @@ bounded `InvWantMesh` instead of introducing an application-specific mesh:
   replayed whenever a peer connects or reconnects.
 
 The stream state machine owns no socket, task, reconnect timer, or durable
-store. A thin `fips-tcp-endpoint` driver should cap each read with
-`remaining_input_capacity`, pass connection events to `peer_connected` and
-`disconnect_peer`, drain bounded receive batches with empty input while
-`has_ready_input` is true, and execute returned `Send` records through its own
-bounded partial-write queue. The envelope protocol and version are configurable
-so a product can preserve an already-deployed Inv/WANT namespace while deleting
-its private codec and mesh wrapper.
+store. `FipsInvWantTcpDriver` is its thin `fips-tcp-endpoint` production
+carrier. It advertises a caller-selected authenticated service namespace and
+version, accepts or opens streams for authenticated FIPS identities, drains
+split and coalesced records, and executes sends through bounded partial-write
+queues. The caller drives `receive`/`poll` and owns peer selection and reconnect
+timing; there is no second networking runtime or hidden outbound policy.
+
+Both the Inv/WANT envelope and FIPS service namespaces are configurable, so a
+product can preserve an already-deployed protocol while deleting its private
+codec, mesh wrapper, and stream plumbing. Publications made without a stream
+remain in the bounded replay cache and are announced when an explicitly chosen
+peer connects or reconnects.
 
 `FipsPeerReputation` composes FIPS's authenticated peer metrics and signed
 rating events with the shared social-graph reputation policy. Its default keeps
@@ -62,7 +67,8 @@ Version `0.3.x` uses the FIPS `0.4.x` endpoint API. The adapter keeps the same
 bounded FSP datagram contract; the major-minor bump reflects the breaking FIPS
 dependency rather than a second pubsub protocol or compatibility fallback.
 The reliable stream API is additive and is not bound or advertised by
-`FipsPubsubClient`.
+`FipsPubsubClient`; only a separately bound `FipsInvWantTcpDriver` advertises
+its selected capability.
 
 For peerfinding, configure FIPS with
 `node.discovery.nostr.peerfinding_source: external` and construct a

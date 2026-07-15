@@ -13,6 +13,8 @@ exclude = ["Cargo.lock"]
 [dependencies]
 async-trait.workspace = true
 fips-core.workspace = true
+fips-tcp.workspace = true
+fips-tcp-endpoint.workspace = true
 nostr.workspace = true
 nostr-pubsub.workspace = true
 nostr-pubsub-social-graph.workspace = true

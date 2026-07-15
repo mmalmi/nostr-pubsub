@@ -24,9 +24,11 @@ mod peerfinding;
 mod reputation;
 mod stats;
 mod stream;
+mod stream_tcp;
 pub use peerfinding::*;
 pub use reputation::*;
 pub use stream::*;
+pub use stream_tcp::*;
 
 pub const FIPS_NOSTR_PUBSUB_SERVICE_PORT: u16 = 7368;
 pub const FIPS_NOSTR_PUBSUB_CAPABILITY: &str = "nostr.pubsub/1";

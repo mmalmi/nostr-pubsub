@@ -8,6 +8,12 @@
   before queueing traffic.
 - Restore verified durable snapshots into the existing bounded mesh cache and
   replay inventories on every peer connection or reconnection.
+- Add the manually driven `fips-tcp-endpoint` production carrier with generic
+  service namespace/version, bounded partial-write queues, deterministic
+  duplicate-stream selection, and explicit reconnect ownership.
+- Exercise two real FIPS endpoints through large split records, coalesced
+  records, simultaneous and late connection, forced reconnect, replay, and
+  queue pressure.
 
 ## 0.3.0 - 2026-07-15
 
