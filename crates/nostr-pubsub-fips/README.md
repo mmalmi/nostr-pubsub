@@ -33,6 +33,10 @@ pruning, publication cadence, and completed-event ingestion through
 This crate never opens a Nostr relay socket and never falls back to one. Select
 `nostr-pubsub-relay` explicitly when direct relay access is desired.
 
+Version `0.3.x` uses the FIPS `0.4.x` endpoint API. The adapter keeps the same
+bounded FSP datagram contract; the major-minor bump reflects the breaking FIPS
+dependency rather than a second pubsub protocol or compatibility fallback.
+
 For peerfinding, configure FIPS with
 `node.discovery.nostr.peerfinding_source: external` and construct a
 `FipsPeerfinder`. Its `publish_local` and `refresh` methods operate only on the
