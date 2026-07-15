@@ -17,27 +17,35 @@ impl Simulation {
             });
         }
         let rejected = self.mode == PeerSelectionMode::SharedReputation
-            && self.nodes[destination]
-                .machine_policies
-                .as_ref()
-                .is_some_and(|policies| {
-                    policies
-                        .select_mesh_peer(&self.peer_ids[source])
-                        .is_ok_and(|selected| selected.is_none())
-                });
+            && (self.nodes[destination]
+                .mesh
+                .peer_behavior_observation(&self.peer_ids[source])
+                .is_some_and(confident_local_rejection)
+                || self.nodes[destination]
+                    .machine_policies
+                    .as_ref()
+                    .is_some_and(|policies| {
+                        policies
+                            .select_mesh_peer(&self.peer_ids[source])
+                            .is_ok_and(|selected| selected.is_none())
+                    }));
         if !rejected {
             return false;
         }
         self.report.machine_ingress_drops = self.report.machine_ingress_drops.saturating_add(1);
-        match (provenance, self.topology.roles[source]) {
-            (TrafficProvenance::Legitimate, NodeRole::Attacker) => {
+        let adversarial_source = self.topology.roles[source] == NodeRole::Attacker
+            || self
+                .admitted_rater_poison_source
+                .is_some_and(|(publisher, _)| publisher == source);
+        match (provenance, adversarial_source) {
+            (TrafficProvenance::Legitimate, true) => {
                 self.report
-                    .attacker_source_legitimate_reference_machine_ingress_drops = self
+                    .adversarial_source_legitimate_reference_machine_ingress_drops = self
                     .report
-                    .attacker_source_legitimate_reference_machine_ingress_drops
+                    .adversarial_source_legitimate_reference_machine_ingress_drops
                     .saturating_add(1);
             }
-            (TrafficProvenance::Legitimate, _) => {
+            (TrafficProvenance::Legitimate, false) => {
                 self.report.honest_source_legitimate_machine_ingress_drops = self
                     .report
                     .honest_source_legitimate_machine_ingress_drops
@@ -54,7 +62,13 @@ impl Simulation {
         true
     }
 
-    pub(super) fn record_policy_drop(&mut self, event_id: &str, drop: AdmissionDrop) {
+    pub(super) fn record_policy_drop(
+        &mut self,
+        destination: usize,
+        author: usize,
+        event_id: &str,
+        drop: AdmissionDrop,
+    ) {
         let legitimate = self
             .reputation_events
             .get(event_id)
@@ -66,6 +80,15 @@ impl Simulation {
         if legitimate {
             self.report.legitimate_policy_drops =
                 self.report.legitimate_policy_drops.saturating_add(1);
+            if self.topology.roles[author] == NodeRole::Attacker
+                || self.is_admitted_rater_publisher(author)
+            {
+                self.report
+                    .adversarial_author_legitimate_reference_policy_drops = self
+                    .report
+                    .adversarial_author_legitimate_reference_policy_drops
+                    .saturating_add(1);
+            }
             if drop == AdmissionDrop::Application {
                 self.report.legitimate_application_policy_drops = self
                     .report
@@ -78,6 +101,18 @@ impl Simulation {
             AdmissionDrop::MachineReputation => {
                 self.report.spam_dropped_by_machine_policy =
                     self.report.spam_dropped_by_machine_policy.saturating_add(1);
+                if self
+                    .reputation_events
+                    .get(event_id)
+                    .is_some_and(|metadata| {
+                        metadata.origin == super::ReputationEventOrigin::RevokedRaterRating
+                            && self.is_post_revocation_target(destination, metadata.subject)
+                    })
+                {
+                    // This probe KPI is a unique target/event policy outcome;
+                    // general machine-drop counters still retain route attempts.
+                    self.report.post_revocation_rating_target_policy_drops = 1;
+                }
             }
             AdmissionDrop::Application => {
                 self.report.spam_dropped_by_application_policy = self
@@ -127,4 +162,9 @@ impl Simulation {
         Ok(matches!(decision, PolicyDecision::Drop { .. })
             .then_some(AdmissionDrop::MachineReputation))
     }
+}
+
+fn confident_local_rejection(observation: nostr_pubsub::PeerBehaviorObservation) -> bool {
+    observation.invalid_messages >= 3
+        || (observation.unserved_inventories >= 6 && observation.valid_frames == 0)
 }

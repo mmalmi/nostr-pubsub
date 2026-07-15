@@ -839,6 +839,94 @@ fn provider_scoring_penalizes_irrelevant_and_unserved_inventories_but_not_silenc
     assert_eq!(locally_rejected.peer_behavior_score("provider"), None);
 }
 
+#[test]
+fn transport_disruption_marks_only_the_matching_outstanding_provider() {
+    let options = InvWantMeshOptions {
+        route_ttl_ms: 10,
+        event_ttl_ms: 20,
+        allowed_kinds: Some(BTreeSet::from([37_195])),
+        ..InvWantMeshOptions::default()
+    };
+    let mut expired = InvWantMesh::new(options.clone());
+    let disrupted_id = "dd".repeat(32);
+    expired
+        .receive(
+            "transport-failed",
+            InvWantWireMessage::Inventory {
+                event_id: disrupted_id.clone(),
+                event_kind: 37_195,
+                payload_bytes: 512,
+                hop_limit: 4,
+            },
+            &[],
+            1,
+        )
+        .unwrap();
+    assert!(expired.record_transport_disruption("transport-failed", &disrupted_id));
+    assert!(!expired.record_transport_disruption("transport-failed", &disrupted_id));
+    for now in 2..=4 {
+        let event_id = format!("{now:064x}");
+        let inventory = InvWantWireMessage::Inventory {
+            event_id: event_id.clone(),
+            event_kind: 37_195,
+            payload_bytes: 512,
+            hop_limit: 4,
+        };
+        expired
+            .receive("blackhole", inventory.clone(), &[], now)
+            .unwrap();
+        assert!(expired.record_transport_disruption("blackhole", &event_id));
+        assert_eq!(
+            expired
+                .receive("blackhole", inventory, &[], now)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    assert_eq!(expired.retained_state().transport_disrupted_route_peers, 1);
+    expired.maintain(20);
+    assert_eq!(expired.peer_behavior_observation("transport-failed"), None);
+    assert_eq!(
+        expired
+            .peer_behavior_observation("blackhole")
+            .map(|observation| observation.unserved_inventories),
+        Some(3)
+    );
+    assert_eq!(expired.retained_state().transport_disrupted_route_peers, 0);
+
+    let mut recovered = InvWantMesh::new(options);
+    for now in 1..=3 {
+        let event = signed_event();
+        let event_id = event.id.to_hex();
+        recovered
+            .receive("provider", inventory_for(&event, 4), &[], now * 2)
+            .unwrap();
+        assert!(recovered.record_transport_disruption("provider", &event_id));
+        recovered
+            .receive(
+                "provider",
+                InvWantWireMessage::Frame {
+                    event_id,
+                    event: Box::new(event),
+                },
+                &[],
+                now * 2 + 1,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        recovered.retained_state().transport_disrupted_route_peers,
+        0
+    );
+    assert_eq!(
+        recovered
+            .peer_behavior_observation("provider")
+            .map(|observation| observation.valid_frames),
+        Some(3)
+    );
+}
+
 fn mesh() -> InvWantMesh {
     let options = InvWantMeshOptions {
         fanout: 8,

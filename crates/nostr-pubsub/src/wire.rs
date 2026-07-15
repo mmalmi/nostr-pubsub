@@ -2,8 +2,8 @@ use nostr::JsonUtil;
 use serde_json::Value;
 
 use crate::{
-    ClientMessage, Filter, PubsubError, PubsubPeerSubscriptionStore, PubsubSubscriptionUpdate,
-    RelayMessage, Result, SourceId, SubscriptionId, VerifiedEvent,
+    ClientMessage, Filter, PubsubError, PubsubPeerSubscription, PubsubPeerSubscriptionStore,
+    PubsubSubscriptionUpdate, RelayMessage, Result, SourceId, SubscriptionId, VerifiedEvent,
 };
 
 pub const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -192,6 +192,14 @@ impl FipsPubsubWireAdapter {
     #[must_use]
     pub fn subscriptions(&self) -> &PubsubPeerSubscriptionStore {
         &self.subscriptions
+    }
+
+    /// Drop every subscription retained for a transport peer that disconnected.
+    ///
+    /// Transport integrations should call this after a connection is
+    /// permanently removed so stale filters cannot consume routing state.
+    pub fn disconnect_peer(&mut self, peer_id: &SourceId) -> Vec<PubsubPeerSubscription> {
+        self.subscriptions.remove_peer(peer_id)
     }
 
     pub fn decode_inbound(&mut self, peer_id: SourceId, frame: &[u8]) -> Result<FipsPubsubInbound> {

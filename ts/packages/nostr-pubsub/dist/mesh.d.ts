@@ -27,6 +27,8 @@ export declare class InvWantMesh {
     /** Prune expired state and score requested inventories that were never served. */
     maintain(nowMs: number): void;
     dismissFrame(peerId: string, eventId: string): void;
+    /** Mark a locally confirmed request failure; another want clears it. */
+    recordTransportDisruption(peerId: string, eventId: string): boolean;
     publish(event: NostrEvent, peers: readonly MeshPeer[], nowMs: number): InvWantAction[];
     /** Publish an event whose signature was already checked at the trust boundary. */
     publishVerified(event: NostrVerifiedEvent, peers: readonly MeshPeer[], nowMs: number): InvWantAction[];

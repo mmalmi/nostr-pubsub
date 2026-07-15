@@ -42,6 +42,10 @@ export class FipsPubsubWireAdapter {
         this.codec = codec;
         this.subscriptions = subscriptions;
     }
+    /** Drop subscriptions retained for a transport peer that disconnected. */
+    disconnectPeer(peerId) {
+        return this.subscriptions.removePeer(peerId);
+    }
     decodeInbound(peerId, frame) {
         return this.applyInbound(peerId, this.codec.decodeFrame(frame));
     }

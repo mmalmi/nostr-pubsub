@@ -16,6 +16,10 @@ use crate::topology::NodeRole;
 
 mod accepted_batch;
 use accepted_batch::plan_accepted_mint_batch;
+mod exposure;
+pub use exposure::{IncentiveUseCase, recommend_incentive_strategy};
+mod streaming;
+use streaming::{plan_fixed_prepay, plan_spilman};
 
 const ATTEMPT_MESSAGES: u64 = 2;
 
@@ -23,7 +27,8 @@ const ATTEMPT_MESSAGES: u64 = 2;
 pub enum IncentiveStrategy {
     DirectVerifiedCashu,
     OfflinePeerCredit,
-    PrefundedSpilman,
+    FixedPrepaidCashu,
+    IncrementalSpilman,
     AcceptedMintBatch,
 }
 
@@ -36,10 +41,11 @@ pub enum MintDiscoveryScope {
 }
 
 impl IncentiveStrategy {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::DirectVerifiedCashu,
         Self::OfflinePeerCredit,
-        Self::PrefundedSpilman,
+        Self::FixedPrepaidCashu,
+        Self::IncrementalSpilman,
         Self::AcceptedMintBatch,
     ];
 
@@ -48,7 +54,8 @@ impl IncentiveStrategy {
         match self {
             Self::DirectVerifiedCashu => "modeled-direct-verified-cashu",
             Self::OfflinePeerCredit => "modeled-offline-peer-credit",
-            Self::PrefundedSpilman => "modeled-prefunded-spilman",
+            Self::FixedPrepaidCashu => "modeled-fixed-prepaid-cashu",
+            Self::IncrementalSpilman => "modeled-incremental-spilman",
             Self::AcceptedMintBatch => "modeled-accepted-mint-cashu-batch",
         }
     }
@@ -57,14 +64,16 @@ impl IncentiveStrategy {
         match self {
             Self::DirectVerifiedCashu => 1,
             Self::OfflinePeerCredit => 2,
-            Self::PrefundedSpilman => 3,
-            Self::AcceptedMintBatch => 4,
+            Self::FixedPrepaidCashu => 3,
+            Self::IncrementalSpilman => 4,
+            Self::AcceptedMintBatch => 5,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncentiveConfig {
+    pub use_case: IncentiveUseCase,
     pub bytes_per_sat: u64,
     pub mint_count: usize,
     pub gateway_mint: Option<usize>,
@@ -72,8 +81,16 @@ pub struct IncentiveConfig {
     pub batch_interval_ms: u64,
     /// Carry smaller pair balances forward instead of exchanging Cashu dust.
     pub cashu_min_settlement_sat: u64,
+    pub fixed_prepay_sat: u64,
+    /// Cashu value locked in each incremental channel, not paid to its seller.
     pub spilman_prefund_sat: u64,
     pub spilman_update_sat: u64,
+    /// Maximum time capacity remains unavailable when expiry recovery is needed.
+    pub spilman_channel_lifetime_ms: u64,
+    pub spilman_open_fee_sat: u64,
+    pub spilman_close_fee_sat: u64,
+    /// Mint, storage, or implementation failure after the refund timelock.
+    pub spilman_refund_failure_basis_points: u32,
     pub same_mint_fee_sat: u64,
     pub cross_mint_fee_sat: u64,
     pub payment_message_bytes: u64,
@@ -84,6 +101,8 @@ pub struct IncentiveConfig {
     /// This is independent of spammer roles so real delivery trails exercise
     /// economic defaults even when spam identities have no subscriptions.
     pub payment_defaulter_basis_points: u32,
+    /// Unknown streaming sellers that stop serving after fixed prepayment.
+    pub provider_failure_basis_points: u32,
     pub max_payment_retries: u8,
     pub payment_retry_ms: u64,
     pub settlement_deadline_ms: u64,
@@ -95,14 +114,20 @@ pub struct IncentiveConfig {
 impl Default for IncentiveConfig {
     fn default() -> Self {
         Self {
+            use_case: IncentiveUseCase::VerifiedOneShot,
             bytes_per_sat: 512,
             mint_count: 4,
             gateway_mint: Some(0),
             offline_credit_cap_sat: 32,
             batch_interval_ms: 1_000,
             cashu_min_settlement_sat: 1,
+            fixed_prepay_sat: 4_096,
             spilman_prefund_sat: 4_096,
             spilman_update_sat: 16,
+            spilman_channel_lifetime_ms: 60_000,
+            spilman_open_fee_sat: 1,
+            spilman_close_fee_sat: 1,
+            spilman_refund_failure_basis_points: 0,
             same_mint_fee_sat: 0,
             cross_mint_fee_sat: 2,
             payment_message_bytes: 96,
@@ -110,6 +135,7 @@ impl Default for IncentiveConfig {
             mint_discovery_scope: MintDiscoveryScope::ConnectedPeers,
             outage_basis_points: 800,
             payment_defaulter_basis_points: 500,
+            provider_failure_basis_points: 500,
             max_payment_retries: 3,
             payment_retry_ms: 50,
             settlement_deadline_ms: 20_000,
@@ -124,6 +150,7 @@ impl Default for IncentiveConfig {
 pub struct IncentiveReport {
     pub strategy: IncentiveStrategy,
     pub strategy_name: &'static str,
+    pub use_case: IncentiveUseCase,
     pub figures_are_modeled: bool,
     pub useful_bytes: u64,
     pub useful_value_sat: u64,
@@ -132,19 +159,54 @@ pub struct IncentiveReport {
     pub adversarial_payer_count: u64,
     pub adversarial_payer_value_sat: u64,
     pub honest_earned_sat: u64,
+    /// Service-level settlement, including accepted bounded peer credit;
+    /// external Cashu settlements remain separately counted by mint route.
     pub honest_settled_by_deadline_sat: u64,
     pub honest_earned_settled_by_deadline_basis_points: u32,
     pub authorization_denied_sat: u64,
     /// Authorized/prefunded value not finalized by the modeled deadline.
     pub pending_settlement_sat: u64,
+    /// Maximum fixed prepayment exposed to one unverified streaming seller.
+    pub buyer_prepaid_exposure_sat: u64,
+    /// Aggregate fixed-lease Cashu transferred before useful service.
+    pub fixed_prepay_paid_sat: u64,
+    /// Fixed-lease value matched by verified useful service.
+    pub fixed_prepay_used_sat: u64,
+    /// Unused prepaid service credit retained after an honest window.
+    pub fixed_prepay_unused_credit_sat: u64,
+    /// Fixed prepayment lost when its seller fails before useful service.
+    pub buyer_counterparty_loss_sat: u64,
+    /// Maximum useful service one provider supplied before secured payment.
+    pub provider_unpaid_exposure_sat: u64,
+    /// Useful service lost when a payer exhausted or abandoned that exposure.
+    pub provider_default_loss_sat: u64,
     pub unpaid_exposure_sat: u64,
     pub default_exposure_sat: u64,
     pub max_pair_unpaid_exposure_sat: u64,
+    /// Verified service accepted as bounded, unbacked relationship credit.
+    pub peer_credit_accepted_sat: u64,
+    /// Relationship credit still outstanding at the modeled deadline.
+    pub peer_credit_outstanding_sat: u64,
+    /// Peak relationship-credit balance for one directed pair.
+    pub max_pair_peer_credit_sat: u64,
     pub same_mint_settlements: u64,
     pub cross_mint_settlements: u64,
     /// Value extinguished by reciprocal useful service before external payment.
     pub reciprocal_service_settled_sat: u64,
     pub modeled_fees_sat: u64,
+    /// Capacity multiplied by modeled lock duration, in sat-milliseconds.
+    pub locked_capital_sat_ms: u64,
+    /// Largest individual channel capacity unavailable at one time.
+    pub peak_locked_capital_sat: u64,
+    pub channel_capacity_sat: u64,
+    pub channel_signed_balance_sat: u64,
+    pub channel_unused_capacity_sat: u64,
+    /// Unused channel capacity returned by cooperative close or refund.
+    pub channel_refunded_sat: u64,
+    pub channel_open_fees_sat: u64,
+    pub channel_close_fees_sat: u64,
+    pub refund_failures: u64,
+    pub refund_loss_sat: u64,
     /// Standalone advertisement messages; private handshake piggybacks add none.
     pub mint_advertisement_messages: u64,
     pub mint_advertisement_bytes: u64,
@@ -157,7 +219,6 @@ pub struct IncentiveReport {
     pub payment_byte_overhead_basis_points: u32,
     pub fake_claims_attempted: u64,
     pub fake_claimed_value_sat: u64,
-    pub fake_claim_cashout_sat: u64,
     /// Modeled plan entries at honest nodes, not measured heap allocations.
     pub honest_node_payment_state_entries: DistributionSummary,
     /// Modeled payment messages processed by honest endpoints: a CPU proxy to
@@ -200,7 +261,12 @@ pub fn plan_incentive_strategy(
         IncentiveStrategy::OfflinePeerCredit => {
             plan_peer_credit(&workload, &report.node_roles, config)
         }
-        IncentiveStrategy::PrefundedSpilman => plan_spilman(&workload, &report.node_roles, config),
+        IncentiveStrategy::FixedPrepaidCashu => {
+            plan_fixed_prepay(&workload, &report.node_roles, config)
+        }
+        IncentiveStrategy::IncrementalSpilman => {
+            plan_spilman(&workload, &report.node_roles, config)
+        }
         IncentiveStrategy::AcceptedMintBatch => {
             plan_accepted_mint_batch(&workload, &report.node_roles, config)
         }
@@ -228,8 +294,10 @@ fn validate_inputs(
         ));
     }
     if config.batch_interval_ms == 0
+        || config.fixed_prepay_sat == 0
         || config.spilman_prefund_sat == 0
         || config.spilman_update_sat == 0
+        || config.spilman_channel_lifetime_ms == 0
         || config.cashu_min_settlement_sat == 0
         || config.payment_message_bytes == 0
         || config.mint_advertisement_bytes == 0
@@ -238,9 +306,13 @@ fn validate_inputs(
             "batch, Spilman, and payment message sizes must be nonzero",
         ));
     }
-    if config.outage_basis_points > 10_000 || config.payment_defaulter_basis_points > 10_000 {
+    if config.outage_basis_points > 10_000
+        || config.payment_defaulter_basis_points > 10_000
+        || config.provider_failure_basis_points > 10_000
+        || config.spilman_refund_failure_basis_points > 10_000
+    {
         return Err(IncentiveError::InvalidConfig(
-            "outage or payment-defaulter basis points exceed 100%",
+            "outage, default, provider-failure, or refund-failure basis points exceed 100%",
         ));
     }
     if report.node_roles.len() != report.node_count {
@@ -353,13 +425,19 @@ fn plan_direct(
     );
     for obligation in &workload.obligations {
         plan.record_state(obligation.pair);
+        plan.earn(obligation.pair, obligation.amount_sat);
+        plan.record_provider_exposure(obligation.amount_sat, false);
         if plan.payer_will_default(obligation.pair) {
-            plan.reject_unfunded(obligation.pair, obligation.amount_sat);
+            plan.record_defaulted_settlement(obligation.pair, obligation.amount_sat);
         } else if plan.try_settlement(obligation.pair, obligation.accepted_at_ms, 1) {
-            plan.earn(obligation.pair, obligation.amount_sat);
             plan.settle_with_route(obligation.pair, obligation.amount_sat);
         } else {
-            plan.deny(obligation.amount_sat);
+            plan.report.pending_settlement_sat = plan
+                .report
+                .pending_settlement_sat
+                .saturating_add(obligation.amount_sat);
+            let outstanding_sat = plan.record_unpaid(obligation.pair, obligation.amount_sat);
+            plan.record_provider_exposure(outstanding_sat, false);
         }
     }
     plan.finish()
@@ -376,58 +454,78 @@ fn plan_peer_credit(
         roles,
         config,
     );
-    let mut outstanding = BTreeMap::<Pair, u64>::new();
+    // Verified reciprocal service is bilateral setoff. Only the remaining
+    // direction consumes unsecured credit or needs a Cashu settlement.
+    let mut reciprocal = BTreeMap::<(u64, usize, usize), [u64; 2]>::new();
     for batch in batches(&workload.obligations, config.batch_interval_ms) {
         plan.record_state(batch.pair);
-        let debt = outstanding.entry(batch.pair).or_default();
-        let admitted = batch
-            .amount_sat
-            .min(config.offline_credit_cap_sat.saturating_sub(*debt));
-        *debt = debt.saturating_add(admitted);
-        plan.earn(batch.pair, admitted);
-        plan.deny(batch.amount_sat.saturating_sub(admitted));
-        if plan.payer_will_default(batch.pair) {
-            plan.record_messages(batch.pair, 1);
-        } else if *debt > 0 && plan.try_settlement(batch.pair, batch.due_ms, 2) {
-            let settled = *debt;
-            *debt = 0;
-            plan.settle_with_route(batch.pair, settled);
+        let low = batch.pair.payer.min(batch.pair.provider);
+        let high = batch.pair.payer.max(batch.pair.provider);
+        let direction = usize::from(batch.pair.payer != low);
+        let totals = reciprocal.entry((batch.due_ms, low, high)).or_default();
+        totals[direction] = totals[direction].saturating_add(batch.amount_sat);
+    }
+    let mut outstanding = BTreeMap::<Pair, u64>::new();
+    for ((due_ms, low, high), [low_to_high, high_to_low]) in reciprocal {
+        let offset = low_to_high.min(high_to_low);
+        if offset > 0 {
+            let low_pair = Pair {
+                payer: low,
+                provider: high,
+            };
+            let high_pair = Pair {
+                payer: high,
+                provider: low,
+            };
+            plan.earn(low_pair, offset);
+            plan.earn(high_pair, offset);
+            plan.mark_settled(low_pair, offset);
+            plan.mark_settled(high_pair, offset);
+            plan.report.reciprocal_service_settled_sat = plan
+                .report
+                .reciprocal_service_settled_sat
+                .saturating_add(offset.saturating_mul(2));
+        }
+        let (pair, amount_sat) = if low_to_high >= high_to_low {
+            (
+                Pair {
+                    payer: low,
+                    provider: high,
+                },
+                low_to_high - high_to_low,
+            )
+        } else {
+            (
+                Pair {
+                    payer: high,
+                    provider: low,
+                },
+                high_to_low - low_to_high,
+            )
+        };
+        if amount_sat == 0 {
+            continue;
+        }
+        let (admitted, debt_now) = {
+            let debt = outstanding.entry(pair).or_default();
+            let admitted = amount_sat.min(config.offline_credit_cap_sat.saturating_sub(*debt));
+            *debt = debt.saturating_add(admitted);
+            (admitted, *debt)
+        };
+        plan.record_provider_exposure(debt_now, false);
+        plan.earn(pair, admitted);
+        plan.deny(amount_sat.saturating_sub(admitted));
+        if plan.payer_will_default(pair) {
+            plan.record_messages(pair, 1);
+        } else if debt_now > 0 && plan.try_settlement(pair, due_ms, 2) {
+            let settled = outstanding.remove(&pair).unwrap_or_default();
+            plan.settle_with_route(pair, settled);
         }
     }
     for (pair, debt) in outstanding {
+        let defaults = plan.payer_will_default(pair);
+        plan.record_provider_exposure(debt, defaults);
         plan.record_unpaid(pair, debt);
-    }
-    plan.finish()
-}
-
-fn plan_spilman(
-    workload: &PricedWorkload,
-    roles: &[NodeRole],
-    config: &IncentiveConfig,
-) -> IncentiveReport {
-    let mut plan = Plan::new(IncentiveStrategy::PrefundedSpilman, workload, roles, config);
-    for stream in pair_streams(&workload.obligations) {
-        plan.record_state(stream.pair);
-        if plan.payer_will_default(stream.pair) {
-            plan.reject_unfunded(stream.pair, stream.amount_sat);
-            continue;
-        }
-        if !plan.try_settlement(stream.pair, stream.first_at_ms, 3) {
-            plan.deny(stream.amount_sat);
-            continue;
-        }
-        let admitted = stream.amount_sat.min(config.spilman_prefund_sat);
-        plan.deny(stream.amount_sat.saturating_sub(admitted));
-        plan.earn(stream.pair, admitted);
-        plan.record_route_settlement(stream.pair);
-        let updates = admitted.div_ceil(config.spilman_update_sat);
-        plan.record_messages(stream.pair, updates);
-        if plan.try_settlement(stream.pair, stream.last_at_ms, 4) {
-            plan.mark_settled(stream.pair, admitted);
-        } else {
-            plan.report.pending_settlement_sat =
-                plan.report.pending_settlement_sat.saturating_add(admitted);
-        }
     }
     plan.finish()
 }
@@ -495,6 +593,7 @@ struct Plan<'a> {
     state_entries: Vec<u64>,
     endpoint_messages: Vec<u64>,
     endpoint_bytes: Vec<u64>,
+    unpaid_by_pair: BTreeMap<Pair, u64>,
     mint_discovery_pairs: BTreeSet<Pair>,
     sequence: u64,
 }
@@ -525,6 +624,7 @@ impl<'a> Plan<'a> {
             report: IncentiveReport {
                 strategy,
                 strategy_name: strategy.as_str(),
+                use_case: config.use_case,
                 figures_are_modeled: true,
                 useful_bytes: workload.useful_bytes,
                 useful_value_sat: workload.useful_value_sat,
@@ -537,13 +637,33 @@ impl<'a> Plan<'a> {
                 honest_earned_settled_by_deadline_basis_points: 0,
                 authorization_denied_sat: 0,
                 pending_settlement_sat: 0,
+                buyer_prepaid_exposure_sat: 0,
+                fixed_prepay_paid_sat: 0,
+                fixed_prepay_used_sat: 0,
+                fixed_prepay_unused_credit_sat: 0,
+                buyer_counterparty_loss_sat: 0,
+                provider_unpaid_exposure_sat: 0,
+                provider_default_loss_sat: 0,
                 unpaid_exposure_sat: 0,
                 default_exposure_sat: 0,
                 max_pair_unpaid_exposure_sat: 0,
+                peer_credit_accepted_sat: 0,
+                peer_credit_outstanding_sat: 0,
+                max_pair_peer_credit_sat: 0,
                 same_mint_settlements: 0,
                 cross_mint_settlements: 0,
                 reciprocal_service_settled_sat: 0,
                 modeled_fees_sat: 0,
+                locked_capital_sat_ms: 0,
+                peak_locked_capital_sat: 0,
+                channel_capacity_sat: 0,
+                channel_signed_balance_sat: 0,
+                channel_unused_capacity_sat: 0,
+                channel_refunded_sat: 0,
+                channel_open_fees_sat: 0,
+                channel_close_fees_sat: 0,
+                refund_failures: 0,
+                refund_loss_sat: 0,
                 mint_advertisement_messages: 0,
                 mint_advertisement_bytes: 0,
                 mint_accepting_nodes: mint_accepting_nodes(roles.len(), config),
@@ -554,7 +674,6 @@ impl<'a> Plan<'a> {
                 payment_byte_overhead_basis_points: 0,
                 fake_claims_attempted: 0,
                 fake_claimed_value_sat: 0,
-                fake_claim_cashout_sat: 0,
                 honest_node_payment_state_entries: DistributionSummary::default(),
                 honest_node_payment_messages: DistributionSummary::default(),
                 honest_node_payment_endpoint_bytes: DistributionSummary::default(),
@@ -562,6 +681,7 @@ impl<'a> Plan<'a> {
             state_entries: vec![0; roles.len()],
             endpoint_messages: vec![0; roles.len()],
             endpoint_bytes: vec![0; roles.len()],
+            unpaid_by_pair: BTreeMap::new(),
             mint_discovery_pairs: BTreeSet::new(),
             sequence: 0,
         };
@@ -594,6 +714,17 @@ impl<'a> Plan<'a> {
     fn reject_unfunded(&mut self, pair: Pair, amount_sat: u64) {
         self.record_messages(pair, 1);
         self.deny(amount_sat);
+    }
+
+    fn record_defaulted_settlement(&mut self, pair: Pair, amount_sat: u64) {
+        self.record_mint_discovery_pair(pair);
+        self.record_messages(pair, 1);
+        let outstanding_sat = self.record_unpaid(pair, amount_sat);
+        self.record_provider_exposure(outstanding_sat, false);
+        self.report.provider_default_loss_sat = self
+            .report
+            .provider_default_loss_sat
+            .saturating_add(amount_sat);
     }
 
     fn try_settlement(&mut self, pair: Pair, due_ms: u64, phase: u64) -> bool {
@@ -667,15 +798,24 @@ impl<'a> Plan<'a> {
         }
     }
 
-    fn record_unpaid(&mut self, pair: Pair, amount_sat: u64) {
+    fn record_unpaid(&mut self, pair: Pair, amount_sat: u64) -> u64 {
+        let defaults = self.payer_will_default(pair);
+        let outstanding_sat = {
+            let outstanding = self.unpaid_by_pair.entry(pair).or_default();
+            *outstanding = outstanding.saturating_add(amount_sat);
+            *outstanding
+        };
         self.report.unpaid_exposure_sat =
             self.report.unpaid_exposure_sat.saturating_add(amount_sat);
-        self.report.max_pair_unpaid_exposure_sat =
-            self.report.max_pair_unpaid_exposure_sat.max(amount_sat);
-        if self.payer_will_default(pair) {
+        self.report.max_pair_unpaid_exposure_sat = self
+            .report
+            .max_pair_unpaid_exposure_sat
+            .max(outstanding_sat);
+        if defaults {
             self.report.default_exposure_sat =
                 self.report.default_exposure_sat.saturating_add(amount_sat);
         }
+        outstanding_sat
     }
 
     fn record_state(&mut self, pair: Pair) {
@@ -836,125 +976,4 @@ const fn mix64(mut value: u64) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn record(
-        event_id: &str,
-        provider: usize,
-        receiver: usize,
-        payload_bytes: u64,
-        accepted_at_ms: u64,
-    ) -> VerifiedDeliveryRecord {
-        VerifiedDeliveryRecord {
-            event_id: event_id.to_string(),
-            provider,
-            receiver,
-            payload_bytes,
-            accepted_at_ms,
-            final_interested_delivery: true,
-        }
-    }
-
-    #[test]
-    fn pricing_retains_pair_dust_exactly() {
-        let records = vec![
-            record("a", 0, 1, 600, 1),
-            record("b", 0, 1, 600, 2),
-            record("c", 1, 2, 300, 3),
-        ];
-        let priced = price_records(&records, 1_000);
-        assert_eq!(priced.useful_bytes, 1_500);
-        assert_eq!(priced.useful_value_sat, 1);
-        assert_eq!(priced.pricing_dust_bytes, 500);
-        assert_eq!(priced.obligations.len(), 1);
-    }
-
-    #[test]
-    fn adversarial_peer_credit_loss_is_pair_capped_and_fake_claims_pay_zero() {
-        let records = vec![record("a", 0, 1, 100, 1), record("b", 0, 1, 100, 2)];
-        let roles = vec![NodeRole::Peer, NodeRole::Attacker];
-        let config = IncentiveConfig {
-            bytes_per_sat: 1,
-            offline_credit_cap_sat: 7,
-            outage_basis_points: 0,
-            ..IncentiveConfig::default()
-        };
-        let workload = price_records(&records, config.bytes_per_sat);
-        let peer = plan_peer_credit(&workload, &roles, &config);
-        assert_eq!(peer.adversarial_payer_count, 1);
-        assert_eq!(peer.adversarial_payer_value_sat, 200);
-        assert_eq!(peer.unpaid_exposure_sat, 7);
-        assert_eq!(peer.default_exposure_sat, 7);
-        assert_eq!(peer.max_pair_unpaid_exposure_sat, 7);
-        assert_eq!(peer.authorization_denied_sat, 193);
-        assert_eq!(peer.fake_claim_cashout_sat, 0);
-
-        let direct = plan_direct(&workload, &roles, &config);
-        assert_eq!(direct.unpaid_exposure_sat, 0);
-        assert_eq!(direct.authorization_denied_sat, 200);
-    }
-
-    #[test]
-    fn outages_never_turn_direct_or_prefunded_service_into_unpaid_debt() {
-        let records = vec![record("a", 0, 1, 100, 1)];
-        let roles = vec![NodeRole::Peer; 2];
-        let config = IncentiveConfig {
-            bytes_per_sat: 1,
-            outage_basis_points: 10_000,
-            max_payment_retries: 2,
-            ..IncentiveConfig::default()
-        };
-        let workload = price_records(&records, config.bytes_per_sat);
-        let direct = plan_direct(&workload, &roles, &config);
-        let spilman = plan_spilman(&workload, &roles, &config);
-        assert_eq!(direct.unpaid_exposure_sat, 0);
-        assert_eq!(spilman.unpaid_exposure_sat, 0);
-        assert_eq!(direct.honest_earned_sat, 0);
-        assert_eq!(spilman.honest_earned_sat, 0);
-        assert_eq!(direct.settlement_attempts, 3);
-        assert_eq!(spilman.settlement_attempts, 3);
-    }
-
-    #[test]
-    fn seeded_outages_and_private_mint_assignment_are_deterministic() {
-        let records = vec![
-            record("a", 0, 1, 100, 1),
-            record("b", 2, 1, 100, 2),
-            record("c", 1, 2, 100, 3),
-        ];
-        let roles = vec![NodeRole::Peer, NodeRole::Peer, NodeRole::Attacker];
-        let config = IncentiveConfig {
-            bytes_per_sat: 1,
-            outage_basis_points: 5_000,
-            ..IncentiveConfig::default()
-        };
-        let workload = price_records(&records, config.bytes_per_sat);
-        assert_eq!(
-            plan_accepted_mint_batch(&workload, &roles, &config),
-            plan_accepted_mint_batch(&workload, &roles, &config)
-        );
-    }
-
-    #[test]
-    fn connected_mint_discovery_is_smaller_than_public_broadcast() {
-        let records = vec![record("a", 0, 1, 100, 1)];
-        let roles = vec![NodeRole::Peer; 3];
-        let mut config = IncentiveConfig {
-            bytes_per_sat: 1,
-            outage_basis_points: 0,
-            payment_defaulter_basis_points: 0,
-            fake_claims_per_attacker: 0,
-            ..IncentiveConfig::default()
-        };
-        let workload = price_records(&records, config.bytes_per_sat);
-        let connected = plan_accepted_mint_batch(&workload, &roles, &config);
-        config.mint_discovery_scope = MintDiscoveryScope::Public;
-        let public = plan_accepted_mint_batch(&workload, &roles, &config);
-        assert_eq!(connected.mint_advertisement_messages, 0);
-        assert_eq!(public.mint_advertisement_messages, 6);
-        assert!(connected.payment_bytes < public.payment_bytes);
-        assert_eq!(connected.mint_accepting_nodes.len(), config.mint_count);
-        assert_eq!(connected.mint_accepting_nodes[0], roles.len() as u64);
-    }
-}
+mod tests;

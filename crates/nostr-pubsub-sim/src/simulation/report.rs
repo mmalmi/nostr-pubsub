@@ -20,8 +20,36 @@ impl Simulation {
         self.finalize_adversarial_metrics();
         self.finalize_service_metrics();
         self.finalize_efficiency_metrics(delivered);
+        self.finalize_machine_state_metrics();
         self.finalize_resource_metrics()?;
         Ok(())
+    }
+
+    fn finalize_machine_state_metrics(&mut self) {
+        self.report.machine_positive_endorsement_state_entries =
+            self.positive_endorsements.iter().map(Vec::len).sum();
+        self.report.machine_trust_edges = self.nodes[self.config.attacker_count..]
+            .iter()
+            .map(|node| node.service_admitted_raters.len())
+            .sum();
+        for reputation in self.nodes[self.config.attacker_count..]
+            .iter()
+            .filter_map(|node| node.machine_reputation.as_ref())
+        {
+            let snapshot = reputation.snapshot();
+            self.report.machine_reputation_retained_ratings = self
+                .report
+                .machine_reputation_retained_ratings
+                .saturating_add(snapshot.retained_ratings);
+            self.report.machine_reputation_retained_raters = self
+                .report
+                .machine_reputation_retained_raters
+                .saturating_add(snapshot.retained_raters);
+            self.report.machine_reputation_trusted_roots = self
+                .report
+                .machine_reputation_trusted_roots
+                .saturating_add(snapshot.trusted_roots);
+        }
     }
 
     fn delivery_observations(&self) -> DeliveryObservations {
@@ -285,6 +313,31 @@ impl Simulation {
                 .entry(self.topology.roles[link.source])
                 .or_default();
             *role_bytes = role_bytes.saturating_add(*bytes);
+        }
+        for record in self
+            .report
+            .verified_delivery_records
+            .iter()
+            .filter(|record| record.final_interested_delivery)
+        {
+            let publisher = self
+                .events
+                .get(&record.event_id)
+                .expect("verified delivery must retain event metadata")
+                .publisher;
+            if self.topology.roles[record.provider] == NodeRole::Supernode
+                && record.provider != publisher
+            {
+                self.report
+                    .supernode_third_party_interested_delivery_credits = self
+                    .report
+                    .supernode_third_party_interested_delivery_credits
+                    .saturating_add(1);
+                self.report.supernode_third_party_interested_delivery_bytes = self
+                    .report
+                    .supernode_third_party_interested_delivery_bytes
+                    .saturating_add(record.payload_bytes);
+            }
         }
         for (link, bytes) in &self.verified_delivery_bytes {
             let role_bytes = self

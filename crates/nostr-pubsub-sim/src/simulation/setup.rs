@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use nostr::Keys;
 use nostr_pubsub::{
@@ -11,9 +11,9 @@ use nostr_pubsub_social_graph::PeerRatingPublisher;
 use super::WorkloadPair;
 use super::{
     EventMetadata, NodeResourceLedger, POST_RECONNECT_REPUTATION_SWEEP_MS,
-    POST_ROUTE_REPUTATION_SWEEP_MS, PeerSelectionMode, REPUTATION_SWEEP_MS, Result, SIM_PROTOCOL,
-    SIM_VERSION, ScheduledAction, SimNode, Simulation, SimulationConfig, SimulationReport,
-    basis_points, mix64, pubsub_error, simulation_keys,
+    POST_ROUTE_REPUTATION_SWEEP_MS, POST_TRAINING_REDISCOVERY_MS, PeerSelectionMode,
+    REPUTATION_SWEEP_MS, Result, SIM_PROTOCOL, SIM_VERSION, ScheduledAction, SimNode, Simulation,
+    SimulationConfig, SimulationReport, basis_points, mix64, pubsub_error, simulation_keys,
 };
 use crate::clock::VirtualScheduler;
 use crate::metrics::NodeTrafficLedger;
@@ -36,7 +36,7 @@ mod workloads;
 
 use super::reputation_flow::build_reputation_publishers;
 use config::validate_config;
-use network::build_sim_topology;
+use network::{build_sim_topology, endpoint_connection_limits};
 use nodes::{build_node, observed_established_history};
 use workloads::{build_workloads, node_filters};
 
@@ -56,25 +56,32 @@ impl Simulation {
         self.drain_scheduler()?;
         self.exercise_subscription_lifecycle()?;
         self.drain_scheduler()?;
-        self.exercise_machine_lifecycle()?;
-        self.exercise_adversarial_reputation_probes()?;
+        self.publish_forged_probe()?;
         self.drain_scheduler()?;
+        self.run_bootstrap_rediscovery()?;
         self.schedule_attack_pressure()?;
         let workload_start_ms = self.scheduler.now_ms();
         self.scheduler.schedule_at(
             workload_start_ms.saturating_add(REPUTATION_SWEEP_MS),
             ScheduledAction::ReputationSweep,
         );
+        self.schedule_rediscovery_sweep(workload_start_ms, REPUTATION_SWEEP_MS);
+        self.schedule_rediscovery_sweep(workload_start_ms, POST_TRAINING_REDISCOVERY_MS);
         self.scheduler.schedule_at(
             workload_start_ms.saturating_add(POST_ROUTE_REPUTATION_SWEEP_MS),
             ScheduledAction::ReputationSweep,
         );
+        self.schedule_rediscovery_sweep(workload_start_ms, POST_ROUTE_REPUTATION_SWEEP_MS);
         self.scheduler.schedule_at(
             workload_start_ms.saturating_add(POST_RECONNECT_REPUTATION_SWEEP_MS),
             ScheduledAction::ReputationSweep,
         );
+        self.schedule_rediscovery_sweep(workload_start_ms, POST_RECONNECT_REPUTATION_SWEEP_MS);
         self.schedule_churn();
         self.schedule_publications();
+        self.drain_scheduler()?;
+        self.exercise_machine_lifecycle()?;
+        self.exercise_adversarial_reputation_probes()?;
         self.drain_scheduler()?;
         self.finalize_report()?;
         Ok(self.report)
@@ -88,6 +95,7 @@ struct PreparedSimulation {
     topology: TopologyResult,
     nodes: Vec<SimNode>,
     events: HashMap<String, EventMetadata>,
+    routing_probes: Vec<super::VerifiedEvent>,
     #[cfg(test)]
     workload_pairs: Vec<WorkloadPair>,
     reputation_publishers: Vec<Option<PeerRatingPublisher>>,
@@ -139,6 +147,7 @@ fn prepare_simulation(
         topology,
         nodes,
         events,
+        routing_probes: established_history,
         #[cfg(test)]
         workload_pairs,
         reputation_publishers,
@@ -157,6 +166,7 @@ fn assemble_simulation(
         topology,
         nodes,
         events,
+        routing_probes,
         #[cfg(test)]
         workload_pairs,
         reputation_publishers,
@@ -164,6 +174,12 @@ fn assemble_simulation(
     let report = initial_report(&config, mode, &topology, &nodes);
     let traffic = vec![NodeTrafficLedger::default(); config.node_count];
     let node_resources = vec![NodeResourceLedger::default(); config.node_count];
+    let endpoint_connection_limits = endpoint_connection_limits(&config, &topology);
+    let rediscovery = topology
+        .outbound_discovery_neighbors
+        .iter()
+        .map(|neighbors| super::RediscoveryState::new(neighbors.len()))
+        .collect();
     Ok(Simulation {
         codec: InvWantCodec::new(SIM_PROTOCOL, SIM_VERSION, DEFAULT_INV_WANT_MAX_WIRE_BYTES),
         fips_codec: FipsPubsubWireCodec::new(DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES)
@@ -190,6 +206,16 @@ fn assemble_simulation(
         delivery_bytes: BTreeMap::new(),
         verified_delivery_credits: BTreeMap::new(),
         verified_delivery_bytes: BTreeMap::new(),
+        endpoint_connection_limits,
+        rediscovery,
+        rediscovery_new_links: BTreeSet::new(),
+        rating_subscription_dirty: BTreeSet::new(),
+        positive_endorsements: vec![Vec::new(); config.node_count],
+        positive_service_admissions: HashMap::new(),
+        admitted_rater_poison_targets: BTreeSet::new(),
+        admitted_rater_poison_source: None,
+        admitted_rater_post_revocation_target: None,
+        unconnected_rating_pressure_target: None,
         report,
         config,
         mode,
@@ -199,6 +225,7 @@ fn assemble_simulation(
         topology,
         nodes,
         events,
+        routing_probes,
         #[cfg(test)]
         workload_pairs,
     })
@@ -211,13 +238,10 @@ fn initial_report(
     nodes: &[SimNode],
 ) -> SimulationReport {
     let discovery = &topology.discovery_selections;
-    let discovered_supernode_links = discovery
-        .honest_supernode_links
-        .saturating_add(discovery.false_supernode_links);
     let machine_trust_edges = nodes
         .iter()
         .skip(config.attacker_count)
-        .map(|node| node.machine_trusted_raters.len())
+        .map(|node| node.service_admitted_raters.len())
         .sum();
     SimulationReport {
         config: config.clone(),
@@ -232,16 +256,22 @@ fn initial_report(
         topology_edges: topology.edge_count(),
         max_node_degree: topology.neighbors.iter().map(Vec::len).max().unwrap_or(0),
         discovery_links: discovery.total_links(),
-        honest_supernode_links: discovery.honest_supernode_links,
-        false_supernode_links: discovery.false_supernode_links,
-        supernode_discovery_precision_basis_points: basis_points(
-            u64::try_from(discovery.honest_supernode_links).unwrap_or(u64::MAX),
-            u64::try_from(discovered_supernode_links).unwrap_or(u64::MAX),
+        selected_high_capacity_links: discovery.selected_high_capacity_links,
+        selected_adversarial_candidate_links: discovery.selected_adversarial_candidate_links,
+        high_capacity_selection_precision_basis_points: basis_points(
+            u64::try_from(discovery.selected_high_capacity_links).unwrap_or(u64::MAX),
+            u64::try_from(discovery.total_links()).unwrap_or(u64::MAX),
         ),
-        honest_supernode_coverage_basis_points: discovery.honest_coverage_basis_points(),
-        false_only_supernode_peers: discovery
+        high_capacity_selection_coverage_basis_points: discovery
+            .high_capacity_selection_coverage_basis_points(),
+        peers_without_high_capacity_selection: discovery
             .candidate_peer_count
-            .saturating_sub(discovery.peers_with_honest_supernode),
+            .saturating_sub(discovery.peers_selecting_high_capacity),
+        rediscovery_state_entries: topology
+            .outbound_discovery_neighbors
+            .iter()
+            .map(|neighbors| usize::from(!neighbors.is_empty()).saturating_mul(2) + neighbors.len())
+            .sum(),
         machine_trust_edges,
         ..EMPTY_REPORT_TEMPLATE.clone()
     }
@@ -261,7 +291,7 @@ const EMPTY_REPORT_CONFIG: SimulationConfig = SimulationConfig {
     topology: TopologyStrategy::PeerMesh,
     supernode_discovery: SupernodeDiscoveryStrategy::Mixed,
     supernode_count: 0,
-    false_supernode_count: 0,
+    adversarial_discovery_candidate_count: 0,
     supernode_links_per_peer: 0,
     supernode_fanout: 0,
     loss_basis_points: 0,
@@ -351,15 +381,55 @@ const EMPTY_REPORT_TEMPLATE: SimulationReport = SimulationReport {
     unauthorized_source_drops: 0,
     machine_ingress_drops: 0,
     honest_source_legitimate_machine_ingress_drops: 0,
-    attacker_source_legitimate_reference_machine_ingress_drops: 0,
+    adversarial_source_legitimate_reference_machine_ingress_drops: 0,
     adversarial_machine_ingress_drops: 0,
     machine_ratings_published: 0,
     machine_ratings_received: 0,
     machine_ratings_ingested: 0,
+    machine_positive_service_endorsements_published: 0,
+    machine_positive_service_admissions: 0,
+    machine_positive_endorsement_state_entries: 0,
+    machine_rating_protocol_messages: 0,
+    machine_rating_protocol_bytes: 0,
+    machine_reputation_retained_ratings: 0,
+    machine_reputation_retained_raters: 0,
+    machine_reputation_trusted_roots: 0,
     poisoned_machine_ratings_published: 0,
     poisoned_machine_ratings_received: 0,
     poisoned_machine_ratings_ingested: 0,
     poisoned_machine_ratings_rejected: 0,
+    adversarial_author_legitimate_reference_policy_drops: 0,
+    admitted_rater_poison_published: 0,
+    admitted_rater_poison_received: 0,
+    admitted_rater_poison_ingested: 0,
+    admitted_rater_poison_rejected: 0,
+    admitted_rater_poison_removals: 0,
+    admitted_rater_poison_service_admitted_rater: 0,
+    admitted_rater_service_credits: 0,
+    admitted_rater_service_bytes: 0,
+    admitted_rater_poison_target_unknown_before: 0,
+    admitted_rater_poison_target_received: 0,
+    admitted_rater_poison_target_ingested: 0,
+    admitted_rater_poison_target_removals: 0,
+    admitted_rater_poison_target_recoveries: 0,
+    admitted_rater_misbehavior_frames: 0,
+    admitted_rater_revocations: 0,
+    post_revocation_rating_published: 0,
+    post_revocation_rating_target_policy_drops: 0,
+    post_revocation_rating_target_received: 0,
+    post_revocation_rating_target_ingested: 0,
+    post_revocation_rating_influence: 0,
+    unconnected_rating_pressure_published: 0,
+    unconnected_rating_pressure_target_received: 0,
+    unconnected_rating_pressure_target_ingested: 0,
+    unconnected_rating_pressure_target_rejected: 0,
+    unconnected_rating_pressure_distinct_raters: 0,
+    unconnected_rating_pressure_retained_rating_delta: 0,
+    unconnected_rating_pressure_retained_rater_delta: 0,
+    unconnected_rating_pressure_rebuild_entry_delta: 0,
+    unconnected_rating_pressure_anchor_positive_before: 0,
+    unconnected_rating_pressure_anchor_stable_evaluations: 0,
+    unconnected_rating_pressure_anchor_projection_changes: 0,
     machine_transported_transitions: 0,
     machine_transported_positive_admissions: 0,
     machine_transported_removals: 0,
@@ -392,11 +462,23 @@ const EMPTY_REPORT_TEMPLATE: SimulationReport = SimulationReport {
     unknown_candidate_sends: 0,
     churned_links: 0,
     discovery_links: 0,
-    honest_supernode_links: 0,
-    false_supernode_links: 0,
-    supernode_discovery_precision_basis_points: 0,
-    honest_supernode_coverage_basis_points: 0,
-    false_only_supernode_peers: 0,
+    selected_high_capacity_links: 0,
+    selected_adversarial_candidate_links: 0,
+    high_capacity_selection_precision_basis_points: 0,
+    high_capacity_selection_coverage_basis_points: 0,
+    peers_without_high_capacity_selection: 0,
+    rediscovery_sweeps: 0,
+    rediscovery_candidate_attempts: 0,
+    rediscovery_links_removed: 0,
+    rediscovery_links_added: 0,
+    rediscovery_adversarial_links_removed: 0,
+    rediscovery_unavailable_links_removed: 0,
+    rediscovery_high_capacity_links_added: 0,
+    rediscovery_state_entries: 0,
+    rediscovery_subscription_refresh_nodes: 0,
+    rediscovery_subscription_refresh_targets: 0,
+    rediscovery_subscription_messages: 0,
+    rediscovery_control_plane_wire_bytes: 0,
     supernode_max_service_bytes: 0,
     supernode_mean_service_bytes: 0,
     supernode_load_gini_basis_points: 0,
@@ -411,6 +493,8 @@ const EMPTY_REPORT_TEMPLATE: SimulationReport = SimulationReport {
     interested_delivery_credit_by_source_role: BTreeMap::new(),
     interested_delivery_bytes_by_link: BTreeMap::new(),
     interested_delivery_bytes_by_source_role: BTreeMap::new(),
+    supernode_third_party_interested_delivery_credits: 0,
+    supernode_third_party_interested_delivery_bytes: 0,
     verified_delivery_credit_by_link: BTreeMap::new(),
     verified_delivery_bytes_by_link: BTreeMap::new(),
     verified_delivery_bytes_by_source_role: BTreeMap::new(),

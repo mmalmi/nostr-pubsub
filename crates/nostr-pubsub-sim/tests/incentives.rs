@@ -1,7 +1,7 @@
 use nostr_pubsub_sim::{
-    IncentiveConfig, IncentiveStrategy, PeerSelectionMode, SimulationConfig,
+    IncentiveConfig, IncentiveStrategy, IncentiveUseCase, PeerSelectionMode, SimulationConfig,
     SupernodeDiscoveryStrategy, TopologyStrategy, basis_points, compare_incentive_strategies,
-    run_simulation,
+    recommend_incentive_strategy, run_simulation,
 };
 
 #[test]
@@ -56,14 +56,15 @@ fn thousand_node_adversarial_incentive_gate() {
                 report.honest_earned_settled_by_deadline_basis_points >= 9_500,
                 "topology={topology:?}: {report:?}"
             );
-            assert_eq!(
-                report.fake_claim_cashout_sat, 0,
-                "topology={topology:?}: {report:?}"
-            );
             assert!(report.adversarial_payer_value_sat > 0, "{report:?}");
         }
         assert!(peer.max_pair_unpaid_exposure_sat <= config.offline_credit_cap_sat);
         assert!(batch.reciprocal_service_settled_sat > 0, "{batch:?}");
+        assert!(batch.peer_credit_accepted_sat > 0, "{batch:?}");
+        assert!(
+            batch.max_pair_peer_credit_sat <= config.offline_credit_cap_sat,
+            "topology={topology:?}: {batch:?}"
+        );
         assert!(
             batch.payment_byte_overhead_basis_points <= 500,
             "topology={topology:?}: {batch:?}"
@@ -73,7 +74,7 @@ fn thousand_node_adversarial_incentive_gate() {
 }
 
 #[test]
-fn adversarial_pubsub_delivery_compares_four_bounded_payment_plans() {
+fn adversarial_pubsub_delivery_compares_five_bounded_payment_plans() {
     let simulation = run_simulation(
         SimulationConfig {
             node_count: 96,
@@ -82,7 +83,7 @@ fn adversarial_pubsub_delivery_compares_four_bounded_payment_plans() {
             signed_spam_rounds: 3,
             legitimate_publication_rounds: 20,
             supernode_count: 8,
-            false_supernode_count: 4,
+            adversarial_discovery_candidate_count: 4,
             loss_basis_points: 0,
             churn_basis_points: 0,
             ..SimulationConfig::default()
@@ -125,6 +126,66 @@ fn adversarial_pubsub_delivery_compares_four_bounded_payment_plans() {
     );
     assert_common_reports(&simulation, &config, &reports);
     assert_strategy_comparison(&simulation, &config, &reports);
+    assert_workload_aware_exposure_policy(&simulation, &config, &reports);
+}
+
+fn assert_workload_aware_exposure_policy(
+    simulation: &nostr_pubsub_sim::SimulationReport,
+    one_shot_config: &IncentiveConfig,
+    one_shot_reports: &[nostr_pubsub_sim::IncentiveReport],
+) {
+    let selected =
+        recommend_incentive_strategy(one_shot_reports, IncentiveUseCase::VerifiedOneShot)
+            .expect("verified one-shot delivery must have an eligible strategy");
+    assert_eq!(selected.strategy, IncentiveStrategy::AcceptedMintBatch);
+
+    let streaming_config = IncentiveConfig {
+        use_case: IncentiveUseCase::UntrustedStreaming,
+        provider_failure_basis_points: 10_000,
+        spilman_update_sat: 1,
+        spilman_open_fee_sat: 1,
+        spilman_close_fee_sat: 1,
+        spilman_channel_lifetime_ms: 60_000,
+        ..one_shot_config.clone()
+    };
+    let streaming_reports = compare_incentive_strategies(simulation, &streaming_config)
+        .expect("streaming exposure plans must use the same verified delivery trail");
+    let selected =
+        recommend_incentive_strategy(&streaming_reports, IncentiveUseCase::UntrustedStreaming)
+            .expect("untrusted streaming must have an eligible strategy");
+    assert_eq!(selected.strategy, IncentiveStrategy::IncrementalSpilman);
+
+    let spilman = strategy(&streaming_reports, IncentiveStrategy::IncrementalSpilman);
+    let fixed = strategy(&streaming_reports, IncentiveStrategy::FixedPrepaidCashu);
+    let batch = strategy(&streaming_reports, IncentiveStrategy::AcceptedMintBatch);
+    let peer = strategy(&streaming_reports, IncentiveStrategy::OfflinePeerCredit);
+    assert_eq!(spilman.buyer_prepaid_exposure_sat, 0);
+    assert!(fixed.buyer_prepaid_exposure_sat > 0, "{fixed:?}");
+    assert!(fixed.buyer_counterparty_loss_sat > 0, "{fixed:?}");
+    assert_eq!(fixed.honest_earned_sat, 0, "{fixed:?}");
+    assert_eq!(batch.buyer_prepaid_exposure_sat, 0, "{batch:?}");
+    assert!(batch.provider_unpaid_exposure_sat > 0, "{batch:?}");
+    assert!(spilman.provider_unpaid_exposure_sat <= streaming_config.spilman_update_sat);
+    assert!(peer.provider_unpaid_exposure_sat <= streaming_config.offline_credit_cap_sat);
+    assert!(spilman.locked_capital_sat_ms > 0, "{spilman:?}");
+    assert!(spilman.peak_locked_capital_sat > 0, "{spilman:?}");
+    assert!(spilman.channel_open_fees_sat > 0, "{spilman:?}");
+    assert!(spilman.channel_close_fees_sat > 0, "{spilman:?}");
+    assert!(spilman.channel_value_is_conserved(), "{spilman:?}");
+
+    let refund_failure_config = IncentiveConfig {
+        spilman_refund_failure_basis_points: 10_000,
+        ..streaming_config
+    };
+    let refund_reports = compare_incentive_strategies(simulation, &refund_failure_config)
+        .expect("refund failure scenario must remain deterministic");
+    let failed_refund = strategy(&refund_reports, IncentiveStrategy::IncrementalSpilman);
+    assert!(failed_refund.refund_failures > 0, "{failed_refund:?}");
+    assert!(failed_refund.refund_loss_sat > 0, "{failed_refund:?}");
+    assert!(
+        failed_refund.channel_value_is_conserved(),
+        "{failed_refund:?}"
+    );
 }
 
 fn assert_strategy_comparison(
@@ -134,11 +195,20 @@ fn assert_strategy_comparison(
 ) {
     let direct = strategy(reports, IncentiveStrategy::DirectVerifiedCashu);
     let peer = strategy(reports, IncentiveStrategy::OfflinePeerCredit);
-    let spilman = strategy(reports, IncentiveStrategy::PrefundedSpilman);
+    let spilman = strategy(reports, IncentiveStrategy::IncrementalSpilman);
     let batch = strategy(reports, IncentiveStrategy::AcceptedMintBatch);
-    assert_eq!(direct.unpaid_exposure_sat, 0);
-    assert_eq!(spilman.unpaid_exposure_sat, 0);
-    assert_eq!(batch.unpaid_exposure_sat, 0);
+    assert!(direct.unpaid_exposure_sat > 0, "{direct:?}");
+    assert!(spilman.unpaid_exposure_sat > 0, "{spilman:?}");
+    assert!(
+        spilman.max_pair_unpaid_exposure_sat <= config.spilman_update_sat,
+        "{spilman:?}"
+    );
+    assert!(batch.unpaid_exposure_sat > 0, "{batch:?}");
+    assert!(batch.peer_credit_accepted_sat > 0, "{batch:?}");
+    assert!(batch.peer_credit_outstanding_sat > 0, "{batch:?}");
+    assert!(batch.max_pair_peer_credit_sat <= config.offline_credit_cap_sat);
+    assert!(direct.provider_default_loss_sat > 0, "{direct:?}");
+    assert!(batch.provider_default_loss_sat > 0, "{batch:?}");
     assert!(peer.default_exposure_sat > 0, "{peer:?}");
     assert_eq!(peer.unpaid_exposure_sat, peer.default_exposure_sat);
     assert!(peer.max_pair_unpaid_exposure_sat <= config.offline_credit_cap_sat);
@@ -197,7 +267,7 @@ fn assert_common_reports(
     config: &IncentiveConfig,
     reports: &[nostr_pubsub_sim::IncentiveReport],
 ) {
-    assert_eq!(reports.len(), 4);
+    assert_eq!(reports.len(), 5);
     let useful_bytes = simulation
         .verified_delivery_records
         .iter()
@@ -222,7 +292,8 @@ fn assert_common_reports(
         );
         assert!(report.fake_claims_attempted > 0, "{report:?}");
         assert!(report.fake_claimed_value_sat > 0, "{report:?}");
-        assert_eq!(report.fake_claim_cashout_sat, 0, "{report:?}");
+        assert!(report.prepaid_value_is_conserved(), "{report:?}");
+        assert!(report.channel_value_is_conserved(), "{report:?}");
         assert_eq!(
             report.honest_node_payment_state_entries.count,
             simulation.honest_node_count
@@ -296,7 +367,7 @@ fn thousand_node_config(topology: TopologyStrategy) -> SimulationConfig {
         topology,
         supernode_discovery: SupernodeDiscoveryStrategy::Mixed,
         supernode_count: 16,
-        false_supernode_count: 8,
+        adversarial_discovery_candidate_count: 8,
         supernode_links_per_peer: 3,
         supernode_fanout: 192,
         loss_basis_points: 200,

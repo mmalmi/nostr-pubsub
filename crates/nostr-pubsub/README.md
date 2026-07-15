@@ -19,6 +19,7 @@ building blocks for:
 - count- and byte-bounded cached payloads, with a 16 MiB aggregate default
 - TTL- and count-bounded seen-inventory and delivered-event deduplication
 - raw cache-byte and state-count snapshots through `retained_state()`
+- bounded route-local attribution for confirmed transport disruptions
 - priority-aware peer fanout with explicit unknown-peer exploration capacity
 - peer subscription tracking so inventory is sent only after a matching filter
 - bounded FIPS payload-frame codecs for standard Nostr `REQ`/`CLOSE`/`EVENT`
@@ -49,6 +50,13 @@ forwarded-want marker together, and forwarding always decrements the hop limit.
 Cached event payloads are limited by both `max_cached_events` and
 `max_cached_event_bytes`; the latter defaults to 16 MiB. Delivered-event and
 seen-inventory deduplication expire by TTL and retain hard count bounds.
+
+When a local transport confirms that the stream or link carrying one active
+request failed, it may call `record_transport_disruption` for that exact peer
+and event. The matching attempt then expires without falsely recording an
+unserved provider. Never derive this signal from peer-supplied data: false
+marking would suppress useful local misbehavior evidence. The bounded mark
+clears on fulfillment, expiry, or a new `WANT` attempt to that peer.
 
 Product crates keep their own app-specific event meanings. This crate provides
 the shared pubsub vocabulary. Peer-quality inputs are local transport or pubsub

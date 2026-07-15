@@ -105,14 +105,21 @@ Repeated publication rounds traverse the real mesh, filter, verification,
 loss/churn, retry, and first-acceptance paths; payment experiments consume those
 verified delivery edges rather than fabricated traffic.
 
-Its optional incentive comparison is explicitly a model, not a Cashu executor.
-It compares direct Cashu, bounded offline peer credit, prefunded Spilman, and
-accepted-mint batching with bilateral useful-service setoff, dust carry, private
-on-demand mint discovery, outages, payment refusal, and fake service claims.
-Reports include delivery paths, spam suppression, honest CPU/memory/bandwidth
-proxies, settled value, fees, unsecured exposure, payment traffic, and mint
-acceptance usefulness. Real CDK/fake-Lightning conservation tests live in
-`cashu-service`; economics remain outside the pubsub protocol crates.
+The scale incentive planner is explicitly a model, not a second Cashu
+implementation. It compares direct Cashu, bounded offline peer credit, fixed
+prepayment, incremental Spilman, and accepted-mint batching with bilateral
+useful-service setoff, bounded residual peer credit, private on-demand mint discovery, outages,
+payment refusal, and fake service claims. Reports include delivery paths, spam
+suppression, honest CPU/memory/bandwidth proxies, settled value, fees,
+unsecured exposure, locked liquidity, payment traffic, and mint acceptance
+usefulness.
+
+An optional integration gate feeds a production-path verified delivery into
+bounded `cashu-credit`, real loopback CDK mints, and simulated Lightning. It
+checks route-bound withdrawable settlement, closed-loop non-cashout, forged and
+replayed proof rejection, payout binding, backing uniqueness, and reserve
+conservation without putting wallet, mint, or economic policy code into the
+pubsub protocol crates.
 
 ## TypeScript
 
@@ -148,11 +155,13 @@ every TypeScript package source file is at most 500 lines.
 ```sh
 cargo test --workspace
 cargo test -p nostr-pubsub-sim --test source_size
+cargo test -p nostr-pubsub-sim --features cashu-integration \
+  --test cashu_integration -- --nocapture
 cargo clippy --workspace --all-targets -- -D warnings
 pnpm --dir ts --filter nostr-pubsub build
 pnpm --dir ts --filter nostr-pubsub check
 pnpm --dir ts --filter nostr-pubsub test
-cargo test -p nostr-pubsub@0.1.9 --test typescript_interop
+cargo test -p nostr-pubsub@0.1.10 --test typescript_interop
 cargo run -p nostr-pubsub-sim -- --nodes 1000 --attackers 200
 cargo test --release -p nostr-pubsub-sim --test release_gate -- \
   --ignored --nocapture --test-threads=1

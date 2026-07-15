@@ -94,6 +94,17 @@ describe('Rust/TypeScript interop vectors', () => {
     expect(adapter.subscriptions.peerSubscriptionCount(peerId)).toBe(0);
   });
 
+  it('drops every retained subscription when a FIPS peer disconnects', () => {
+    const request = vectors.wireCases.find((testCase) => testCase.message.type === 'req');
+    if (request === undefined) throw new Error('missing subscription vector');
+    const adapter = new FipsPubsubWireAdapter();
+    const peerId = 'disconnected-browser-fips-peer';
+    adapter.decodeInbound(peerId, new TextEncoder().encode(request.json));
+
+    expect(adapter.disconnectPeer(peerId)).toHaveLength(1);
+    expect(adapter.subscriptions.peerSubscriptionCount(peerId)).toBe(0);
+  });
+
   it('keeps source route priorities and relay-last ordering compatible', () => {
     const local = localIndexRoute('hashtree:events');
     const fips = fipsPeerDefaultRoute('npub1fips');

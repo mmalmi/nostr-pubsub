@@ -1,16 +1,14 @@
 use super::super::{
     BTreeSet, DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, Filter, FipsPubsubWireAdapter,
-    FipsPubsubWireCodec, HashMap, HashSet, InvWantMesh, InvWantMeshOptions, Kind, NodeRole,
-    PeerReputation, PeerReputationConfig, PeerSelectionMode, PubsubPeerInterest,
-    PubsubPeerSubscriptionStore, PubsubSubscriptionLimits, Result, SimNode, SimulationConfig,
-    TopologyResult, VerifiedEvent, WorkloadPair, mix64, pubsub_error,
+    FipsPubsubWireCodec, HashMap, InvWantMesh, InvWantMeshOptions, Kind, NodeRole, PeerReputation,
+    PeerReputationConfig, PeerSelectionMode, PubsubPeerInterest, PubsubPeerSubscriptionStore,
+    PubsubSubscriptionLimits, Result, SimNode, SimulationConfig, TopologyResult, VerifiedEvent,
+    WorkloadPair, pubsub_error,
 };
-
-const MACHINE_RATER_DOMAIN: u64 = 0x4d41_4348_494e_4502;
 
 pub(super) fn build_node(
     config: &SimulationConfig,
-    mode: PeerSelectionMode,
+    _mode: PeerSelectionMode,
     node_index: usize,
     peer_ids: &[String],
     topology: &TopologyResult,
@@ -26,27 +24,16 @@ pub(super) fn build_node(
         })
         .map(|event| event.as_event().pubkey.to_hex())
         .collect::<BTreeSet<_>>();
-    let machine_trusted_raters = trusted_machine_raters(
-        mode,
-        config.seed,
-        node_index,
-        &topology.neighbors[node_index],
-        peer_ids,
-    );
     let (machine_reputation, machine_policies) = if node_index >= config.attacker_count {
-        let (reputation, policies) = PeerReputation::new(
-            &peer_ids[node_index],
-            PeerReputationConfig {
-                trusted_raters: machine_trusted_raters.clone(),
-                ..PeerReputationConfig::default()
-            },
-        )
-        .map_err(pubsub_error)?;
+        let (reputation, policies) =
+            PeerReputation::new(&peer_ids[node_index], PeerReputationConfig::default())
+                .map_err(pubsub_error)?;
         (Some(reputation), Some(policies))
     } else {
         (None, None)
     };
-    let limits = subscription_limits(topology.neighbors[node_index].len());
+    let connection_limit = super::network::node_degree_cap(config, topology, node_index);
+    let limits = subscription_limits(connection_limit.max(topology.neighbors[node_index].len()));
     Ok(SimNode {
         mesh: InvWantMesh::new(mesh_options(config, topology.roles[node_index])),
         wire: FipsPubsubWireAdapter::new(
@@ -57,10 +44,9 @@ pub(super) fn build_node(
         rating_filters: Vec::new(),
         machine_reputation,
         machine_policies,
-        machine_trusted_raters,
+        service_admitted_raters: BTreeSet::new(),
         app_authorized_authors,
         local_events: HashMap::new(),
-        rejected_events: HashSet::new(),
     })
 }
 
@@ -96,51 +82,6 @@ pub(super) fn observed_established_history(
         .collect()
 }
 
-fn deterministic_peer_selection(
-    seed: u64,
-    domain: u64,
-    node: usize,
-    neighbors: &[usize],
-    excluded: &BTreeSet<usize>,
-) -> Option<usize> {
-    let node = u64::try_from(node).unwrap_or(u64::MAX);
-    let mut candidates = neighbors
-        .iter()
-        .copied()
-        .filter(|peer| !excluded.contains(peer))
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|peer| {
-        let peer = u64::try_from(*peer).unwrap_or(u64::MAX);
-        (
-            mix64(seed ^ domain ^ node.rotate_left(17) ^ peer.rotate_left(41)),
-            peer,
-        )
-    });
-    candidates.into_iter().next()
-}
-
-fn trusted_machine_raters(
-    mode: PeerSelectionMode,
-    seed: u64,
-    node: usize,
-    neighbors: &[usize],
-    peer_ids: &[String],
-) -> BTreeSet<String> {
-    if mode != PeerSelectionMode::SharedReputation {
-        return BTreeSet::new();
-    }
-    deterministic_peer_selection(
-        seed,
-        MACHINE_RATER_DOMAIN,
-        node,
-        neighbors,
-        &BTreeSet::new(),
-    )
-    .into_iter()
-    .map(|peer| peer_ids[peer].clone())
-    .collect()
-}
-
 pub(super) fn mesh_options(config: &SimulationConfig, role: NodeRole) -> InvWantMeshOptions {
     let fanout = if role == NodeRole::Supernode {
         config
@@ -172,10 +113,7 @@ pub(super) fn mesh_options(config: &SimulationConfig, role: NodeRole) -> InvWant
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BTreeSet, MACHINE_RATER_DOMAIN, NodeRole, SimulationConfig, deterministic_peer_selection,
-        mesh_options,
-    };
+    use super::{BTreeSet, NodeRole, SimulationConfig, mesh_options};
 
     #[test]
     fn supernodes_accept_all_signed_kinds_while_peers_bound_known_production_kinds() {
@@ -190,16 +128,5 @@ mod tests {
                 1, 3, 7_368, 10_000, 30_064, 30_078, 30_617, 37_195, 37_196,
             ]))
         );
-    }
-
-    #[test]
-    fn machine_rater_selection_is_deterministic_and_neighbor_bounded() {
-        let neighbors = [0, 2, 5, 9, 12];
-        let first =
-            deterministic_peer_selection(7, MACHINE_RATER_DOMAIN, 8, &neighbors, &BTreeSet::new());
-        let second =
-            deterministic_peer_selection(7, MACHINE_RATER_DOMAIN, 8, &neighbors, &BTreeSet::new());
-        assert_eq!(first, second);
-        assert!(first.is_some_and(|peer| neighbors.contains(&peer)));
     }
 }

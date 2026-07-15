@@ -2,20 +2,27 @@ mod admission;
 mod control_transport;
 mod delivery;
 mod engine;
+mod error;
 mod lifecycle;
+mod machine_wot;
+mod mode;
 mod network;
+mod rating_subscriptions;
+mod rediscovery;
 mod report;
+mod report_types;
 mod reputation_flow;
 mod reputation_probes;
 mod resources;
 mod setup;
 
-pub use delivery::VerifiedDeliveryRecord;
+pub use report_types::SimulationReport;
 use resources::NodeResourceLedger;
 pub use resources::{
     CpuWorkDistribution, NodeCpuWork, NodeRetainedUsage, ResourceCohortReport,
     RetainedUsageDistribution, SimulationResourceReport,
 };
+pub use {delivery::VerifiedDeliveryRecord, error::SimulationError, mode::PeerSelectionMode};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -49,14 +56,17 @@ use crate::workload::{
     build_targeted_approval_rating,
 };
 use network::{LinkOutage, OutageCause};
+use rediscovery::RediscoveryState;
 
 const SIM_PROTOCOL: &str = "nostr.pubsub.sim";
 const SIM_VERSION: u8 = 1;
 const SIM_UNIX_BASE: u64 = 1_700_000_000;
 const MALFORMED_TRAINING_SAMPLES: usize = 5;
-// The first sweep follows the simulator's 60 ms Inv/Want route expiry so
-// silent inventory blackholes have become production peer-behavior evidence.
-const REPUTATION_SWEEP_MS: u64 = 100;
+// The first sweep follows the 60 ms route expiry, the 110 ms churn window,
+// and one 80 ms data retry. This keeps transient outages from becoming shared
+// machine-removal evidence while silent blackholes remain observable.
+const REPUTATION_SWEEP_MS: u64 = 150;
+const POST_TRAINING_REDISCOVERY_MS: u64 = 250;
 const POST_ROUTE_REPUTATION_SWEEP_MS: u64 = 1_075;
 const POST_RECONNECT_REPUTATION_SWEEP_MS: u64 = 2_140;
 const CHURN_START_MS: u64 = 30;
@@ -65,34 +75,6 @@ const LEGITIMATE_PUBLISH_BASE_MS: u64 = 40;
 const SPAM_PUBLISH_BASE_MS: u64 = 75;
 
 pub type Result<T> = std::result::Result<T, SimulationError>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum SimulationError {
-    #[error("invalid simulation configuration: {0}")]
-    InvalidConfig(String),
-    #[error("pubsub simulation failed: {0}")]
-    Pubsub(String),
-    #[error("simulation exceeded its {0} scheduled-action processing budget")]
-    ActionBudgetExceeded(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeerSelectionMode {
-    Neutral,
-    LocalBehavior,
-    SharedReputation,
-}
-
-impl PeerSelectionMode {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Neutral => "neutral",
-            Self::LocalBehavior => "local-behavior",
-            Self::SharedReputation => "shared-reputation",
-        }
-    }
-}
 
 /// One directed transport link used for service accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -119,7 +101,7 @@ pub struct SimulationConfig {
     pub topology: TopologyStrategy,
     pub supernode_discovery: SupernodeDiscoveryStrategy,
     pub supernode_count: usize,
-    pub false_supernode_count: usize,
+    pub adversarial_discovery_candidate_count: usize,
     pub supernode_links_per_peer: usize,
     pub supernode_fanout: usize,
     pub loss_basis_points: u32,
@@ -144,7 +126,7 @@ impl Default for SimulationConfig {
             topology: TopologyStrategy::PeerMesh,
             supernode_discovery: SupernodeDiscoveryStrategy::Mixed,
             supernode_count: 16,
-            false_supernode_count: 8,
+            adversarial_discovery_candidate_count: 8,
             supernode_links_per_peer: 3,
             supernode_fanout: 192,
             loss_basis_points: 200,
@@ -155,204 +137,6 @@ impl Default for SimulationConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SimulationReport {
-    pub config: SimulationConfig,
-    pub mode: PeerSelectionMode,
-    pub topology: TopologyStrategy,
-    pub discovery: SupernodeDiscoveryStrategy,
-    pub node_count: usize,
-    pub attacker_count: usize,
-    pub honest_node_count: usize,
-    pub supernode_count: usize,
-    /// Ground-truth role of each simulated node, indexed by node identifier.
-    pub node_roles: Vec<NodeRole>,
-    pub topology_edges: usize,
-    pub max_node_degree: usize,
-    pub legitimate_events: usize,
-    pub spam_events: usize,
-    pub expected_legitimate_deliveries: usize,
-    pub expected_signed_spam_deliveries: usize,
-    pub expected_signed_spam_deliveries_by_class: BTreeMap<String, usize>,
-    pub expected_signed_spam_deliveries_by_identity: BTreeMap<String, usize>,
-    pub expected_machine_admitted_spam_deliveries_by_identity: BTreeMap<String, usize>,
-    /// Active ordinary-peer links on which production subscription routing
-    /// considered a signed spam event.
-    pub spam_filter_peer_link_opportunities: usize,
-    pub spam_filter_peer_link_opportunities_by_class: BTreeMap<String, usize>,
-    /// Those opportunities for which the production subscription store
-    /// suppressed inventory delivery.
-    pub spam_filter_suppressed_peer_links: usize,
-    pub spam_filter_suppressed_peer_links_by_class: BTreeMap<String, usize>,
-    pub spam_filter_suppression_basis_points_by_class: BTreeMap<String, u32>,
-    pub delivered_legitimate: usize,
-    pub local_legitimate_deliveries: usize,
-    pub delivery_basis_points: u32,
-    pub worst_cohort_delivery_basis_points: u32,
-    pub cohort_delivery_basis_points: BTreeMap<String, u32>,
-    pub latency_sample_count: usize,
-    pub latency_p50_ms: u64,
-    pub latency_p95_ms: u64,
-    pub latency_p99_ms: u64,
-    pub max_delivered_latency_ms: u64,
-    /// Remote interested deliveries with reconstructable dissemination paths.
-    pub delivery_path_samples: usize,
-    pub multihop_interested_deliveries: usize,
-    pub multihop_interested_delivery_basis_points: u32,
-    pub delivery_path_hops_p50: u64,
-    pub delivery_path_hops_p95: u64,
-    pub delivery_path_hops_p99: u64,
-    pub delivery_path_hops_max: u64,
-    pub undelivered_legitimate: usize,
-    pub spam_delivered: usize,
-    pub signed_spam_deliveries_by_class: BTreeMap<String, usize>,
-    pub signed_spam_deliveries_by_identity: BTreeMap<String, usize>,
-    pub machine_admitted_spam_deliveries_by_identity: BTreeMap<String, usize>,
-    pub signed_spam_delivery_basis_points: u32,
-    pub signed_spam_delivery_basis_points_by_class: BTreeMap<String, u32>,
-    pub signed_spam_suppression_basis_points_by_identity: BTreeMap<String, u32>,
-    pub machine_admitted_spam_suppression_basis_points_by_identity: BTreeMap<String, u32>,
-    pub unknown_discovery_adverts_delivered: usize,
-    pub spam_dropped_by_machine_policy: usize,
-    pub spam_dropped_by_application_policy: usize,
-    pub spam_suppression_basis_points: u32,
-    pub uninterested_deliveries: usize,
-    pub uninterested_legitimate_deliveries: usize,
-    pub uninterested_spam_deliveries: usize,
-    pub filter_suppression_basis_points: u32,
-    pub processed_actions: usize,
-    pub processed_messages: usize,
-    pub inventory_messages: usize,
-    pub want_messages: usize,
-    pub frame_messages: usize,
-    pub data_plane_wire_bytes: u64,
-    pub legitimate_protocol_bytes: u64,
-    pub adversarial_protocol_bytes: u64,
-    pub legitimate_protocol_byte_share_basis_points: u32,
-    pub protocol_messages_per_interested_delivery_milli: u64,
-    pub dropped_packets: usize,
-    pub dropped_at_attackers: usize,
-    /// Retry inventories actually sent through the production replay path.
-    pub retry_inventories: usize,
-    /// Disrupted legitimate transfers that were eventually delivered by any path.
-    pub eventual_disrupted_transfer_recoveries: usize,
-    pub disrupted_legitimate_transfers: usize,
-    pub eventual_disrupted_transfer_recovery_basis_points: u32,
-    pub max_queue_depth: usize,
-    pub virtual_duration_ms: u64,
-    pub injected_attack_inventories: usize,
-    pub rejected_malformed_messages: usize,
-    pub unauthorized_source_drops: usize,
-    pub machine_ingress_drops: usize,
-    /// Legitimate-provenance packets blocked when carried by an honest peer.
-    pub honest_source_legitimate_machine_ingress_drops: usize,
-    /// Attacker packets that referenced a legitimate event ID when blocked.
-    pub attacker_source_legitimate_reference_machine_ingress_drops: usize,
-    /// Adversarial-provenance packets blocked regardless of carrier role.
-    pub adversarial_machine_ingress_drops: usize,
-    pub machine_ratings_published: usize,
-    pub machine_ratings_received: usize,
-    /// Structurally valid ratings retained by `PeerReputation`.
-    pub machine_ratings_ingested: usize,
-    pub poisoned_machine_ratings_published: usize,
-    pub poisoned_machine_ratings_received: usize,
-    pub poisoned_machine_ratings_ingested: usize,
-    pub poisoned_machine_ratings_rejected: usize,
-    pub machine_transported_transitions: usize,
-    pub machine_transported_positive_admissions: usize,
-    pub machine_transported_removals: usize,
-    pub machine_lifecycle_ratings_published: usize,
-    pub machine_lifecycle_admissions: usize,
-    pub machine_lifecycle_removals: usize,
-    pub machine_lifecycle_readmissions: usize,
-    pub machine_reversible_lifecycles: usize,
-    pub machine_positive_admissions: usize,
-    pub machine_removals: usize,
-    pub machine_quiet_blackhole_removals: usize,
-    pub machine_poisoning_removals: usize,
-    pub machine_false_positive_removals: usize,
-    pub machine_removal_latency_p95_ms: u64,
-    pub forged_machine_ratings_published: usize,
-    pub forged_machine_ratings_received: usize,
-    pub forged_machine_ratings_evaluated: usize,
-    pub forged_machine_ratings_ingested: usize,
-    pub forged_machine_ratings_rejected: usize,
-    pub legitimate_policy_drops: usize,
-    pub legitimate_application_policy_drops: usize,
-    pub machine_trust_edges: usize,
-    pub subscription_messages: usize,
-    pub control_plane_wire_bytes: u64,
-    pub subscription_retries: usize,
-    pub subscription_retry_recoveries: usize,
-    pub subscription_rejections: usize,
-    pub subscription_evictions: usize,
-    pub subscription_close_reopen_successes: usize,
-    /// Inv/WANT actions sent while the local policy still classified the peer as unknown.
-    pub unknown_candidate_sends: usize,
-    /// Scheduled link-outage episodes, including forced supernode outages.
-    pub churned_links: usize,
-    pub discovery_links: usize,
-    pub honest_supernode_links: usize,
-    pub false_supernode_links: usize,
-    pub supernode_discovery_precision_basis_points: u32,
-    pub honest_supernode_coverage_basis_points: u32,
-    pub false_only_supernode_peers: usize,
-    pub supernode_max_service_bytes: u64,
-    pub supernode_mean_service_bytes: u64,
-    pub supernode_load_gini_basis_points: u32,
-    pub total_protocol_bytes: u64,
-    pub sent_link_protocol_bytes: u64,
-    pub sent_role_protocol_bytes: u64,
-    pub protocol_bytes_per_interested_delivery: u64,
-    pub resource_usage: SimulationResourceReport,
-    /// Attempted and received Inv/WANT and FIPS control traffic per directed link.
-    pub protocol_service_by_link: BTreeMap<DirectedServiceLink, NodeTrafficLedger>,
-    /// Inv/WANT and FIPS control service aggregated by the carrier's node role.
-    pub protocol_service_by_role: BTreeMap<NodeRole, NodeTrafficLedger>,
-    /// Successful interested application deliveries credited to their final directed hop.
-    pub interested_delivery_credit_by_link: BTreeMap<DirectedServiceLink, usize>,
-    /// Final-hop interested delivery credits aggregated by the carrier's role.
-    pub interested_delivery_credit_by_source_role: BTreeMap<NodeRole, usize>,
-    /// Exact useful application payload bytes credited to each final directed hop.
-    pub interested_delivery_bytes_by_link: BTreeMap<DirectedServiceLink, u64>,
-    /// Final-hop useful payload bytes aggregated by the carrier's role.
-    pub interested_delivery_bytes_by_source_role: BTreeMap<NodeRole, u64>,
-    /// First accepted legitimate frame deliveries on every directed transport hop.
-    pub verified_delivery_credit_by_link: BTreeMap<DirectedServiceLink, usize>,
-    /// Exact application payload bytes carried by first accepted legitimate frames.
-    pub verified_delivery_bytes_by_link: BTreeMap<DirectedServiceLink, u64>,
-    /// Verified-hop payload bytes aggregated by the sending node's role.
-    pub verified_delivery_bytes_by_source_role: BTreeMap<NodeRole, u64>,
-    /// Per-event edges for first accepted legitimate frames that served an
-    /// interested receiver or were forwarded onward.
-    pub verified_delivery_records: Vec<VerifiedDeliveryRecord>,
-}
-
-impl SimulationReport {
-    /// Whether independently accumulated protocol-byte ledgers agree exactly.
-    #[must_use]
-    pub fn protocol_accounting_is_conserved(&self) -> bool {
-        self.data_plane_wire_bytes
-            .saturating_add(self.control_plane_wire_bytes)
-            == self.total_protocol_bytes
-            && self
-                .legitimate_protocol_bytes
-                .saturating_add(self.adversarial_protocol_bytes)
-                == self.total_protocol_bytes
-            && self.sent_link_protocol_bytes == self.total_protocol_bytes
-            && self.sent_role_protocol_bytes == self.total_protocol_bytes
-    }
-
-    /// Whether every machine-ingress drop has exactly one ground-truth class.
-    #[must_use]
-    pub fn machine_ingress_accounting_is_conserved(&self) -> bool {
-        self.honest_source_legitimate_machine_ingress_drops
-            .saturating_add(self.attacker_source_legitimate_reference_machine_ingress_drops)
-            .saturating_add(self.adversarial_machine_ingress_drops)
-            == self.machine_ingress_drops
-    }
-}
-
 struct SimNode {
     mesh: InvWantMesh,
     wire: FipsPubsubWireAdapter,
@@ -360,10 +144,10 @@ struct SimNode {
     rating_filters: Vec<Filter>,
     machine_reputation: Option<PeerReputation>,
     machine_policies: Option<PeerReputationPolicies>,
-    machine_trusted_raters: BTreeSet<String>,
+    /// Rating authors admitted by this node's root after verified service.
+    service_admitted_raters: BTreeSet<String>,
     app_authorized_authors: BTreeSet<String>,
-    local_events: HashMap<String, Event>,
-    rejected_events: HashSet<String>,
+    local_events: HashMap<String, VerifiedEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +163,7 @@ enum SubscriptionPurpose {
     LifecycleClose,
     LifecycleReopen { observed_close: bool },
     Reconnect,
+    Rediscovery,
     Flood,
 }
 
@@ -428,6 +213,7 @@ enum ScheduledAction {
     },
     AdvanceVirtualTime,
     ReputationSweep,
+    RediscoverySweep,
     LinkDown(LinkOutage),
     LinkUp(LinkOutage),
 }
@@ -438,7 +224,6 @@ struct EventMetadata {
     legitimate: bool,
     spam_identity: Option<SpamIdentity>,
     publisher: usize,
-    event: Event,
     verified: VerifiedEvent,
     payload_bytes: u64,
     publish_at_ms: u64,
@@ -472,16 +257,22 @@ struct ReputationEventMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReputationEventOrigin {
     HonestObservation { quiet_blackhole: bool },
+    PositiveServiceEndorsement,
     MachineLifecycle(MachineLifecyclePhase),
+    UnconnectedRatingPressure,
+    RevokedRaterRating,
     ForgedProbe,
     PoisonedProbe,
+    AdmittedRaterPoison,
 }
 
 impl ReputationEventOrigin {
     const fn is_spam(self) -> bool {
         !matches!(
             self,
-            Self::HonestObservation { .. } | Self::MachineLifecycle(_)
+            Self::HonestObservation { .. }
+                | Self::PositiveServiceEndorsement
+                | Self::MachineLifecycle(_)
         )
     }
 }
@@ -526,6 +317,7 @@ struct Simulation {
     nodes: Vec<SimNode>,
     scheduler: VirtualScheduler<ScheduledAction>,
     events: HashMap<String, EventMetadata>,
+    routing_probes: Vec<VerifiedEvent>,
     reputation_events: HashMap<String, ReputationEventMetadata>,
     reputation_publishers: Vec<Option<PeerRatingPublisher>>,
     rating_receipts: HashSet<(usize, String)>,
@@ -549,6 +341,16 @@ struct Simulation {
     delivery_bytes: BTreeMap<DirectedServiceLink, u64>,
     verified_delivery_credits: BTreeMap<DirectedServiceLink, usize>,
     verified_delivery_bytes: BTreeMap<DirectedServiceLink, u64>,
+    endpoint_connection_limits: Vec<usize>,
+    rediscovery: Vec<RediscoveryState>,
+    rediscovery_new_links: BTreeSet<(usize, usize)>,
+    rating_subscription_dirty: BTreeSet<usize>,
+    positive_endorsements: Vec<Vec<usize>>,
+    positive_service_admissions: HashMap<(usize, usize), (usize, u64)>,
+    admitted_rater_poison_targets: BTreeSet<(usize, usize)>,
+    admitted_rater_poison_source: Option<(usize, usize)>,
+    admitted_rater_post_revocation_target: Option<(usize, usize)>,
+    unconnected_rating_pressure_target: Option<(usize, usize, usize, usize, u64)>,
     report: SimulationReport,
 }
 
@@ -745,7 +547,7 @@ mod tests {
                 node_count: 120,
                 attacker_count: 24,
                 supernode_count: 8,
-                false_supernode_count: 4,
+                adversarial_discovery_candidate_count: 4,
                 ..SimulationConfig::default()
             },
             PeerSelectionMode::SharedReputation,
@@ -796,7 +598,7 @@ mod tests {
             fake_inventories_per_attack_link: 2,
             signed_spam_rounds: 2,
             supernode_count: 8,
-            false_supernode_count: 4,
+            adversarial_discovery_candidate_count: 4,
             ..SimulationConfig::default()
         };
         let mut first =
@@ -831,7 +633,7 @@ mod tests {
             loss_basis_points: 0,
             churn_basis_points: 0,
             supernode_count: 8,
-            false_supernode_count: 4,
+            adversarial_discovery_candidate_count: 4,
             ..SimulationConfig::default()
         };
         let local = run_simulation(config.clone(), PeerSelectionMode::LocalBehavior).unwrap();
@@ -916,7 +718,7 @@ mod tests {
             attacker_count: 36,
             topology: TopologyStrategy::HybridSupernodes,
             supernode_count: 8,
-            false_supernode_count: 4,
+            adversarial_discovery_candidate_count: 4,
             supernode_links_per_peer: 3,
             loss_basis_points: 0,
             churn_basis_points: 0,
@@ -925,8 +727,11 @@ mod tests {
         let report = run_simulation(config, PeerSelectionMode::SharedReputation).unwrap();
         assert_eq!(report.supernode_count, 8);
         assert!(report.discovery_links > 0, "{report:?}");
-        assert!(report.honest_supernode_links > 0, "{report:?}");
-        assert!(report.false_supernode_links > 0, "{report:?}");
+        assert!(report.selected_high_capacity_links > 0, "{report:?}");
+        assert!(
+            report.selected_adversarial_candidate_links > 0,
+            "{report:?}"
+        );
         assert!(report.supernode_max_service_bytes > 0, "{report:?}");
         assert!(!report.protocol_service_by_link.is_empty(), "{report:?}");
         assert!(

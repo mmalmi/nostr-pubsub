@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nostr_pubsub_sim::{
-    DirectedServiceLink, PeerSelectionMode, SimulationConfig, VerifiedDeliveryRecord,
-    run_simulation,
+    DirectedServiceLink, NodeRole, PeerSelectionMode, SimulationConfig, TopologyStrategy,
+    VerifiedDeliveryRecord, run_simulation,
 };
 
 #[test]
@@ -14,7 +14,8 @@ fn useful_delivery_trails_are_exact_dissemination_trees() {
             fake_inventories_per_attack_link: 3,
             signed_spam_rounds: 3,
             supernode_count: 8,
-            false_supernode_count: 4,
+            adversarial_discovery_candidate_count: 4,
+            topology: TopologyStrategy::HybridSupernodes,
             loss_basis_points: 0,
             churn_basis_points: 0,
             ..SimulationConfig::default()
@@ -56,9 +57,38 @@ fn useful_delivery_trails_are_exact_dissemination_trees() {
         report.legitimate_events,
         "100% legitimate delivery plus delivered spam proves spam frames were excluded"
     );
+    let mut third_party_supernode_credits = 0usize;
+    let mut third_party_supernode_bytes = 0u64;
     for (event_id, records) in records_by_event {
-        assert_event_tree(event_id, &records, report.node_count);
+        let publisher = assert_event_tree(event_id, &records, report.node_count);
+        for record in records {
+            if record.final_interested_delivery
+                && report.node_roles[record.provider] == NodeRole::Supernode
+                && record.provider != publisher
+            {
+                third_party_supernode_credits += 1;
+                third_party_supernode_bytes += record.payload_bytes;
+            }
+        }
     }
+    assert!(third_party_supernode_credits > 0);
+    assert_eq!(
+        third_party_supernode_credits,
+        report.supernode_third_party_interested_delivery_credits
+    );
+    assert_eq!(
+        third_party_supernode_bytes,
+        report.supernode_third_party_interested_delivery_bytes
+    );
+    assert!(
+        report
+            .interested_delivery_credit_by_source_role
+            .get(&NodeRole::Supernode)
+            .copied()
+            .unwrap_or(0)
+            > third_party_supernode_credits,
+        "forced publisher delivery must exist but stay outside the third-party KPI"
+    );
 }
 
 fn assert_aggregates_match_records(
@@ -83,7 +113,11 @@ fn assert_aggregates_match_records(
     assert_eq!(interested_bytes, report.interested_delivery_bytes_by_link);
 }
 
-fn assert_event_tree(event_id: &str, records: &[&VerifiedDeliveryRecord], node_count: usize) {
+fn assert_event_tree(
+    event_id: &str,
+    records: &[&VerifiedDeliveryRecord],
+    node_count: usize,
+) -> usize {
     let mut parents = BTreeMap::new();
     let mut receivers = BTreeSet::new();
     let mut payload_bytes = None;
@@ -127,4 +161,5 @@ fn assert_event_tree(event_id: &str, records: &[&VerifiedDeliveryRecord], node_c
         }
         assert_eq!(cursor, root, "disconnected event trail for {event_id}");
     }
+    root
 }

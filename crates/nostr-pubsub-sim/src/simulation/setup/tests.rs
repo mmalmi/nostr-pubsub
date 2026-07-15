@@ -12,7 +12,7 @@ fn adversarial_config(topology: TopologyStrategy) -> SimulationConfig {
         attacker_count: 24,
         topology,
         supernode_count: 8,
-        false_supernode_count: 4,
+        adversarial_discovery_candidate_count: 4,
         loss_basis_points: 0,
         churn_basis_points: 0,
         ..SimulationConfig::default()
@@ -41,8 +41,14 @@ fn scoped_spam_alternates_between_organic_interest_and_near_misses() {
                 .values()
                 .filter(|event| !event.legitimate && event.class == class)
                 .collect::<Vec<_>>();
-            spam.sort_by_key(|event| event.event.created_at);
+            spam.sort_by_key(|event| event.verified.as_event().created_at);
             assert_eq!(spam.len(), simulation.config.signed_spam_rounds);
+            let exact_author = matches!(
+                class,
+                SubscriptionClass::AuthorFeed
+                    | SubscriptionClass::HashtreeUpdate
+                    | SubscriptionClass::GitRepoAnnouncement
+            );
 
             for (round, spam) in spam.into_iter().enumerate() {
                 assert!(spam.publisher < simulation.config.attacker_count);
@@ -53,7 +59,8 @@ fn scoped_spam_alternates_between_organic_interest_and_near_misses() {
                         .any(|target| {
                             simulation.topology.roles[*target] == NodeRole::Supernode
                                 || (simulation.topology.roles[*target] == NodeRole::Peer
-                                    && simulation.topology.cohort_ids[*target] == cohort)
+                                    && (exact_author
+                                        || simulation.topology.cohort_ids[*target] == cohort))
                         })
                 };
                 assert!(attack_ingress_route(spam.publisher));
@@ -73,12 +80,6 @@ fn scoped_spam_alternates_between_organic_interest_and_near_misses() {
                         }
                     }
                 }
-                let exact_author = matches!(
-                    class,
-                    SubscriptionClass::AuthorFeed
-                        | SubscriptionClass::HashtreeUpdate
-                        | SubscriptionClass::GitRepoAnnouncement
-                );
                 let kind_wide = class == SubscriptionClass::FipsPaidOffer;
                 let expected_interest = !exact_author && (round.is_multiple_of(2) || kind_wide);
                 assert_eq!(
@@ -175,15 +176,14 @@ fn hybrid_attack_ingress_covers_both_identities_without_changing_discovery_count
             normal_peer_count.saturating_mul(config.supernode_links_per_peer),
             "attack ingress leaked into {discovery:?} discovery counts"
         );
-        if discovery == SupernodeDiscoveryStrategy::Bootstrap {
-            assert_eq!(
-                simulation
-                    .topology
-                    .discovery_selections
-                    .false_supernode_links,
-                0
-            );
-        }
+        assert!(
+            simulation
+                .topology
+                .discovery_selections
+                .selected_adversarial_candidate_links
+                > 0,
+            "{discovery:?} must select from generic adversarial endpoints too"
+        );
     }
 }
 
@@ -259,7 +259,7 @@ fn signed_spam_rounds_cover_lifecycle_phases_and_multiple_identities() {
     );
     let signed_timestamps = spam
         .iter()
-        .map(|event| event.event.created_at.as_secs())
+        .map(|event| event.verified.as_event().created_at.as_secs())
         .collect::<BTreeSet<_>>();
     assert_eq!(signed_timestamps.len(), spam.len());
     for phase in [12_u64, 75, 250, 1_150, 1_300, 2_250, 2_400, 2_550] {
@@ -329,13 +329,13 @@ fn clean_and_disabled_attack_configs_generate_no_signed_spam() {
             node_count: 32,
             attacker_count: 0,
             topology: TopologyStrategy::PeerMesh,
-            false_supernode_count: 0,
+            adversarial_discovery_candidate_count: 0,
             ..SimulationConfig::default()
         },
         PeerSelectionMode::Neutral,
     )
     .unwrap();
-    assert_eq!(clean.events.len(), SubscriptionClass::ALL.len());
+    assert_eq!(clean.events.len(), SubscriptionClass::ALL.len() + 2);
     assert!(clean.events.values().all(|event| event.legitimate));
     assert!(
         clean
@@ -363,7 +363,7 @@ fn shared_mode_installs_one_combined_subscription_per_directed_link() {
             node_count: 32,
             attacker_count: 0,
             topology: TopologyStrategy::PeerMesh,
-            false_supernode_count: 0,
+            adversarial_discovery_candidate_count: 0,
             loss_basis_points: 0,
             churn_basis_points: 0,
             ..SimulationConfig::default()
@@ -378,10 +378,10 @@ fn shared_mode_installs_one_combined_subscription_per_directed_link() {
 
     assert_eq!(simulation.report.subscription_messages, directed_links);
     simulation.exercise_machine_lifecycle().unwrap();
-    simulation.drain_scheduler().unwrap();
-    assert_eq!(simulation.report.machine_lifecycle_ratings_published, 3);
-    assert!(simulation.report.machine_transported_transitions > 0);
-    assert!(simulation.report.machine_reversible_lifecycles > 0);
+    assert_eq!(
+        simulation.report.machine_lifecycle_ratings_published, 0,
+        "subscription installation alone is not verified service",
+    );
 }
 
 #[test]

@@ -30,6 +30,8 @@ export class InvWantMesh {
             seenInventories: this.seenInventories.size,
             deliveredEvents: this.deliveredEvents.size,
             upstreamRoutes: this.upstreamRoutes.size,
+            transportDisruptedRoutePeers: [...this.upstreamRoutes.values()]
+                .reduce((total, route) => total + route.transportDisruptedPeerIds.size, 0),
             pendingEvents: this.pendingDownstream.size,
             pendingPeers: this.pendingPeerCount,
             forwardedWants: this.wantForwarded.size,
@@ -57,8 +59,18 @@ export class InvWantMesh {
         const route = this.upstreamRoutes.get(eventId);
         if (route !== undefined && routeHasProvider(route, peerId)) {
             route.fulfilled = true;
+            route.transportDisruptedPeerIds.clear();
             this.removePendingEvent(eventId);
         }
+    }
+    /** Mark a locally confirmed request failure; another want clears it. */
+    recordTransportDisruption(peerId, eventId) {
+        const route = this.upstreamRoutes.get(eventId);
+        if (route === undefined || route.fulfilled || !routeHasProvider(route, peerId))
+            return false;
+        const before = route.transportDisruptedPeerIds.size;
+        route.transportDisruptedPeerIds.add(peerId);
+        return route.transportDisruptedPeerIds.size !== before;
     }
     publish(event, peers, nowMs) {
         return this.publishEvent(event, peers, nowMs, false);
@@ -164,6 +176,7 @@ export class InvWantMesh {
                 this.seenInventories.set(message.eventId, extendedExpiry);
                 this.wantForwarded.set(message.eventId, extendedExpiry);
             }
+            route.transportDisruptedPeerIds.delete(sourcePeer);
             return [send(sourcePeer, { type: 'want', eventId: message.eventId })];
         }
         const expiresAtMs = saturatingAdd(nowMs, this.options.routeTtlMs);
@@ -171,6 +184,7 @@ export class InvWantMesh {
             this.upstreamRoutes.set(message.eventId, {
                 peerId: sourcePeer,
                 alternatePeerIds: new Set(),
+                transportDisruptedPeerIds: new Set(),
                 eventKind: message.eventKind,
                 payloadBytes: message.payloadBytes,
                 hopLimit: message.hopLimit,
@@ -203,6 +217,7 @@ export class InvWantMesh {
         }
         if ((this.wantForwarded.get(eventId) ?? 0) > nowMs)
             return [];
+        route.transportDisruptedPeerIds.delete(route.peerId);
         this.wantForwarded.set(eventId, route.expiresAtMs);
         return [send(route.peerId, { type: 'want', eventId })];
     }
@@ -226,6 +241,7 @@ export class InvWantMesh {
         this.recordPeerBehavior(sourcePeer, VALID_FRAME_REWARD, 'validFrames');
         this.storeEvent(verified, payloadBytes, nowMs);
         route.fulfilled = true;
+        route.transportDisruptedPeerIds.clear();
         const actions = [];
         if (this.rememberDelivered(eventId, nowMs)) {
             actions.push({ type: 'deliver', sourcePeer, event: verified });
@@ -351,9 +367,11 @@ export class InvWantMesh {
         for (const route of this.upstreamRoutes.values()) {
             if (route.fulfilled || route.expiresAtMs > nowMs)
                 continue;
-            this.recordPeerBehavior(route.peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
+            if (!route.transportDisruptedPeerIds.has(route.peerId))
+                this.recordPeerBehavior(route.peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
             for (const peerId of route.alternatePeerIds) {
-                this.recordPeerBehavior(peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
+                if (!route.transportDisruptedPeerIds.has(peerId))
+                    this.recordPeerBehavior(peerId, UNSERVED_INVENTORY_PENALTY, 'unservedInventories');
             }
         }
         this.cachedEvents.prune(nowMs);

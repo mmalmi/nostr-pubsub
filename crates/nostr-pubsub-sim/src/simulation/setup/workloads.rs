@@ -23,12 +23,26 @@ const SIGNED_SPAM_PHASES_MS: [u64; 8] = [
 const SIGNED_SPAM_CYCLE_STRIDE_MS: usize = 3_000;
 const LEGITIMATE_PUBLICATION_STRIDE_MS: u64 = 160;
 const LEGITIMATE_CREATED_AT_STRIDE: u64 = 100;
+const MACHINE_ADMISSION_SERVICE_SAMPLES: usize = 3;
 const HASHTAG_TOPIC: &str = "decentralized-nostr";
 const HASHTREE_NAME: &str = "iris-chat-releases";
 const IRIS_DRIVE_ROOT: &str = "iris-drive/default/root";
 const FIPS_ADVERT_SCOPE: &str = "nostr-pubsub";
 const FIPS_PAID_OFFER: &str = "nostr-vpn-paid-exit";
 const GIT_REPOSITORY: &str = "nostr-pubsub";
+
+// Keep this production-shaped service probe identical across policy modes.
+const fn legitimate_rounds(class: SubscriptionClass, configured: usize) -> usize {
+    if matches!(class, SubscriptionClass::AuthorFeed) {
+        if configured < MACHINE_ADMISSION_SERVICE_SAMPLES {
+            MACHINE_ADMISSION_SERVICE_SAMPLES
+        } else {
+            configured
+        }
+    } else {
+        configured
+    }
+}
 
 pub(super) fn build_workloads(
     config: &SimulationConfig,
@@ -67,7 +81,7 @@ pub(super) fn build_workloads(
             LEGITIMATE_PUBLISH_BASE_MS
                 .saturating_add(u64::try_from(class_index).unwrap_or(0).saturating_mul(4)),
         )?;
-        for round in 1..config.legitimate_publication_rounds {
+        for round in 1..legitimate_rounds(class, config.legitimate_publication_rounds) {
             let round = u64::try_from(round).unwrap_or(u64::MAX);
             let created_at = SIM_UNIX_BASE
                 .saturating_add(round.saturating_mul(LEGITIMATE_CREATED_AT_STRIDE))
@@ -375,17 +389,23 @@ fn insert_event_metadata(
     publisher: usize,
     publish_at_ms: u64,
 ) -> Result<()> {
-    let verified = VerifiedEvent::try_from(event.clone()).map_err(pubsub_error)?;
-    let payload_bytes =
-        u64::try_from(event.try_as_json().map_err(pubsub_error)?.len()).unwrap_or(u64::MAX);
+    let verified = VerifiedEvent::try_from(event).map_err(pubsub_error)?;
+    let payload_bytes = u64::try_from(
+        verified
+            .as_event()
+            .try_as_json()
+            .map_err(pubsub_error)?
+            .len(),
+    )
+    .unwrap_or(u64::MAX);
+    let event_id = verified.as_event().id.to_hex();
     events.insert(
-        event.id.to_hex(),
+        event_id,
         EventMetadata {
             class,
             legitimate,
             spam_identity,
             publisher,
-            event,
             verified,
             payload_bytes,
             publish_at_ms,

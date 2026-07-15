@@ -10,6 +10,7 @@ export interface InvWantMeshRetainedState {
   seenInventories: number;
   deliveredEvents: number;
   upstreamRoutes: number;
+  transportDisruptedRoutePeers: number;
   pendingEvents: number;
   pendingPeers: number;
   forwardedWants: number;

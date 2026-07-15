@@ -38,6 +38,7 @@ export type InvWantAction =
 export interface UpstreamRoute {
   peerId: string;
   alternatePeerIds: Set<string>;
+  transportDisruptedPeerIds: Set<string>;
   eventKind: number;
   payloadBytes: number;
   hopLimit: number;

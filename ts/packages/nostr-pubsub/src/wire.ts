@@ -2,6 +2,7 @@ import type { NostrEvent, NostrFilter, NostrVerifiedEvent, SourceId } from './ty
 import { PubsubError, verifyNostrEvent } from './types.js';
 import {
   PubsubPeerSubscriptionStore,
+  type PubsubPeerSubscription,
   type PubsubSubscriptionUpdate,
 } from './subscription.js';
 
@@ -60,6 +61,11 @@ export class FipsPubsubWireAdapter {
     readonly codec = new FipsPubsubWireCodec(),
     readonly subscriptions = new PubsubPeerSubscriptionStore(),
   ) {}
+
+  /** Drop subscriptions retained for a transport peer that disconnected. */
+  disconnectPeer(peerId: SourceId): PubsubPeerSubscription[] {
+    return this.subscriptions.removePeer(peerId);
+  }
 
   decodeInbound(peerId: SourceId, frame: Uint8Array): FipsPubsubInbound {
     return this.applyInbound(peerId, this.codec.decodeFrame(frame));

@@ -61,7 +61,6 @@ async fn verified_pubsub_event_ingests_through_neutral_fips_api() {
     config.node.discovery.nostr.peerfinding_source = NostrPeerfindingSource::External;
     config.node.discovery.nostr.advertise = false;
     config.node.discovery.nostr.advert_relays.clear();
-    config.node.discovery.nostr.dm_relays.clear();
     config.node.discovery.nostr.app = "fips-test".to_string();
     let endpoint = Box::pin(
         FipsEndpoint::builder()
@@ -710,7 +709,6 @@ fn peerfinding_endpoint_config(
     config.node.discovery.nostr.advertise = true;
     config.node.discovery.nostr.peerfinding_source = NostrPeerfindingSource::External;
     config.node.discovery.nostr.advert_relays.clear();
-    config.node.discovery.nostr.dm_relays.clear();
     config.node.discovery.nostr.app = "fips-pubsub-peerfinding-test".to_string();
     config.transports.tcp = TransportInstances::Single(TcpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),

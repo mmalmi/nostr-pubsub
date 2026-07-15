@@ -41,15 +41,14 @@ fn peer_mesh_connects_cohorts_and_bounds_symmetric_edges() {
 }
 
 #[test]
-fn hybrid_bootstrap_builds_bounded_high_degree_honest_supernodes() {
+fn hybrid_bootstrap_selects_generic_endpoints_with_hidden_capacity_ground_truth() {
     let mut config = hybrid_config(120, 20, 6, 3, 99);
     config.hybrid.discovery = SupernodeDiscoveryStrategy::Bootstrap;
     config.hybrid.candidate_links_per_peer = 3;
     let topology = build_topology(&config).expect("hybrid bootstrap");
     assert_valid_edges(&topology, &config);
     assert_eq!(topology.honest_supernodes.len(), 6);
-    assert_eq!(topology.false_supernode_candidates.len(), 3);
-    assert_eq!(topology.discovery_selections.false_supernode_links, 0);
+    assert_eq!(topology.adversarial_discovery_candidates.len(), 3);
     assert_eq!(
         topology.discovery_selections.bootstrap_links,
         (config.node_count - config.attacker_count - 6) * 3
@@ -60,26 +59,15 @@ fn hybrid_bootstrap_builds_bounded_high_degree_honest_supernodes() {
             .iter()
             .all(|node| topology.roles[*node] == NodeRole::Supernode)
     );
-
-    let minimum_supernode_degree = topology
-        .honest_supernodes
-        .iter()
-        .map(|node| topology.neighbors[*node].len())
-        .min()
-        .unwrap_or_default();
-    let maximum_peer_degree = topology
-        .roles
-        .iter()
-        .enumerate()
-        .filter(|(_, role)| **role == NodeRole::Peer)
-        .map(|(node, _)| topology.neighbors[node].len())
-        .max()
-        .unwrap_or_default();
-    assert!(minimum_supernode_degree > maximum_peer_degree);
+    assert!(topology.discovery_selections.selected_high_capacity_links > 0);
+    assert!(
+        topology.discovery_selections.selected_high_capacity_links
+            < topology.discovery_selections.total_links()
+    );
 }
 
 #[test]
-fn mixed_discovery_guarantees_honest_bootstrap_and_exposes_fake_candidates() {
+fn mixed_discovery_is_role_blind_and_exposes_adversarial_candidates() {
     let mut config = hybrid_config(30, 5, 1, 4, 2026);
     config.hybrid.discovery = SupernodeDiscoveryStrategy::Mixed;
     config.hybrid.candidate_links_per_peer = 2;
@@ -97,44 +85,32 @@ fn mixed_discovery_guarantees_honest_bootstrap_and_exposes_fake_candidates() {
         topology.discovery_selections.exploration_links,
         normal_peer_count
     );
-    assert_eq!(
-        topology.discovery_selections.honest_supernode_links,
-        normal_peer_count
-    );
-    assert_eq!(
-        topology.discovery_selections.false_supernode_links,
-        normal_peer_count
+    assert!(topology.discovery_selections.selected_high_capacity_links > 0);
+    assert!(
+        topology
+            .discovery_selections
+            .selected_adversarial_candidate_links
+            > 0
     );
     assert_eq!(
         topology.discovery_selections.candidate_peer_count,
         normal_peer_count
     );
-    assert_eq!(
-        topology.discovery_selections.peers_with_honest_supernode,
-        normal_peer_count
-    );
-    assert_eq!(
-        topology.discovery_selections.honest_coverage_basis_points(),
-        10_000
+    assert!(
+        topology
+            .discovery_selections
+            .high_capacity_selection_coverage_basis_points()
+            < 10_000
     );
     assert_eq!(
         topology.discovery_selections.total_links(),
-        normal_peer_candidate_edges(&topology)
+        normal_peer_count * config.hybrid.candidate_links_per_peer
     );
-    for (node, role) in topology.roles.iter().enumerate() {
-        if *role == NodeRole::Peer {
-            assert!(
-                topology.neighbors[node]
-                    .iter()
-                    .any(|neighbor| topology.roles[*neighbor] == NodeRole::Supernode)
-            );
-        }
-    }
     assert_valid_edges(&topology, &config);
 }
 
 #[test]
-fn untrusted_exploration_reduces_honest_supernode_coverage() {
+fn untrusted_exploration_reports_high_capacity_selection_after_the_fact() {
     let mut config = hybrid_config(40, 4, 1, 4, 17);
     config.hybrid.discovery = SupernodeDiscoveryStrategy::Exploration;
     config.hybrid.candidate_links_per_peer = 1;
@@ -142,14 +118,76 @@ fn untrusted_exploration_reduces_honest_supernode_coverage() {
 
     let topology = build_topology(&config).expect("untrusted exploration");
     assert_eq!(topology.discovery_selections.candidate_peer_count, 35);
-    assert!(topology.discovery_selections.peers_with_honest_supernode > 0);
-    assert!(topology.discovery_selections.honest_coverage_basis_points() < 10_000);
-    assert!(topology.discovery_selections.false_supernode_links > 0);
+    assert!(topology.discovery_selections.peers_selecting_high_capacity > 0);
+    assert!(
+        topology
+            .discovery_selections
+            .high_capacity_selection_coverage_basis_points()
+            < 10_000
+    );
+    assert!(
+        topology
+            .discovery_selections
+            .selected_adversarial_candidate_links
+            > 0
+    );
     assert_eq!(
         topology.discovery_selections.total_links(),
-        normal_peer_candidate_edges(&topology)
+        topology.discovery_selections.candidate_peer_count
     );
     assert_valid_edges(&topology, &config);
+}
+
+#[test]
+fn discovery_selection_does_not_require_hidden_supernode_roles() {
+    for discovery in [
+        SupernodeDiscoveryStrategy::Bootstrap,
+        SupernodeDiscoveryStrategy::InterestAffinity,
+        SupernodeDiscoveryStrategy::Exploration,
+        SupernodeDiscoveryStrategy::Mixed,
+    ] {
+        let mut config = hybrid_config(80, 8, 0, 4, 73);
+        config.hybrid.discovery = discovery;
+        config.hybrid.candidate_links_per_peer = 3;
+        config.hybrid.exploration_links_per_peer = 1;
+        let topology = build_topology(&config)
+            .unwrap_or_else(|error| panic!("{discovery:?} used hidden roles: {error}"));
+
+        assert!(topology.honest_supernodes.is_empty());
+        assert_eq!(
+            topology.discovery_selections.selected_high_capacity_links,
+            0
+        );
+        assert_eq!(
+            topology.discovery_selections.peers_selecting_high_capacity,
+            0
+        );
+        assert!(topology.discovery_selections.total_links() > 0);
+        assert_valid_edges(&topology, &config);
+    }
+}
+
+#[test]
+fn connection_acceptance_does_not_classify_endpoint_capacity() {
+    let roles = vec![
+        NodeRole::Peer,
+        NodeRole::Peer,
+        NodeRole::Supernode,
+        NodeRole::Peer,
+    ];
+    let mut graph = BoundedGraph::new(
+        roles,
+        DegreeCaps {
+            peer: 4,
+            supernode: 16,
+            attacker: 8,
+        },
+    );
+
+    assert!(graph.add_discovered(0, 1));
+    assert!(graph.add_discovered(3, 2));
+    assert_eq!(graph.discovery_inbound[1], 1);
+    assert_eq!(graph.discovery_inbound[2], 1);
 }
 
 fn peer_mesh_config(
@@ -180,7 +218,7 @@ fn hybrid_config(
     node_count: usize,
     attacker_count: usize,
     honest_supernodes: usize,
-    false_supernodes: usize,
+    adversarial_discovery_candidates: usize,
     seed: u64,
 ) -> TopologyConfig {
     let mut config = TopologyConfig::new(
@@ -193,7 +231,7 @@ fn hybrid_config(
         TopologyStrategy::HybridSupernodes,
     );
     config.hybrid.honest_supernode_count = honest_supernodes;
-    config.hybrid.false_supernode_count = false_supernodes;
+    config.hybrid.adversarial_discovery_candidate_count = adversarial_discovery_candidates;
     config
 }
 
@@ -224,27 +262,6 @@ fn assert_valid_edges(topology: &TopologyResult, config: &TopologyConfig) {
         };
         assert!(neighbors.len() <= cap);
     }
-}
-
-fn normal_peer_candidate_edges(topology: &TopologyResult) -> usize {
-    let candidates = topology
-        .honest_supernodes
-        .iter()
-        .chain(&topology.false_supernode_candidates)
-        .copied()
-        .collect::<BTreeSet<_>>();
-    topology
-        .roles
-        .iter()
-        .enumerate()
-        .filter(|(_, role)| **role == NodeRole::Peer)
-        .map(|(peer, _)| {
-            topology.neighbors[peer]
-                .iter()
-                .filter(|candidate| candidates.contains(candidate))
-                .count()
-        })
-        .sum()
 }
 
 fn assert_induced_connected(topology: &TopologyResult, expected: &BTreeSet<usize>) {

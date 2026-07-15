@@ -393,6 +393,26 @@ fn fips_wire_adapter_applies_req_and_close_to_peer_subscriptions() {
 }
 
 #[test]
+fn fips_wire_adapter_disconnect_drops_all_peer_subscriptions() {
+    let vectors = load_vectors();
+    let request = vectors
+        .wire_cases
+        .iter()
+        .find(|test_case| matches!(test_case.message, WireMessageVector::Req { .. }))
+        .unwrap();
+    let peer_id = SourceId::new("disconnected-fips-peer");
+    let mut adapter = FipsPubsubWireAdapter::default();
+    adapter
+        .decode_inbound(peer_id.clone(), request.json.as_bytes())
+        .unwrap();
+
+    let removed = adapter.disconnect_peer(&peer_id);
+
+    assert_eq!(removed.len(), 1);
+    assert_eq!(adapter.subscriptions().peer_subscription_count(&peer_id), 0);
+}
+
+#[test]
 fn retention_policy_matches_typescript_vectors() {
     let vectors = load_vectors();
     for test_case in &vectors.retention_cases {

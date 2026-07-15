@@ -39,6 +39,12 @@ bounds. `retainedState()` reports raw cache bytes and state counts, while
 `maintain()` and `peerBehaviorObservation()` expose the same maintenance and
 evidence semantics as Rust.
 
+If a local transport confirms that the stream or link carrying one active
+request failed, `recordTransportDisruption()` marks only that peer/event
+attempt so expiry does not falsely blame the provider. Do not derive this
+signal from peer-supplied data. Its bounded mark clears on completion, expiry,
+or a new `WANT` attempt to that peer.
+
 `publishVerified()`, `replayVerifiedToPeer()`, and `receiveVerifiedFrame()`
 avoid a repeated signature check only for immutable events returned by
 `verifyNostrEvent()`. Use `publish()`, `replayToPeer()`, or `receive()` for

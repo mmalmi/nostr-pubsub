@@ -11,8 +11,9 @@ pub use incentive_gates::{
     MAX_RECOMMENDED_PAYMENT_OVERHEAD_BASIS_POINTS, MIN_RECOMMENDED_SETTLEMENT_BASIS_POINTS,
 };
 pub use incentives::{
-    IncentiveConfig, IncentiveError, IncentiveReport, IncentiveStrategy, MintDiscoveryScope,
-    compare_incentive_strategies, plan_incentive_strategy,
+    IncentiveConfig, IncentiveError, IncentiveReport, IncentiveStrategy, IncentiveUseCase,
+    MintDiscoveryScope, compare_incentive_strategies, plan_incentive_strategy,
+    recommend_incentive_strategy,
 };
 pub use metrics::{
     DistributionSummary, LatencySummary, LoadSummary, NodeTrafficLedger, TrafficCounter,

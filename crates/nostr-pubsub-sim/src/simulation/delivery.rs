@@ -95,7 +95,11 @@ impl Simulation {
             )
             .then_some((metadata.payload_bytes, interested))
         });
-        self.retain_local_event(receiver, event_id.clone(), event.clone())?;
+        if !self.nodes[receiver].local_events.contains_key(&event_id) {
+            return Err(SimulationError::Pubsub(format!(
+                "delivered event {event_id} was not retained as verified"
+            )));
+        }
         if self.reputation_events.contains_key(&event_id) {
             self.finish_delivery_retries(receiver, &event_id);
             return self.receive_reputation_event(receiver, event);

@@ -20,6 +20,7 @@ pub struct InvWantMeshRetainedState {
     pub seen_inventories: usize,
     pub delivered_events: usize,
     pub upstream_routes: usize,
+    pub transport_disrupted_route_peers: usize,
     pub pending_events: usize,
     pub pending_peers: usize,
     pub forwarded_wants: usize,
@@ -35,6 +36,11 @@ impl InvWantMesh {
             seen_inventories: self.seen_inventories.len(),
             delivered_events: self.delivered_events.len(),
             upstream_routes: self.upstream_routes.len(),
+            transport_disrupted_route_peers: self
+                .upstream_routes
+                .values()
+                .map(|route| route.transport_disrupted_peers.len())
+                .sum(),
             pending_events: self.pending_downstream.len(),
             pending_peers: self.pending_peer_count,
             forwarded_wants: self.want_forwarded.len(),

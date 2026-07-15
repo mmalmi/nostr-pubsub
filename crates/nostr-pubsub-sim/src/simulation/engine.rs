@@ -23,58 +23,75 @@ impl Simulation {
                 .filter(|source| *source < self.config.attacker_count)
                 .collect::<Vec<_>>();
             for source in attackers {
-                if is_fresh_sybil(source) {
-                    continue;
-                }
-                if !is_quiet_attacker(source) {
-                    for sample in 0..MALFORMED_TRAINING_SAMPLES {
-                        self.enqueue_raw_packet_at(
-                            source,
-                            destination,
-                            phase_start_ms
-                                .saturating_add(1)
-                                .saturating_add(u64::try_from(sample).unwrap_or(0)),
-                            br#"{"protocol":"wrong","version":1,"message":{}}"#.to_vec(),
-                        );
-                    }
-                    for sample in 0..2 {
-                        self.enqueue_raw_packet_at(
-                            source,
-                            destination,
-                            phase_start_ms
-                                .saturating_add(REPUTATION_SWEEP_MS)
-                                .saturating_add(3)
-                                .saturating_add(u64::try_from(sample).unwrap_or(0)),
-                            br#"{"protocol":"wrong","version":1,"message":{}}"#.to_vec(),
-                        );
-                    }
-                }
-                let inventory_count = self.config.fake_inventories_per_attack_link;
-                for sequence in 0..inventory_count {
-                    let event_id = format!(
-                        "{:064x}",
-                        mix64(
-                            self.config.seed
-                                ^ u64::try_from(source).unwrap_or(u64::MAX)
-                                ^ u64::try_from(destination)
-                                    .unwrap_or(u64::MAX)
-                                    .rotate_left(17)
-                                ^ u64::try_from(sequence).unwrap_or(u64::MAX).rotate_left(31),
-                        )
-                    );
-                    let message = InvWantWireMessage::Inventory {
-                        event_id,
-                        event_kind: 37_195,
-                        payload_bytes: 512,
-                        hop_limit: self.config.max_hops.min(3),
-                    };
-                    self.enqueue_message_at(source, destination, &message, 7)?;
-                    self.report.injected_attack_inventories =
-                        self.report.injected_attack_inventories.saturating_add(1);
-                }
+                self.schedule_attack_link_pressure(source, destination, phase_start_ms)?;
             }
         }
         self.schedule_unauthorized_source_probes()?;
+        Ok(())
+    }
+
+    /// Make a simulated adversarial endpoint apply the same pressure to a
+    /// newly accepted connection. This is scenario behavior, never routing
+    /// input; fresh Sybils intentionally remain an untrained control.
+    pub(in crate::simulation) fn schedule_attack_link_pressure(
+        &mut self,
+        source: usize,
+        destination: usize,
+        phase_start_ms: u64,
+    ) -> Result<()> {
+        if is_fresh_sybil(source) {
+            return Ok(());
+        }
+        if !is_quiet_attacker(source) {
+            for sample in 0..MALFORMED_TRAINING_SAMPLES {
+                self.enqueue_raw_packet_at(
+                    source,
+                    destination,
+                    phase_start_ms
+                        .saturating_add(1)
+                        .saturating_add(u64::try_from(sample).unwrap_or(0)),
+                    br#"{"protocol":"wrong","version":1,"message":{}}"#.to_vec(),
+                );
+            }
+            for sample in 0..2 {
+                self.enqueue_raw_packet_at(
+                    source,
+                    destination,
+                    phase_start_ms
+                        .saturating_add(REPUTATION_SWEEP_MS)
+                        .saturating_add(3)
+                        .saturating_add(u64::try_from(sample).unwrap_or(0)),
+                    br#"{"protocol":"wrong","version":1,"message":{}}"#.to_vec(),
+                );
+            }
+        }
+        for sequence in 0..self.config.fake_inventories_per_attack_link {
+            let event_id = format!(
+                "{:064x}",
+                mix64(
+                    self.config.seed
+                        ^ u64::try_from(source).unwrap_or(u64::MAX)
+                        ^ u64::try_from(destination)
+                            .unwrap_or(u64::MAX)
+                            .rotate_left(17)
+                        ^ u64::try_from(sequence).unwrap_or(u64::MAX).rotate_left(31)
+                        ^ phase_start_ms.rotate_left(47),
+                )
+            );
+            self.enqueue_message_at(
+                source,
+                destination,
+                &InvWantWireMessage::Inventory {
+                    event_id,
+                    event_kind: 37_195,
+                    payload_bytes: 512,
+                    hop_limit: self.config.max_hops.min(3),
+                },
+                7,
+            )?;
+            self.report.injected_attack_inventories =
+                self.report.injected_attack_inventories.saturating_add(1);
+        }
         Ok(())
     }
 
@@ -213,13 +230,16 @@ impl Simulation {
                 } => self.retry_inventory(source, destination, &event_id)?,
                 ScheduledAction::AdvanceVirtualTime => {}
                 ScheduledAction::ReputationSweep => self.run_reputation_sweep()?,
+                ScheduledAction::RediscoverySweep => self.run_rediscovery_sweep()?,
                 ScheduledAction::LinkDown(outage) => {
                     self.begin_link_outage(outage);
                 }
                 ScheduledAction::LinkUp(outage) => {
                     if self.end_link_outage(outage) {
                         let (left, right) = outage.endpoints();
-                        self.restore_link(left, right)?;
+                        if self.topology.neighbors[left].contains(&right) {
+                            self.restore_link(left, right, SubscriptionPurpose::Reconnect)?;
+                        }
                     }
                 }
             }
@@ -229,14 +249,19 @@ impl Simulation {
         Ok(())
     }
 
-    fn restore_link(&mut self, left: usize, right: usize) -> Result<()> {
+    pub(in crate::simulation) fn restore_link(
+        &mut self,
+        left: usize,
+        right: usize,
+        purpose: SubscriptionPurpose,
+    ) -> Result<()> {
         for (provider, subscriber) in [(left, right), (right, left)] {
             let filters = self.subscription_filters_for(subscriber);
             self.schedule_subscription_message(
                 subscriber,
                 provider,
                 &FipsPubsubWireMessage::req(profile_subscription_id(subscriber), filters),
-                SubscriptionPurpose::Reconnect,
+                purpose,
                 TrafficProvenance::Legitimate,
             )?;
         }
@@ -253,12 +278,8 @@ impl Simulation {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        events.sort_by_key(|event| event.id);
-        for event in events {
-            self.record_cpu_work(source, |work| {
-                work.signature_checks = work.signature_checks.saturating_add(1);
-            });
-            let verified = VerifiedEvent::try_from(event.clone()).map_err(pubsub_error)?;
+        events.sort_by_key(|event| event.as_event().id);
+        for verified in events {
             let is_rating = self.is_rating_event(source, &verified);
             if !self.subscription_announces(source, destination, &verified, is_rating)
                 || self.candidate_peer(source, destination)?.is_none()
@@ -290,7 +311,7 @@ impl Simulation {
         self.retain_local_event(
             metadata.publisher,
             event_id.to_string(),
-            metadata.event.clone(),
+            metadata.verified.clone(),
         )?;
         if metadata.legitimate && metadata.interested.contains(&metadata.publisher) {
             self.report.local_legitimate_deliveries =
@@ -312,14 +333,12 @@ impl Simulation {
     }
 
     fn retry_inventory(&mut self, source: usize, destination: usize, event_id: &str) -> Result<()> {
-        if self.nodes[destination].local_events.contains_key(event_id)
-            || self.nodes[destination].rejected_events.contains(event_id)
-        {
+        if self.nodes[destination].local_events.contains_key(event_id) {
             self.retry_counts
                 .remove(&(source, destination, event_id.to_string()));
             return Ok(());
         }
-        let Some(event) = self.nodes[source].local_events.get(event_id).cloned() else {
+        let Some(verified) = self.nodes[source].local_events.get(event_id).cloned() else {
             self.retry_counts
                 .remove(&(source, destination, event_id.to_string()));
             return Ok(());
@@ -336,10 +355,8 @@ impl Simulation {
         state.attempts = state.attempts.saturating_add(1);
         self.report.retry_inventories = self.report.retry_inventories.saturating_add(1);
         self.record_cpu_work(source, |work| {
-            work.signature_checks = work.signature_checks.saturating_add(1);
             work.avoided_signature_checks = work.avoided_signature_checks.saturating_add(1);
         });
-        let verified = VerifiedEvent::try_from(event).map_err(pubsub_error)?;
         let actions = self.nodes[source]
             .mesh
             .replay_verified_to_peer(
@@ -361,11 +378,6 @@ impl Simulation {
         } = packet;
         let bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
         self.remove_queued_resource_bytes(destination, bytes);
-        if !self.topology.neighbors[destination].contains(&source) {
-            self.report.unauthorized_source_drops =
-                self.report.unauthorized_source_drops.saturating_add(1);
-            return Ok(());
-        }
         if !self.link_is_active(source, destination) {
             self.report.dropped_packets = self.report.dropped_packets.saturating_add(1);
             self.note_disrupted_payload(source, destination, &payload);
@@ -380,6 +392,11 @@ impl Simulation {
             provenance,
             bytes,
         );
+        if !self.topology.neighbors[destination].contains(&source) {
+            self.report.unauthorized_source_drops =
+                self.report.unauthorized_source_drops.saturating_add(1);
+            return Ok(());
+        }
         if self.topology.roles[destination] == NodeRole::Attacker {
             return self.process_attacker_packet(source, destination, &payload);
         }
@@ -429,14 +446,13 @@ impl Simulation {
                 };
                 if let Some(drop) = self.admit_event(destination, source, &verified)? {
                     let event_id = event.id.to_hex();
+                    let author = self.peer_index(&event.pubkey.to_hex())?;
                     self.nodes[destination]
                         .mesh
                         .dismiss_frame(&self.peer_ids[source], &event_id);
                     self.observe_core_resource_state(destination);
-                    self.nodes[destination]
-                        .rejected_events
-                        .insert(event_id.clone());
-                    self.record_policy_drop(&event_id, drop);
+                    self.cancel_delivery_retries(destination, &event_id);
+                    self.record_policy_drop(destination, author, &event_id, drop);
                     return Ok(());
                 }
                 let peers = self.interested_mesh_peers(destination, &verified)?;
@@ -451,6 +467,7 @@ impl Simulation {
                 .mesh_candidates
                 .saturating_add(u64::try_from(peers.len()).unwrap_or(u64::MAX));
         });
+        let verified_for_cache = verified_frame.as_ref().map(|(_, event)| event.clone());
         let result = if let Some((event_id, verified)) = verified_frame {
             self.record_avoided_signature_check(destination);
             self.nodes[destination].mesh.receive_verified_frame(
@@ -473,6 +490,10 @@ impl Simulation {
             self.record_mesh_rejection(destination, source);
             return Ok(());
         };
+        if let Some(verified) = verified_for_cache {
+            let event_id = verified.as_event().id.to_hex();
+            self.retain_local_event(destination, event_id, verified)?;
+        }
         self.dispatch_actions(destination, actions)
     }
 
@@ -571,6 +592,19 @@ impl Simulation {
             bytes,
         );
         self.report.data_plane_wire_bytes = self.report.data_plane_wire_bytes.saturating_add(bytes);
+        if self
+            .reputation_events
+            .contains_key(super::wire_event_id(message))
+        {
+            self.report.machine_rating_protocol_messages = self
+                .report
+                .machine_rating_protocol_messages
+                .saturating_add(1);
+            self.report.machine_rating_protocol_bytes = self
+                .report
+                .machine_rating_protocol_bytes
+                .saturating_add(bytes);
+        }
         match message {
             InvWantWireMessage::Inventory { .. } => {
                 self.report.inventory_messages = self.report.inventory_messages.saturating_add(1);
@@ -600,7 +634,7 @@ impl Simulation {
         Ok(())
     }
 
-    fn enqueue_raw_packet_at(
+    pub(in crate::simulation) fn enqueue_raw_packet_at(
         &mut self,
         source: usize,
         destination: usize,

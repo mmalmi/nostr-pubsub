@@ -295,6 +295,7 @@ describe('bounded inv/want mesh', () => {
       seenInventories: 1,
       deliveredEvents: 0,
       upstreamRoutes: 1,
+      transportDisruptedRoutePeers: 0,
       pendingEvents: 1,
       pendingPeers: 2,
       forwardedWants: 1,

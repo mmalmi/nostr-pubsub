@@ -10,6 +10,9 @@ mod service_accounting;
 use service_accounting::assert_service_accounting_is_populated;
 #[path = "release_gate/delivery_trails.rs"]
 mod delivery_trails;
+#[path = "release_gate/machine_reputation.rs"]
+mod machine_reputation;
+use machine_reputation::assert_machine_reputation_used_real_transport;
 
 const RELEASE_SEEDS: [u64; 3] = [
     0x4e4f_5354_5250_5542,
@@ -24,6 +27,9 @@ const MIN_PEER_MESH_SPAM_SUPPRESSION_BPS: u32 = 5_000;
 const MIN_HYBRID_SPAM_SUPPRESSION_BPS: u32 = 5_000;
 const MIN_PERSISTENT_MACHINE_SPAM_SUPPRESSION_BPS: u32 = 5_000;
 const MIN_VERIFIED_PATH_SIGNATURE_REDUCTION_BPS: u32 = 2_000;
+const MAX_REDISCOVERY_SWEEPS: usize = 16;
+const MAX_REDISCOVERY_CANDIDATE_ATTEMPTS_PER_SWEEP: usize = 64;
+const MAX_REDISCOVERY_REPLACEMENTS_PER_SWEEP: usize = 2;
 const SPAM_IDENTITIES: [&str; 2] = ["persistent", "fresh-sybil"];
 const SUBSCRIPTION_CLASSES: [&str; 8] = [
     "author-feed",
@@ -80,7 +86,10 @@ fn production_like_thousand_node_adversarial_matrix() {
                     reports.shared.machine_quiet_blackhole_removals > 0,
                 ));
             if topology == TopologyStrategy::HybridSupernodes {
-                assert_supernode_discovery_and_service(&reports, &case);
+                assert_hybrid_capacity_ground_truth_and_service(&reports, &case);
+                for report in reports.all() {
+                    assert_runtime_rediscovery_is_bounded(report, &case);
+                }
             }
         }
     }
@@ -91,8 +100,8 @@ fn production_like_thousand_node_adversarial_matrix() {
 }
 
 #[test]
-#[ignore = "production-scale supernode discovery comparison"]
-fn thousand_node_supernode_discovery_strategy_matrix() {
+#[ignore = "production-scale role-blind endpoint selection comparison"]
+fn thousand_node_role_blind_discovery_strategy_matrix() {
     let mut outcomes = BTreeSet::new();
     for discovery in [
         SupernodeDiscoveryStrategy::Bootstrap,
@@ -109,22 +118,17 @@ fn thousand_node_supernode_discovery_strategy_matrix() {
         assert_service_accounting_is_populated(&report, &case);
         assert_honest_resource_accounting(&report, &case);
         assert_supernode_report(&report, &case);
+        assert_runtime_rediscovery_is_bounded(&report, &case);
         outcomes.insert((
-            report.honest_supernode_links,
-            report.false_supernode_links,
-            report.false_only_supernode_peers,
+            report.selected_high_capacity_links,
+            report.selected_adversarial_candidate_links,
+            report.peers_without_high_capacity_selection,
         ));
-        if discovery == SupernodeDiscoveryStrategy::Bootstrap {
-            assert_eq!(report.false_supernode_links, 0, "{case}");
-            assert_eq!(report.false_only_supernode_peers, 0, "{case}");
-        }
-        if discovery == SupernodeDiscoveryStrategy::Exploration {
-            assert!(report.false_supernode_links > 0, "{case}");
-            assert!(
-                report.honest_supernode_coverage_basis_points < 10_000,
-                "{case}"
-            );
-        }
+        assert!(report.selected_adversarial_candidate_links > 0, "{case}");
+        assert!(
+            report.high_capacity_selection_coverage_basis_points < 10_000,
+            "{case}"
+        );
     }
     assert!(
         outcomes.len() >= 3,
@@ -168,6 +172,10 @@ fn protocol_state_is_bounded_after_tenfold_spam() {
         "fixed unauthorized probes make total injected inventories slightly less than 10x: {context}"
     );
     assert_legitimate_delivery_is_safe(&stressed, "tenfold-retained-state");
+    assert!(
+        stressed.adversarial_author_legitimate_reference_policy_drops > 0,
+        "the post-service defector's valid historical frames must exercise author-based policy-drop accounting: {context}"
+    );
     for report in [&baseline, &stressed] {
         let resources = report.resource_usage;
         assert!(resources.quiescence_at_ms >= report.virtual_duration_ms);
@@ -208,7 +216,7 @@ fn retained_state_stress_config(multiplier: usize) -> SimulationConfig {
         loss_basis_points: 0,
         churn_basis_points: 0,
         supernode_count: 4,
-        false_supernode_count: 2,
+        adversarial_discovery_candidate_count: 2,
         ..SimulationConfig::default()
     }
 }
@@ -236,7 +244,7 @@ fn release_config(seed: u64, topology: TopologyStrategy) -> SimulationConfig {
         topology,
         supernode_discovery: SupernodeDiscoveryStrategy::Mixed,
         supernode_count: 16,
-        false_supernode_count: 8,
+        adversarial_discovery_candidate_count: 8,
         supernode_links_per_peer: 3,
         supernode_fanout: 192,
         loss_basis_points: 200,
@@ -598,7 +606,10 @@ fn assert_legitimate_delivery_is_safe(report: &SimulationReport, case: &str) {
     assert_eq!(report.uninterested_deliveries, 0, "{context}");
     assert_eq!(report.uninterested_legitimate_deliveries, 0, "{context}");
     assert_eq!(report.uninterested_spam_deliveries, 0, "{context}");
-    assert_eq!(report.legitimate_policy_drops, 0, "{context}");
+    assert_eq!(
+        report.legitimate_policy_drops, report.adversarial_author_legitimate_reference_policy_drops,
+        "every legitimate policy drop must be authored by the explicit post-service defector: {context}"
+    );
     assert_eq!(report.legitimate_application_policy_drops, 0, "{context}");
     assert!(
         report.machine_ingress_accounting_is_conserved(),
@@ -709,44 +720,6 @@ fn assert_machine_identity_learning_and_fresh_control(
     }
 }
 
-fn assert_machine_reputation_used_real_transport(report: &SimulationReport, case: &str) {
-    let context = report_context(report, case);
-    assert!(report.machine_ratings_published > 0, "{context}");
-    assert!(report.machine_ratings_received > 0, "{context}");
-    assert!(report.machine_ratings_ingested > 0, "{context}");
-    assert!(report.poisoned_machine_ratings_published > 0, "{context}");
-    assert!(report.poisoned_machine_ratings_received > 0, "{context}");
-    assert!(report.poisoned_machine_ratings_ingested > 0, "{context}");
-    assert!(
-        report.poisoned_machine_ratings_received >= report.poisoned_machine_ratings_ingested,
-        "{context}"
-    );
-    assert!(report.forged_machine_ratings_published > 0, "{context}");
-    assert!(report.forged_machine_ratings_received > 0, "{context}");
-    assert!(report.forged_machine_ratings_evaluated > 0, "{context}");
-    assert_eq!(report.forged_machine_ratings_ingested, 0, "{context}");
-    assert_eq!(
-        report.forged_machine_ratings_rejected, report.forged_machine_ratings_evaluated,
-        "{context}"
-    );
-    assert!(report.machine_transported_transitions > 0, "{context}");
-    assert!(
-        report.machine_transported_positive_admissions > 0,
-        "{context}"
-    );
-    assert!(report.machine_transported_removals > 0, "{context}");
-    assert_eq!(report.machine_lifecycle_ratings_published, 3, "{context}");
-    assert!(report.machine_lifecycle_admissions > 0, "{context}");
-    assert!(report.machine_lifecycle_removals > 0, "{context}");
-    assert!(report.machine_lifecycle_readmissions > 0, "{context}");
-    assert!(report.machine_reversible_lifecycles > 0, "{context}");
-    assert!(report.machine_positive_admissions > 0, "{context}");
-    assert!(report.machine_removals > 0, "{context}");
-    assert!(report.machine_poisoning_removals > 0, "{context}");
-    assert!(report.machine_removal_latency_p95_ms > 0, "{context}");
-    assert!(report.machine_trust_edges > 0, "{context}");
-}
-
 fn assert_honest_resource_accounting(report: &SimulationReport, case: &str) {
     let context = report_context(report, case);
     let resources = report.resource_usage;
@@ -816,11 +789,11 @@ fn assert_honest_resource_accounting(report: &SimulationReport, case: &str) {
     }
 }
 
-fn assert_supernode_discovery_and_service(reports: &ModeReports, case: &str) {
+fn assert_hybrid_capacity_ground_truth_and_service(reports: &ModeReports, case: &str) {
     for report in reports.all() {
         assert_supernode_report(report, case);
         let context = report_context(report, case);
-        assert!(report.false_supernode_links > 0, "{context}");
+        assert!(report.selected_adversarial_candidate_links > 0, "{context}");
     }
 }
 
@@ -828,13 +801,13 @@ fn assert_supernode_report(report: &SimulationReport, case: &str) {
     let context = report_context(report, case);
     assert_eq!(report.supernode_count, 16, "{context}");
     assert!(report.discovery_links > 0, "{context}");
-    assert!(report.honest_supernode_links > 0, "{context}");
+    assert!(report.selected_high_capacity_links > 0, "{context}");
     assert!(
-        report.supernode_discovery_precision_basis_points > 0,
+        report.high_capacity_selection_precision_basis_points > 0,
         "{context}"
     );
     assert!(
-        report.honest_supernode_coverage_basis_points > 0,
+        report.high_capacity_selection_coverage_basis_points > 0,
         "{context}"
     );
     assert!(report.supernode_max_service_bytes > 0, "{context}");
@@ -844,16 +817,101 @@ fn assert_supernode_report(report: &SimulationReport, case: &str) {
         "{context}"
     );
     assert!(
-        report
-            .interested_delivery_credit_by_source_role
-            .get(&NodeRole::Supernode)
-            .copied()
-            .unwrap_or(0)
-            > 0,
-        "{context}"
+        report.supernode_third_party_interested_delivery_credits > 0,
+        "hidden-role supernodes must final-hop an interested delivery for another publisher: {context}"
+    );
+    assert!(
+        report.supernode_third_party_interested_delivery_bytes > 0,
+        "third-party supernode service must carry useful payload bytes: {context}"
     );
     assert!(
         role_service_bytes(report, NodeRole::Supernode) > 0,
+        "{context}"
+    );
+}
+
+fn assert_runtime_rediscovery_is_bounded(report: &SimulationReport, case: &str) {
+    let context = report_context(report, case);
+    let client_count = report
+        .honest_node_count
+        .saturating_sub(report.supernode_count);
+    assert!(
+        (4..=MAX_REDISCOVERY_SWEEPS).contains(&report.rediscovery_sweeps),
+        "{context}"
+    );
+    assert!(report.rediscovery_links_removed > 0, "{context}");
+    assert!(report.rediscovery_links_added > 0, "{context}");
+    assert!(
+        report.rediscovery_adversarial_links_removed > 0,
+        "configured decoy endpoints were not rejected from observed behavior: {context}"
+    );
+    if report.mode == PeerSelectionMode::SharedReputation {
+        assert!(
+            report.rediscovery_subscription_refresh_nodes > 0,
+            "{context}"
+        );
+        assert!(
+            report.rediscovery_subscription_refresh_targets > 0,
+            "{context}"
+        );
+        let peer_degree_cap = report
+            .config
+            .supernode_links_per_peer
+            .saturating_mul(4)
+            .saturating_add(4)
+            .max(8);
+        assert!(
+            report.rediscovery_subscription_refresh_nodes
+                <= client_count.saturating_mul(report.rediscovery_sweeps),
+            "{context}"
+        );
+        assert!(
+            report.rediscovery_subscription_refresh_targets
+                <= report
+                    .rediscovery_subscription_refresh_nodes
+                    .saturating_mul(peer_degree_cap),
+            "{context}"
+        );
+    } else {
+        assert_eq!(
+            report.rediscovery_subscription_refresh_nodes, 0,
+            "{context}"
+        );
+        assert_eq!(
+            report.rediscovery_subscription_refresh_targets, 0,
+            "{context}"
+        );
+    }
+    assert!(report.rediscovery_subscription_messages > 0, "{context}");
+    assert!(report.rediscovery_control_plane_wire_bytes > 0, "{context}");
+    assert!(
+        report.rediscovery_candidate_attempts
+            <= client_count
+                .saturating_mul(report.rediscovery_sweeps)
+                .saturating_mul(MAX_REDISCOVERY_CANDIDATE_ATTEMPTS_PER_SWEEP),
+        "{context}"
+    );
+    assert!(
+        report.rediscovery_state_entries
+            <= client_count.saturating_mul(
+                2 + report.config.supernode_links_per_peer
+                    + report.rediscovery_sweeps * MAX_REDISCOVERY_REPLACEMENTS_PER_SWEEP,
+            ),
+        "{context}"
+    );
+    assert!(
+        report.rediscovery_subscription_messages
+            <= report
+                .rediscovery_subscription_refresh_targets
+                .saturating_add(report.rediscovery_links_added.saturating_mul(2))
+                .saturating_mul(usize::from(report.config.max_retries) + 1),
+        "{context}"
+    );
+    assert!(
+        report.rediscovery_subscription_messages
+            >= report
+                .rediscovery_subscription_refresh_targets
+                .saturating_add(report.rediscovery_links_added.saturating_mul(2)),
         "{context}"
     );
 }
@@ -881,7 +939,7 @@ fn role_sent_legitimate_bytes(report: &SimulationReport, role: NodeRole) -> u64 
 
 fn report_context(report: &SimulationReport, case: &str) -> String {
     format!(
-        "{case} mode={} delivery={} worst={} spam={} suppression={} recovery={} processed={} honest_ingress_drops={} transported_transitions={} quiet_blackhole_removals={} poison_ingests={} poisoning_removals={} false_removals={}",
+        "{case} mode={} delivery={} worst={} spam={} suppression={} recovery={} processed={} honest_ingress_drops={} transported_transitions={} quiet_blackhole_removals={} poison_ingests={} poisoning_removals={} false_removals={} rediscovery={{sweeps:{} attempts:{} removed:{} decoys:{} added:{} state:{}}}",
         report.mode.as_str(),
         report.delivery_basis_points,
         report.worst_cohort_delivery_basis_points,
@@ -895,5 +953,11 @@ fn report_context(report: &SimulationReport, case: &str) -> String {
         report.poisoned_machine_ratings_ingested,
         report.machine_poisoning_removals,
         report.machine_false_positive_removals,
+        report.rediscovery_sweeps,
+        report.rediscovery_candidate_attempts,
+        report.rediscovery_links_removed,
+        report.rediscovery_adversarial_links_removed,
+        report.rediscovery_links_added,
+        report.rediscovery_state_entries,
     )
 }

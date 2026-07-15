@@ -84,6 +84,22 @@ impl Simulation {
         destination: usize,
         message: &InvWantWireMessage,
     ) {
+        let disrupted_route = match message {
+            InvWantWireMessage::Want { event_id } => Some((source, destination, event_id)),
+            InvWantWireMessage::Frame { event_id, .. } => Some((destination, source, event_id)),
+            InvWantWireMessage::Inventory { .. } => None,
+        };
+        if let Some((observer, provider, event_id)) = disrupted_route
+            && self.nodes[observer]
+                .mesh
+                .record_transport_disruption(&self.peer_ids[provider], event_id)
+        {
+            self.record_cpu_work(observer, |work| {
+                work.transport_disruption_updates =
+                    work.transport_disruption_updates.saturating_add(1);
+            });
+            self.observe_core_resource_state(observer);
+        }
         let (retry_source, retry_destination, event_id) =
             retry_inventory_route(source, destination, message);
         if self.nodes[retry_source].local_events.contains_key(event_id) {
@@ -117,6 +133,11 @@ impl Simulation {
     pub(super) fn finish_delivery_retries(&mut self, node: usize, event_id: &str) {
         self.retry_counts
             .retain(|(_, destination, candidate), _| *destination != node || candidate != event_id);
+    }
+
+    pub(super) fn cancel_delivery_retries(&mut self, node: usize, event_id: &str) {
+        self.finish_delivery_retries(node, event_id);
+        self.retry_needed.remove(&(node, event_id.to_string()));
     }
 
     pub(super) fn finish_inventory_retry(
@@ -157,8 +178,9 @@ fn disrupted_delivery_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulation::Packet;
+    use crate::metrics::{TrafficDirection, TrafficProvenance};
     use crate::simulation::hash_bytes;
+    use crate::simulation::{Packet, RetryState};
     use crate::{PeerSelectionMode, SimulationConfig, TopologyStrategy};
 
     fn config() -> SimulationConfig {
@@ -168,7 +190,7 @@ mod tests {
             loss_basis_points: 0,
             churn_basis_points: 0,
             supernode_count: 4,
-            false_supernode_count: 2,
+            adversarial_discovery_candidate_count: 2,
             ..SimulationConfig::default()
         }
     }
@@ -240,10 +262,11 @@ mod tests {
             .find(|metadata| metadata.legitimate)
             .unwrap()
             .clone();
-        let event_id = metadata.event.id.to_hex();
+        let event = metadata.verified.into_event();
+        let event_id = event.id.to_hex();
         let inventory = InvWantWireMessage::Inventory {
             event_id: event_id.clone(),
-            event_kind: u16::from(metadata.event.kind),
+            event_kind: u16::from(event.kind),
             payload_bytes: 512,
             hop_limit: 2,
         };
@@ -252,7 +275,7 @@ mod tests {
         };
         let frame = InvWantWireMessage::Frame {
             event_id: event_id.clone(),
-            event: Box::new(metadata.event),
+            event: Box::new(event),
         };
 
         simulation.enqueue_message_at(9, 10, &inventory, 1).unwrap();
@@ -286,6 +309,113 @@ mod tests {
     }
 
     #[test]
+    fn policy_rejection_cancels_only_bounded_retry_state() {
+        let mut simulation = Simulation::new(config(), PeerSelectionMode::Neutral).unwrap();
+        let event_id = "ad".repeat(32);
+        let destination = 10;
+        simulation
+            .retry_counts
+            .insert((9, destination, event_id.clone()), RetryState::default());
+        simulation
+            .retry_needed
+            .insert((destination, event_id.clone()));
+
+        simulation.cancel_delivery_retries(destination, &event_id);
+
+        assert!(simulation.retry_counts.is_empty());
+        assert!(!simulation.retry_needed.contains(&(destination, event_id)));
+    }
+
+    #[test]
+    fn unauthorized_data_is_charged_as_received_but_not_decoded() {
+        let mut simulation = Simulation::new(config(), PeerSelectionMode::Neutral).unwrap();
+        let source = 0;
+        let destination = (simulation.config.attacker_count..simulation.config.node_count)
+            .find(|candidate| !simulation.topology.neighbors[*candidate].contains(&source))
+            .unwrap();
+        let payload = simulation
+            .codec
+            .encode(&InvWantWireMessage::Inventory {
+                event_id: "ac".repeat(32),
+                event_kind: 1,
+                payload_bytes: 1,
+                hop_limit: 1,
+            })
+            .unwrap();
+
+        simulation
+            .process_packet(Packet {
+                source,
+                destination,
+                payload,
+            })
+            .unwrap();
+
+        assert_eq!(simulation.report.unauthorized_source_drops, 1);
+        assert_eq!(
+            simulation.traffic[destination]
+                .counter(TrafficDirection::Received, TrafficProvenance::Adversarial)
+                .messages,
+            1
+        );
+        assert_eq!(
+            simulation.node_resources[destination]
+                .work
+                .invwant_decode_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn transport_disruption_attribution_is_directional_and_event_deduped() {
+        let mut simulation = Simulation::new(config(), PeerSelectionMode::Neutral).unwrap();
+        let event_id = "ab".repeat(32);
+        simulation.nodes[10]
+            .mesh
+            .receive(
+                &simulation.peer_ids[9],
+                InvWantWireMessage::Inventory {
+                    event_id: event_id.clone(),
+                    event_kind: 1,
+                    payload_bytes: 1,
+                    hop_limit: 1,
+                },
+                &[],
+                0,
+            )
+            .unwrap();
+        let want = InvWantWireMessage::Want {
+            event_id: event_id.clone(),
+        };
+        simulation.note_disrupted_message(10, 9, &want);
+        simulation.note_disrupted_message(10, 9, &want);
+        simulation.note_disrupted_message(
+            9,
+            10,
+            &InvWantWireMessage::Inventory {
+                event_id,
+                event_kind: 1,
+                payload_bytes: 1,
+                hop_limit: 1,
+            },
+        );
+
+        assert_eq!(
+            simulation.nodes[10]
+                .mesh
+                .retained_state()
+                .transport_disrupted_route_peers,
+            1
+        );
+        assert_eq!(
+            simulation.node_resources[10]
+                .work
+                .transport_disruption_updates,
+            1
+        );
+    }
+
+    #[test]
     fn link_down_drop_marks_the_delivery_for_recovery() {
         let mut simulation = Simulation::new(config(), PeerSelectionMode::Neutral).unwrap();
         let metadata = simulation
@@ -296,10 +426,11 @@ mod tests {
             .clone();
         let source = metadata.publisher;
         let destination = simulation.topology.neighbors[source][0];
-        let event_id = metadata.event.id.to_hex();
+        let event = metadata.verified.into_event();
+        let event_id = event.id.to_hex();
         let message = InvWantWireMessage::Frame {
             event_id: event_id.clone(),
-            event: Box::new(metadata.event),
+            event: Box::new(event),
         };
         let payload = simulation.codec.encode(&message).unwrap();
         simulation.begin_link_outage(LinkOutage::new(
@@ -339,10 +470,10 @@ mod tests {
             .clone();
         let source = metadata.publisher;
         let destination = simulation.topology.neighbors[source][0];
-        let event_id = metadata.event.id.to_hex();
+        let event_id = metadata.verified.as_event().id.to_hex();
         simulation.nodes[source]
             .local_events
-            .insert(event_id.clone(), metadata.event);
+            .insert(event_id.clone(), metadata.verified);
         simulation.begin_link_outage(LinkOutage::new(
             source,
             destination,
@@ -374,7 +505,7 @@ mod tests {
                     .map(|destination| {
                         (
                             event_id.clone(),
-                            metadata.event.clone(),
+                            metadata.verified.clone(),
                             metadata.publisher,
                             destination,
                         )
@@ -403,8 +534,10 @@ mod tests {
         simulation
             .scheduler
             .schedule_at(10, ScheduledAction::LinkUp(stochastic));
+        let work_before = simulation.node_resources[source].work;
 
         simulation.drain_scheduler().unwrap();
+        let work_after = simulation.node_resources[source].work;
 
         assert!(
             simulation
@@ -412,5 +545,7 @@ mod tests {
                 .contains_key(&(destination, event_id))
         );
         assert!(simulation.link_is_active(source, destination));
+        assert_eq!(work_after.signature_checks, work_before.signature_checks);
+        assert!(work_after.avoided_signature_checks > work_before.avoided_signature_checks);
     }
 }

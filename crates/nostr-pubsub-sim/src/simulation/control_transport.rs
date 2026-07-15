@@ -46,6 +46,16 @@ impl Simulation {
         self.report.subscription_messages = self.report.subscription_messages.saturating_add(1);
         self.report.control_plane_wire_bytes =
             self.report.control_plane_wire_bytes.saturating_add(bytes);
+        if frame.purpose == SubscriptionPurpose::Rediscovery {
+            self.report.rediscovery_subscription_messages = self
+                .report
+                .rediscovery_subscription_messages
+                .saturating_add(1);
+            self.report.rediscovery_control_plane_wire_bytes = self
+                .report
+                .rediscovery_control_plane_wire_bytes
+                .saturating_add(bytes);
+        }
         self.traffic[frame.source].record_message(
             TrafficDirection::Sent,
             frame.traffic_provenance,
@@ -77,11 +87,6 @@ impl Simulation {
     pub(super) fn process_subscription_frame(&mut self, frame: SubscriptionFrame) -> Result<()> {
         let bytes = u64::try_from(frame.payload.len()).unwrap_or(u64::MAX);
         self.remove_queued_resource_bytes(frame.destination, bytes);
-        if !self.topology.neighbors[frame.destination].contains(&frame.source) {
-            self.report.unauthorized_source_drops =
-                self.report.unauthorized_source_drops.saturating_add(1);
-            return Ok(());
-        }
         if !self.link_is_active(frame.source, frame.destination) {
             self.report.dropped_packets = self.report.dropped_packets.saturating_add(1);
             self.schedule_subscription_retry(frame);
@@ -100,6 +105,11 @@ impl Simulation {
             frame.traffic_provenance,
             bytes,
         );
+        if !self.topology.neighbors[frame.destination].contains(&frame.source) {
+            self.report.unauthorized_source_drops =
+                self.report.unauthorized_source_drops.saturating_add(1);
+            return Ok(());
+        }
         self.decode_subscription_frame(&frame)
     }
 
@@ -168,7 +178,7 @@ impl Simulation {
                 }
                 Ok(())
             }
-            SubscriptionPurpose::Reconnect => {
+            SubscriptionPurpose::Reconnect | SubscriptionPurpose::Rediscovery => {
                 self.replay_link_direction(frame.destination, frame.source)
             }
             SubscriptionPurpose::Install | SubscriptionPurpose::Flood => Ok(()),
@@ -219,7 +229,8 @@ fn subscription_action_completed(
         (
             SubscriptionPurpose::Install
             | SubscriptionPurpose::LifecycleReopen { .. }
-            | SubscriptionPurpose::Reconnect,
+            | SubscriptionPurpose::Reconnect
+            | SubscriptionPurpose::Rediscovery,
             FipsPubsubWireMessage::Req { .. },
         ) => after > 0,
         (SubscriptionPurpose::LifecycleClose, FipsPubsubWireMessage::Close { .. }) => {
@@ -235,7 +246,8 @@ fn subscription_fault_key(frame: &SubscriptionFrame) -> u64 {
         SubscriptionPurpose::LifecycleClose => 2,
         SubscriptionPurpose::LifecycleReopen { .. } => 3,
         SubscriptionPurpose::Reconnect => 4,
-        SubscriptionPurpose::Flood => 5,
+        SubscriptionPurpose::Rediscovery => 5,
+        SubscriptionPurpose::Flood => 6,
     };
     hash_bytes(&frame.payload) ^ purpose
 }
@@ -257,7 +269,7 @@ mod tests {
                 node_count: 32,
                 attacker_count: 0,
                 topology: TopologyStrategy::PeerMesh,
-                false_supernode_count: 0,
+                adversarial_discovery_candidate_count: 0,
                 loss_basis_points,
                 churn_basis_points: 0,
                 max_retries,
@@ -459,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_control_is_sent_but_not_received_or_applied() {
+    fn unauthorized_control_is_received_but_not_decoded_or_applied() {
         let mut simulation = simulation(0, 3);
         let source = 0;
         let destination = (1..simulation.config.node_count)
@@ -483,6 +495,12 @@ mod tests {
             simulation.traffic[destination]
                 .counter(TrafficDirection::Received, TrafficProvenance::Adversarial,)
                 .messages,
+            1
+        );
+        assert_eq!(
+            simulation.node_resources[destination]
+                .work
+                .fips_decode_bytes,
             0
         );
         assert_eq!(

@@ -1,4 +1,5 @@
-use nostr::{Event, JsonUtil};
+use nostr::JsonUtil;
+use nostr_pubsub::VerifiedEvent;
 
 use crate::metrics::{
     DistributionSummary, NodeTrafficLedger, TrafficScope, basis_points, summarize_distribution,
@@ -22,6 +23,7 @@ pub struct NodeCpuWork {
     pub avoided_signature_checks: u64,
     pub filter_queries: u64,
     pub filter_candidates: u64,
+    pub transport_disruption_updates: u64,
     pub mesh_candidates: u64,
     pub graph_queries: u64,
     pub reputation_events_considered: u64,
@@ -128,6 +130,7 @@ pub struct CpuWorkDistribution {
     pub signature_checks_without_verified_paths: DistributionSummary,
     pub filter_queries: DistributionSummary,
     pub filter_candidates: DistributionSummary,
+    pub transport_disruption_updates: DistributionSummary,
     pub mesh_candidates: DistributionSummary,
     pub graph_queries: DistributionSummary,
     pub reputation_events_considered: DistributionSummary,
@@ -142,6 +145,7 @@ impl CpuWorkDistribution {
         signature_checks_without_verified_paths: EMPTY_DISTRIBUTION,
         filter_queries: EMPTY_DISTRIBUTION,
         filter_candidates: EMPTY_DISTRIBUTION,
+        transport_disruption_updates: EMPTY_DISTRIBUTION,
         mesh_candidates: EMPTY_DISTRIBUTION,
         graph_queries: EMPTY_DISTRIBUTION,
         reputation_events_considered: EMPTY_DISTRIBUTION,
@@ -242,22 +246,27 @@ const EMPTY_DISTRIBUTION: DistributionSummary = DistributionSummary {
 impl Simulation {
     pub(super) fn initialize_resource_usage(&mut self) -> Result<()> {
         for node in 0..self.nodes.len() {
-            let local_filter_bytes = self.nodes[node]
-                .filters
-                .iter()
-                .chain(self.nodes[node].rating_filters.iter())
-                .try_fold(0_u64, |total, filter| {
-                    filter
-                        .try_as_json()
-                        .map(|encoded| {
-                            total.saturating_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
-                        })
-                        .map_err(pubsub_error)
-                })?;
-            self.node_resources[node].current.local_filter_bytes = local_filter_bytes;
-            self.observe_core_resource_state(node);
+            self.refresh_local_filter_resource_state(node)?;
             self.observe_subscription_resource_state(node)?;
         }
+        Ok(())
+    }
+
+    pub(super) fn refresh_local_filter_resource_state(&mut self, node: usize) -> Result<()> {
+        let bytes = self.nodes[node]
+            .filters
+            .iter()
+            .chain(self.nodes[node].rating_filters.iter())
+            .try_fold(0_u64, |total, filter| {
+                filter
+                    .try_as_json()
+                    .map(|encoded| {
+                        total.saturating_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
+                    })
+                    .map_err(pubsub_error)
+            })?;
+        self.node_resources[node].current.local_filter_bytes = bytes;
+        self.observe_core_resource_state(node);
         Ok(())
     }
 
@@ -270,6 +279,7 @@ impl Simulation {
                 .saturating_add(mesh.seen_inventories)
                 .saturating_add(mesh.delivered_events)
                 .saturating_add(mesh.upstream_routes)
+                .saturating_add(mesh.transport_disrupted_route_peers)
                 .saturating_add(mesh.pending_events)
                 .saturating_add(mesh.pending_peers)
                 .saturating_add(mesh.forwarded_wants)
@@ -306,10 +316,10 @@ impl Simulation {
         &mut self,
         node: usize,
         event_id: String,
-        event: Event,
+        event: VerifiedEvent,
     ) -> Result<()> {
         if !self.nodes[node].local_events.contains_key(&event_id) {
-            let bytes = event.try_as_json().map_err(pubsub_error)?.len();
+            let bytes = event.as_event().try_as_json().map_err(pubsub_error)?.len();
             self.node_resources[node].current.local_event_bytes = self.node_resources[node]
                 .current
                 .local_event_bytes
@@ -457,6 +467,9 @@ pub(super) fn summarize_cohort(
             })),
             filter_queries: summarize_distribution(&work_values(|work| work.filter_queries)),
             filter_candidates: summarize_distribution(&work_values(|work| work.filter_candidates)),
+            transport_disruption_updates: summarize_distribution(&work_values(|work| {
+                work.transport_disruption_updates
+            })),
             mesh_candidates: summarize_distribution(&work_values(|work| work.mesh_candidates)),
             graph_queries: summarize_distribution(&work_values(|work| work.graph_queries)),
             reputation_events_considered: summarize_distribution(&work_values(|work| {
@@ -598,7 +611,7 @@ mod tests {
             loss_basis_points: 100,
             churn_basis_points: 100,
             supernode_count: 4,
-            false_supernode_count: 2,
+            adversarial_discovery_candidate_count: 2,
             ..SimulationConfig::default()
         };
 

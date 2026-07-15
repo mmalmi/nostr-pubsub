@@ -225,6 +225,7 @@ pub enum InvWantAction {
 struct UpstreamRoute {
     peer_id: String,
     alternate_peers: BTreeSet<String>,
+    transport_disrupted_peers: BTreeSet<String>,
     event_kind: u16,
     payload_bytes: u32,
     hop_limit: u8,
@@ -378,8 +379,22 @@ impl InvWantMesh {
             && (route.peer_id == peer_id || route.alternate_peers.contains(peer_id))
         {
             route.fulfilled = true;
+            route.transport_disrupted_peers.clear();
             self.remove_pending_event(event_id);
         }
+    }
+
+    /// Mark an outstanding request as transport-disrupted so route expiry
+    /// does not misattribute a confirmed failure of the active request to the
+    /// provider. This must come from local transport evidence, never
+    /// peer-supplied data; sending another want clears the mark for that peer.
+    pub fn record_transport_disruption(&mut self, peer_id: &str, event_id: &str) -> bool {
+        let Some(route) = self.upstream_routes.get_mut(event_id) else {
+            return false;
+        };
+        !route.fulfilled
+            && (route.peer_id == peer_id || route.alternate_peers.contains(peer_id))
+            && route.transport_disrupted_peers.insert(peer_id.to_string())
     }
 
     pub fn publish(
@@ -517,6 +532,7 @@ impl InvWantMesh {
                 self.want_forwarded
                     .insert(event_id.clone(), extended_expiry);
             }
+            route.transport_disrupted_peers.remove(source_peer);
             return Ok(vec![InvWantAction::Send {
                 peer_id: source_peer.to_string(),
                 message: InvWantWireMessage::Want { event_id },
@@ -529,6 +545,7 @@ impl InvWantMesh {
             .or_insert_with(|| UpstreamRoute {
                 peer_id: source_peer.to_string(),
                 alternate_peers: BTreeSet::new(),
+                transport_disrupted_peers: BTreeSet::new(),
                 event_kind,
                 payload_bytes,
                 hop_limit,
@@ -587,6 +604,11 @@ impl InvWantMesh {
         if already_forwarded {
             return Ok(Vec::new());
         }
+        if let Some(route) = self.upstream_routes.get_mut(&event_id) {
+            route
+                .transport_disrupted_peers
+                .remove(&route.peer_id.clone());
+        }
         self.want_forwarded
             .insert(event_id.clone(), route.expires_at_ms);
         Ok(vec![InvWantAction::Send {
@@ -641,6 +663,7 @@ impl InvWantMesh {
         self.store_event(event.clone(), payload_bytes, now_ms);
         if let Some(route) = self.upstream_routes.get_mut(event_id) {
             route.fulfilled = true;
+            route.transport_disrupted_peers.clear();
         }
 
         let mut actions = Vec::new();
@@ -835,7 +858,9 @@ impl InvWantMesh {
             .values()
             .filter(|route| !route.fulfilled && route.expires_at_ms <= now_ms)
             .flat_map(|route| {
-                std::iter::once(route.peer_id.clone()).chain(route.alternate_peers.iter().cloned())
+                std::iter::once(route.peer_id.clone())
+                    .chain(route.alternate_peers.iter().cloned())
+                    .filter(|peer| !route.transport_disrupted_peers.contains(peer))
             })
             .collect::<Vec<_>>();
         for peer_id in expired_routes {

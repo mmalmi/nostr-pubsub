@@ -3,6 +3,13 @@ use nostr_pubsub_sim::{
     TopologyStrategy, TrafficDirection, TrafficProvenance, run_simulation,
 };
 
+mod incentive_output;
+use incentive_output::{INCENTIVE_CSV_COLUMNS, incentive_values};
+mod machine_wot_output;
+use machine_wot_output::{MACHINE_WOT_CSV_COLUMNS, machine_wot_values};
+mod rediscovery_output;
+use rediscovery_output::{REDISCOVERY_CSV_COLUMNS, rediscovery_values};
+
 const COHORT_AUTHOR_FEED: &str = "author-feed";
 const COHORT_HASHTAG_TOPIC: &str = "hashtag-topic";
 const COHORT_HASHTREE_UPDATE: &str = "hashtree-update";
@@ -34,7 +41,7 @@ const CSV_COLUMNS: &[&str] = &[
     "max_retries",
     "seed",
     "configured_supernodes",
-    "configured_false_supernodes",
+    "configured_adversarial_discovery_candidates",
     "supernode_links_per_peer",
     "supernodes",
     "edges",
@@ -97,7 +104,7 @@ const CSV_COLUMNS: &[&str] = &[
     "legitimate_application_policy_drops",
     "machine_ingress_drops",
     "honest_source_legitimate_machine_ingress_drops",
-    "attacker_source_legitimate_reference_machine_ingress_drops",
+    "adversarial_source_legitimate_reference_machine_ingress_drops",
     "adversarial_machine_ingress_drops",
     "machine_ingress_accounting_conserved",
     "uninterested_deliveries",
@@ -172,11 +179,11 @@ const CSV_COLUMNS: &[&str] = &[
     "unknown_candidate_sends",
     "churned_links",
     "discovery_links",
-    "honest_supernode_links",
-    "false_supernode_links",
-    "discovery_precision_bps",
-    "honest_supernode_coverage_bps",
-    "false_only_supernode_peers",
+    "selected_high_capacity_links",
+    "selected_adversarial_candidate_links",
+    "high_capacity_selection_precision_bps",
+    "high_capacity_selection_coverage_bps",
+    "peers_without_high_capacity_selection",
     "supernode_max_bytes",
     "supernode_mean_bytes",
     "load_gini_bps",
@@ -193,6 +200,8 @@ const CSV_COLUMNS: &[&str] = &[
     "peer_interested_delivery_bytes",
     "supernode_interested_delivery_bytes",
     "attacker_interested_delivery_bytes",
+    "supernode_third_party_interested_delivery_credits",
+    "supernode_third_party_interested_delivery_bytes",
     "verified_hop_deliveries",
     "verified_hop_bytes",
     "peer_verified_hop_bytes",
@@ -237,6 +246,7 @@ const CSV_COLUMNS: &[&str] = &[
     "honest_peer_filter_candidates_p95",
     "honest_peer_filter_candidates_p99",
     "honest_peer_filter_candidates_max",
+    "honest_peer_transport_disruption_updates_p95",
     "honest_peer_graph_queries_p95",
     "honest_peer_graph_queries_p99",
     "honest_peer_graph_queries_max",
@@ -289,7 +299,10 @@ fn report_csv(report: &SimulationReport) -> String {
     values.extend(role_service_values(report));
     values.extend(resource_values(report));
     values.push(report.virtual_duration_ms.to_string());
-    assert_eq!(CSV_COLUMNS.len(), values.len(), "CSV schema/row mismatch");
+    values.extend(machine_wot_values(report));
+    values.extend(rediscovery_values(report));
+    values.extend(incentive_values(report));
+    assert_eq!(csv_column_count(), values.len(), "CSV schema/row mismatch");
     values.join(",")
 }
 
@@ -327,6 +340,7 @@ fn resource_values(report: &SimulationReport) -> Vec<String> {
         peer.cpu_work.filter_candidates.p95.to_string(),
         peer.cpu_work.filter_candidates.p99.to_string(),
         peer.cpu_work.filter_candidates.max.to_string(),
+        peer.cpu_work.transport_disruption_updates.p95.to_string(),
         peer.cpu_work.graph_queries.p95.to_string(),
         peer.cpu_work.graph_queries.p99.to_string(),
         peer.cpu_work.graph_queries.max.to_string(),
@@ -388,7 +402,10 @@ fn identity_config_values(report: &SimulationReport) -> Vec<String> {
         report.config.max_retries.to_string(),
         report.config.seed.to_string(),
         report.config.supernode_count.to_string(),
-        report.config.false_supernode_count.to_string(),
+        report
+            .config
+            .adversarial_discovery_candidate_count
+            .to_string(),
         report.config.supernode_links_per_peer.to_string(),
         report.supernode_count.to_string(),
         report.topology_edges.to_string(),
@@ -459,7 +476,7 @@ fn delivery_values(report: &SimulationReport) -> Vec<String> {
             .honest_source_legitimate_machine_ingress_drops
             .to_string(),
         report
-            .attacker_source_legitimate_reference_machine_ingress_drops
+            .adversarial_source_legitimate_reference_machine_ingress_drops
             .to_string(),
         report.adversarial_machine_ingress_drops.to_string(),
         report.machine_ingress_accounting_is_conserved().to_string(),
@@ -556,13 +573,15 @@ fn subscription_topology_values(report: &SimulationReport) -> Vec<String> {
         report.unknown_candidate_sends.to_string(),
         report.churned_links.to_string(),
         report.discovery_links.to_string(),
-        report.honest_supernode_links.to_string(),
-        report.false_supernode_links.to_string(),
+        report.selected_high_capacity_links.to_string(),
+        report.selected_adversarial_candidate_links.to_string(),
         report
-            .supernode_discovery_precision_basis_points
+            .high_capacity_selection_precision_basis_points
             .to_string(),
-        report.honest_supernode_coverage_basis_points.to_string(),
-        report.false_only_supernode_peers.to_string(),
+        report
+            .high_capacity_selection_coverage_basis_points
+            .to_string(),
+        report.peers_without_high_capacity_selection.to_string(),
         report.supernode_max_service_bytes.to_string(),
         report.supernode_mean_service_bytes.to_string(),
         report.supernode_load_gini_basis_points.to_string(),
@@ -596,6 +615,12 @@ fn subscription_topology_values(report: &SimulationReport) -> Vec<String> {
             NodeRole::Attacker,
         )
         .to_string(),
+        report
+            .supernode_third_party_interested_delivery_credits
+            .to_string(),
+        report
+            .supernode_third_party_interested_delivery_bytes
+            .to_string(),
         report
             .verified_delivery_credit_by_link
             .values()
@@ -685,7 +710,21 @@ fn role_service_bytes(
 }
 
 fn csv_header() -> String {
-    CSV_COLUMNS.join(",")
+    CSV_COLUMNS
+        .iter()
+        .chain(MACHINE_WOT_CSV_COLUMNS)
+        .chain(REDISCOVERY_CSV_COLUMNS)
+        .chain(INCENTIVE_CSV_COLUMNS)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn csv_column_count() -> usize {
+    CSV_COLUMNS.len()
+        + MACHINE_WOT_CSV_COLUMNS.len()
+        + REDISCOVERY_CSV_COLUMNS.len()
+        + INCENTIVE_CSV_COLUMNS.len()
 }
 
 fn cohort_delivery_bps(report: &SimulationReport, cohort: &str) -> u32 {
@@ -811,8 +850,8 @@ fn parse_config(
             "--retry-ms" => config.retry_delay_ms = parse_number(&flag, &value)?,
             "--max-retries" => config.max_retries = parse_number(&flag, &value)?,
             "--supernodes" => config.supernode_count = parse_number(&flag, &value)?,
-            "--false-supernodes" => {
-                config.false_supernode_count = parse_number(&flag, &value)?;
+            "--adversarial-discovery-candidates" => {
+                config.adversarial_discovery_candidate_count = parse_number(&flag, &value)?;
             }
             "--supernode-links" => {
                 config.supernode_links_per_peer = parse_number(&flag, &value)?;
@@ -901,7 +940,7 @@ mod tests {
                 node_count: 120,
                 attacker_count: 24,
                 supernode_count: 8,
-                false_supernode_count: 4,
+                adversarial_discovery_candidate_count: 4,
                 loss_basis_points: 0,
                 churn_basis_points: 0,
                 ..SimulationConfig::default()
@@ -912,8 +951,8 @@ mod tests {
         let header = csv_header();
         let row = report_csv(&report);
 
-        assert_eq!(CSV_COLUMNS.len(), header.split(',').count());
-        assert_eq!(CSV_COLUMNS.len(), row.split(',').count());
+        assert_eq!(csv_column_count(), header.split(',').count());
+        assert_eq!(csv_column_count(), row.split(',').count());
     }
 
     #[test]
@@ -926,6 +965,8 @@ mod tests {
                 "5",
                 "--legitimate-publication-rounds",
                 "7",
+                "--adversarial-discovery-candidates",
+                "9",
             ]
             .map(String::from)
             .into_iter(),
@@ -937,6 +978,7 @@ mod tests {
         assert_eq!(canonical.fake_inventories_per_attack_link, 11);
         assert_eq!(canonical.signed_spam_rounds, 5);
         assert_eq!(canonical.legitimate_publication_rounds, 7);
+        assert_eq!(canonical.adversarial_discovery_candidate_count, 9);
         assert_eq!(legacy.fake_inventories_per_attack_link, 7);
     }
 
