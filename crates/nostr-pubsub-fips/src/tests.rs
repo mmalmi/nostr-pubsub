@@ -1,3 +1,4 @@
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +23,65 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::*;
+
+#[tokio::test]
+async fn client_advertises_only_while_its_fsp_service_is_registered() {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("reserve local rendezvous address");
+    let SocketAddr::V4(rendezvous_addr) = socket.local_addr().expect("reserved address") else {
+        panic!("reserved rendezvous address should be IPv4");
+    };
+    drop(socket);
+
+    let mut config = Config::new();
+    config.node.discovery.local.rendezvous_addr = rendezvous_addr;
+    config.node.discovery.nostr.enabled = false;
+    config.node.discovery.lan.enabled = false;
+    let endpoint = Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(config)
+                .local_rendezvous()
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .expect("bind local FIPS endpoint"),
+    );
+
+    let client = FipsPubsubClient::start(Arc::clone(&endpoint), FipsPubsubClientOptions::default())
+        .await
+        .expect("start FIPS pubsub client");
+    wait_for_local_capability(&endpoint, true).await;
+
+    client.shutdown().await;
+    wait_for_local_capability(&endpoint, false).await;
+    endpoint.shutdown().await.expect("shutdown endpoint");
+}
+
+async fn wait_for_local_capability(endpoint: &FipsEndpoint, expected: bool) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let advertised = endpoint
+                .local_instance_advertisements()
+                .expect("local capability snapshot")
+                .iter()
+                .any(|advert| {
+                    advert.npub == endpoint.npub()
+                        && advert.capability(FIPS_NOSTR_PUBSUB_CAPABILITY).is_some_and(
+                            |capability| {
+                                capability.fsp_port == Some(FIPS_NOSTR_PUBSUB_SERVICE_PORT)
+                            },
+                        )
+                });
+            if advertised == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("local pubsub capability state should converge");
+}
 
 #[test]
 fn fips_discovery_config_converts_to_bounded_pubsub_retention() {

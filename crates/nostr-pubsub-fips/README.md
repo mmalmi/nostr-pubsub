@@ -2,6 +2,8 @@
 
 `FipsEndpoint` provider for local-only Nostr pubsub. It uses the standard Nostr
 `REQ`, `EVENT`, and `CLOSE` JSON messages on FIPS service port `7368`.
+While that FSP service is registered it advertises the authenticated same-host
+capability `nostr.pubsub/1`; dropping the client withdraws it.
 
 The provider fans each subscription and publication to authenticated,
 connected peers reported by FIPS, regardless of underlay transport.

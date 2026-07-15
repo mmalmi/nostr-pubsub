@@ -6,6 +6,7 @@ use std::sync::{atomic::AtomicU64, atomic::Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use fips_core::discovery::local::LocalInstanceCapability;
 use fips_core::{
     FipsEndpoint, FipsEndpointServiceDatagram, FipsEndpointServiceReceiver, PeerIdentity,
 };
@@ -26,6 +27,7 @@ pub use peerfinding::*;
 pub use reputation::*;
 
 pub const FIPS_NOSTR_PUBSUB_SERVICE_PORT: u16 = 7368;
+pub const FIPS_NOSTR_PUBSUB_CAPABILITY: &str = "nostr.pubsub/1";
 pub const FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS: usize = 8;
 
 /// Maximum FSP service body after its encrypted inner header and port header.
@@ -124,7 +126,10 @@ impl FipsPubsubClient {
     ) -> Result<Self> {
         options.validate()?;
         let service_receiver = endpoint
-            .register_service_receiver(FIPS_NOSTR_PUBSUB_SERVICE_PORT)
+            .register_service_receiver_with_capability(LocalInstanceCapability::service(
+                FIPS_NOSTR_PUBSUB_CAPABILITY,
+                FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+            ))
             .await
             .map_err(|error| storage_error("register FIPS pubsub service", error))?;
         let codec = FipsPubsubWireCodec::new(options.max_frame_bytes)?;

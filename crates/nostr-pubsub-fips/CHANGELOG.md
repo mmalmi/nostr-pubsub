@@ -6,3 +6,5 @@
   datagram protocol.
 - Keep external peerfinding on the application-provided `EventBus`; the
   adapter neither opens relay sockets nor adds an adapter-local workaround.
+- Advertise `nostr.pubsub/1` only for the lifetime of the registered FSP
+  service.
