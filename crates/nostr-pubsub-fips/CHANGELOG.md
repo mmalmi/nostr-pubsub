@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 - Unreleased
+## 0.3.0 - 2026-07-15
 
 - Move the adapter to `fips-core 0.4.0` without changing its bounded FSP
   datagram protocol.
