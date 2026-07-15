@@ -23,8 +23,10 @@ use tokio::time::Instant;
 mod peerfinding;
 mod reputation;
 mod stats;
+mod stream;
 pub use peerfinding::*;
 pub use reputation::*;
+pub use stream::*;
 
 pub const FIPS_NOSTR_PUBSUB_SERVICE_PORT: u16 = 7368;
 pub const FIPS_NOSTR_PUBSUB_CAPABILITY: &str = "nostr.pubsub/1";

@@ -6,7 +6,7 @@ use super::InvWantMesh;
 pub(super) struct CachedEvent {
     pub(super) event: Event,
     pub(super) expires_at_ms: u64,
-    payload_bytes: u64,
+    pub(super) payload_bytes: u64,
 }
 
 /// Raw retained-state units for deterministic memory accounting.

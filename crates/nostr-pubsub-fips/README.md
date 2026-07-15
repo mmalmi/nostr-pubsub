@@ -15,6 +15,29 @@ shared endpoint.
 Frames, peer fanout, active subscriptions, replay deduplication, and delivery
 queues are bounded; replay defaults to at most 8 events per filter.
 
+## Reliable Inv/WANT byte streams
+
+`FipsInvWantStream` is the sans-I/O foundation for applications that need
+reliable, larger Nostr-event records over `fips-tcp`. It reuses the shared
+bounded `InvWantMesh` instead of introducing an application-specific mesh:
+
+- a four-byte length prefix frames records split or coalesced by the stream;
+- record size, retained partial-input peers, receive work, mesh fanout, cache,
+  pending routes, and replay are explicitly bounded;
+- signed event admission runs before cache insertion, delivery, or forwarding;
+- peer policy runs before records are queued or retained; and
+- a durable application snapshot can seed the cache, whose inventories are
+  replayed whenever a peer connects or reconnects.
+
+The stream state machine owns no socket, task, reconnect timer, or durable
+store. A thin `fips-tcp-endpoint` driver should cap each read with
+`remaining_input_capacity`, pass connection events to `peer_connected` and
+`disconnect_peer`, drain bounded receive batches with empty input while
+`has_ready_input` is true, and execute returned `Send` records through its own
+bounded partial-write queue. The envelope protocol and version are configurable
+so a product can preserve an already-deployed Inv/WANT namespace while deleting
+its private codec and mesh wrapper.
+
 `FipsPeerReputation` composes FIPS's authenticated peer metrics and signed
 rating events with the shared social-graph reputation policy. Its default keeps
 unknown peers eligible, prioritizes observed good peers, and allows known bad
@@ -38,6 +61,8 @@ This crate never opens a Nostr relay socket and never falls back to one. Select
 Version `0.3.x` uses the FIPS `0.4.x` endpoint API. The adapter keeps the same
 bounded FSP datagram contract; the major-minor bump reflects the breaking FIPS
 dependency rather than a second pubsub protocol or compatibility fallback.
+The reliable stream API is additive and is not bound or advertised by
+`FipsPubsubClient`.
 
 For peerfinding, configure FIPS with
 `node.discovery.nostr.peerfinding_source: external` and construct a

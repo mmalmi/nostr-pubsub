@@ -3,6 +3,40 @@ use crate::{Result, VerifiedEvent};
 use super::{InvWantAction, InvWantMesh, InvWantWireMessage, MeshPeer};
 
 impl InvWantMesh {
+    /// Restore an already-verified event into the bounded mesh cache without
+    /// manufacturing transport traffic.
+    pub fn seed_verified(&mut self, verified: VerifiedEvent, now_ms: u64) -> Result<()> {
+        self.prune(now_ms);
+        let event = verified.into_event();
+        let (_, payload_bytes) = self.validate_verified_event(&event)?;
+        self.store_event(event, payload_bytes, now_ms);
+        Ok(())
+    }
+
+    /// Advertise the bounded cache to a peer that connected or reconnected.
+    ///
+    /// Only inventories are returned. The normal WANT/FRAME exchange still
+    /// gates transfer of event bodies.
+    pub fn replay_cached_to_peer(&mut self, peer_id: &str, now_ms: u64) -> Vec<InvWantAction> {
+        self.prune(now_ms);
+        self.cache_order
+            .iter()
+            .filter_map(|event_id| {
+                let cached = self.cached_events.get(event_id)?;
+                Some(InvWantAction::Send {
+                    peer_id: peer_id.to_string(),
+                    message: InvWantWireMessage::Inventory {
+                        event_id: event_id.clone(),
+                        event_kind: u16::from(cached.event.kind),
+                        payload_bytes: u32::try_from(cached.payload_bytes)
+                            .expect("cached payload size originated as u32"),
+                        hop_limit: self.options.max_hops,
+                    },
+                })
+            })
+            .collect()
+    }
+
     /// Publish an event whose signature was already checked at the trust boundary.
     pub fn publish_verified(
         &mut self,
