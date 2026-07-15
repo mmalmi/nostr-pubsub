@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - 2026-07-16
 
 - Add a bounded, sans-I/O Inv/WANT record layer for reliable `fips-tcp`
   carriers, with split/coalesced large records and bounded retained input.
