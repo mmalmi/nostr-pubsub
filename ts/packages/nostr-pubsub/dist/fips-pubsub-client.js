@@ -1,9 +1,8 @@
 import { cloneFilter, subscriptionFiltersMatch } from './filter.js';
-import { PubsubPeerSubscriptionStore } from './subscription.js';
-import { PubsubError, verifyNostrEvent, } from './types.js';
-import { FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES, FipsPubsubWireCodec, } from './wire.js';
+import { verifyNostrEvent, } from './types.js';
+import { FipsPubsubWireCodec, } from './wire.js';
 import { FIPS_NOSTR_PUBSUB_SERVICE_PORT, } from './fips-relay-service.js';
-import { defaultFipsNostrPubsubClientLimits, } from './fips-pubsub-client-types.js';
+import { clientError, createClientPeerSubscriptionStore, normalizeAllowedKinds, normalizePeerId, parseConnectionEvent, rememberId, validateClientLimits, } from './fips-pubsub-client-support.js';
 export const FIPS_NOSTR_PUBSUB_CAPABILITY = 'nostr.pubsub/1';
 export class FipsNostrPubsubClient {
     limits;
@@ -25,10 +24,10 @@ export class FipsNostrPubsubClient {
         this.node = options.node;
         this.peers = options.peers;
         this.onError = options.onError ?? (() => { });
-        this.limits = validateLimits(options.limits);
+        this.limits = validateClientLimits(options.limits);
         this.codec = new FipsPubsubWireCodec(this.limits.maxFrameBytes);
         this.allowedKinds = normalizeAllowedKinds(options.allowedKinds);
-        this.peerSubscriptions = createPeerSubscriptionStore(this.limits);
+        this.peerSubscriptions = createClientPeerSubscriptionStore(this.limits);
     }
     start() {
         if (this.unregisterService !== undefined)
@@ -50,7 +49,7 @@ export class FipsNostrPubsubClient {
         this.removePeerListener = undefined;
         this.removeSessionListener?.();
         this.removeSessionListener = undefined;
-        this.peerSubscriptions = createPeerSubscriptionStore(this.limits);
+        this.peerSubscriptions = createClientPeerSubscriptionStore(this.limits);
         this.cachedEvents.clear();
         this.cachedEventOrder.length = 0;
     }
@@ -70,6 +69,7 @@ export class FipsNostrPubsubClient {
             filters: normalized,
             handler,
             peers: new Set(),
+            pendingPeers: new Set(),
             recentIds: new Set(),
             recentOrder: [],
         };
@@ -223,15 +223,35 @@ export class FipsNostrPubsubClient {
             if (!current.has(peerId))
                 subscription.peers.delete(peerId);
         }
+        for (const peerId of [...subscription.pendingPeers]) {
+            if (!current.has(peerId))
+                subscription.pendingPeers.delete(peerId);
+        }
         for (const peerId of current) {
-            if (subscription.peers.has(peerId))
+            if (subscription.peers.has(peerId) || subscription.pendingPeers.has(peerId))
                 continue;
-            subscription.peers.add(peerId);
-            this.background(this.send(peerId, {
+            subscription.pendingPeers.add(peerId);
+            this.background(this.sendSubscriptionRequest(subscription, peerId), { operation: 'send', peerId, subscriptionId: subscription.id });
+        }
+    }
+    async sendSubscriptionRequest(subscription, peerId) {
+        try {
+            await this.send(peerId, {
                 type: 'req',
                 subscriptionId: subscription.id,
                 filters: subscription.filters,
-            }), { operation: 'send', peerId, subscriptionId: subscription.id });
+            });
+            const remainsActive = this.subscriptions.get(subscription.id) === subscription;
+            const remainsAdmitted = this.currentPeers().includes(peerId);
+            const remainsPending = subscription.pendingPeers.has(peerId);
+            if (remainsActive && remainsAdmitted && remainsPending) {
+                subscription.peers.add(peerId);
+                return;
+            }
+            await this.send(peerId, { type: 'close', subscriptionId: subscription.id });
+        }
+        finally {
+            subscription.pendingPeers.delete(peerId);
         }
     }
     closeSubscription(subscriptionId) {
@@ -248,7 +268,7 @@ export class FipsNostrPubsubClient {
         }
     }
     deliver(subscription, event, sourcePeer) {
-        if (!subscription.peers.has(sourcePeer) ||
+        if ((!subscription.peers.has(sourcePeer) && !subscription.pendingPeers.has(sourcePeer)) ||
             !subscriptionFiltersMatch(subscription.filters, event) ||
             subscription.recentIds.has(event.id))
             return;
@@ -343,8 +363,10 @@ export class FipsNostrPubsubClient {
     }
     dropPeer(peerId) {
         this.peerSubscriptions.removePeer(peerId);
-        for (const subscription of this.subscriptions.values())
+        for (const subscription of this.subscriptions.values()) {
             subscription.peers.delete(peerId);
+            subscription.pendingPeers.delete(peerId);
+        }
     }
     requireStarted() {
         if (this.unregisterService === undefined)
@@ -353,68 +375,5 @@ export class FipsNostrPubsubClient {
     report(error, context) {
         this.onError(error instanceof Error ? error : new Error(String(error)), context);
     }
-}
-function validateLimits(overrides) {
-    const limits = { ...defaultFipsNostrPubsubClientLimits(), ...overrides };
-    for (const [name, value] of Object.entries(limits)) {
-        if (!Number.isSafeInteger(value) || value <= 0) {
-            throw clientError(`${name} must be a positive safe integer`);
-        }
-    }
-    if (limits.maxFrameBytes > FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES) {
-        throw clientError(`maxFrameBytes cannot exceed ${FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES}`);
-    }
-    if (limits.maxReplayEvents > limits.maxCachedEvents) {
-        throw clientError('maxReplayEvents cannot exceed maxCachedEvents');
-    }
-    return limits;
-}
-function createPeerSubscriptionStore(limits) {
-    return new PubsubPeerSubscriptionStore({
-        maxPeers: limits.maxPeers,
-        maxSubscriptionsPerPeer: limits.maxSubscriptionsPerPeer,
-        maxFiltersPerSubscription: limits.maxFiltersPerSubscription,
-    });
-}
-function normalizeAllowedKinds(kinds) {
-    if (kinds === undefined)
-        return undefined;
-    if (kinds.some((kind) => !Number.isSafeInteger(kind) || kind < 0 || kind > 65_535)) {
-        throw clientError('allowedKinds must contain valid Nostr kind integers');
-    }
-    return new Set(kinds);
-}
-function normalizePeerId(value) {
-    if (typeof value !== 'string')
-        return undefined;
-    const normalized = value.toLowerCase();
-    return /^(02|03)[0-9a-f]{64}$/.test(normalized) ? normalized : undefined;
-}
-function parseConnectionEvent(event) {
-    if (event === null || typeof event !== 'object')
-        return undefined;
-    const candidate = event;
-    const peerId = normalizePeerId(candidate.remotePubkey);
-    if (peerId === undefined || typeof candidate.state !== 'string')
-        return undefined;
-    if (candidate.state === 'connected' || candidate.state === 'established') {
-        return { peerId, connected: true };
-    }
-    if (candidate.state === 'disconnected' || candidate.state === 'closed') {
-        return { peerId, connected: false };
-    }
-    return undefined;
-}
-function rememberId(ids, order, id, maximum) {
-    ids.add(id);
-    order.push(id);
-    while (order.length > maximum) {
-        const removed = order.shift();
-        if (removed !== undefined)
-            ids.delete(removed);
-    }
-}
-function clientError(message) {
-    return PubsubError.validation(`FIPS Nostr pubsub client: ${message}`);
 }
 //# sourceMappingURL=fips-pubsub-client.js.map

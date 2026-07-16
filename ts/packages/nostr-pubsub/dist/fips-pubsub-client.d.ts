@@ -31,6 +31,7 @@ export declare class FipsNostrPubsubClient {
     private forwardEvent;
     private normalizedFilters;
     private refreshSubscriptionPeers;
+    private sendSubscriptionRequest;
     private closeSubscription;
     private deliver;
     private replayLocal;

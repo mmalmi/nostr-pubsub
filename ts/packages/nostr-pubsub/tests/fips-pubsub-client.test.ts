@@ -314,6 +314,82 @@ describe('FipsNostrPubsubClient', () => {
     await bob.stop();
   });
 
+  it('retries a subscription request after the route recovers', async () => {
+    const peerListeners = new Set<(event: unknown) => void>();
+    const errors: string[] = [];
+    const sendDatagram = vi.fn()
+      .mockRejectedValueOnce(new Error('temporary route failure'))
+      .mockResolvedValue(undefined);
+    const node: FipsPubsubClientNode = {
+      registerService: () => () => {},
+      sendDatagram,
+      on: (event, listener) => {
+        if (event === 'peer') peerListeners.add(listener);
+        return () => peerListeners.delete(listener);
+      },
+    };
+    const alice = new FipsNostrPubsubClient({
+      node,
+      peers: () => [BOB],
+      onError: (error) => errors.push(error.message),
+    }).start();
+    alice.subscribe([{ kinds: [1060] }], vi.fn());
+
+    await alice.idle();
+    expect(sendDatagram).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual(['temporary route failure']);
+
+    for (const listener of peerListeners) {
+      listener({ remotePubkey: BOB, state: 'connected' });
+    }
+    await alice.idle();
+
+    expect(sendDatagram).toHaveBeenCalledTimes(2);
+    const retry = sendDatagram.mock.calls[1]?.[0];
+    expect(alice.codec.decodeFrame(retry.payload)).toEqual(expect.objectContaining({ type: 'req' }));
+    await alice.stop();
+  });
+
+  it('retries when the route disconnects while a subscription request is in flight', async () => {
+    const peerListeners = new Set<(event: unknown) => void>();
+    let resolveFirstSend = () => {};
+    const firstSend = new Promise<void>((resolve) => { resolveFirstSend = resolve; });
+    const sendDatagram = vi.fn()
+      .mockImplementationOnce(() => firstSend)
+      .mockResolvedValue(undefined);
+    const node: FipsPubsubClientNode = {
+      registerService: () => () => {},
+      sendDatagram,
+      on: (event, listener) => {
+        if (event === 'peer') peerListeners.add(listener);
+        return () => peerListeners.delete(listener);
+      },
+    };
+    const alice = new FipsNostrPubsubClient({
+      node,
+      peers: () => [BOB],
+    }).start();
+    alice.subscribe([{ kinds: [1060] }], vi.fn());
+    expect(sendDatagram).toHaveBeenCalledTimes(1);
+
+    for (const listener of peerListeners) {
+      listener({ remotePubkey: BOB, state: 'disconnected' });
+    }
+    resolveFirstSend();
+    await alice.idle();
+
+    for (const listener of peerListeners) {
+      listener({ remotePubkey: BOB, state: 'connected' });
+    }
+    await alice.idle();
+
+    const messageTypes = sendDatagram.mock.calls.map(([request]) =>
+      alice.codec.decodeFrame(request.payload).type,
+    );
+    expect(messageTypes).toEqual(['req', 'close', 'req']);
+    await alice.stop();
+  });
+
   it('forwards a new signed event across explicit admitted peer links', async () => {
     const network = new MemoryFipsNetwork();
     const alice = new FipsNostrPubsubClient({

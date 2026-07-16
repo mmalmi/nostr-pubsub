@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-07-16
+
+- Retry a local subscription's `REQ` after an initially unavailable FIPS route
+  later reconnects, while keeping replay delivery valid during the pending send.
+- Close a late successful `REQ` when its local subscription or peer admission was
+  removed before the send completed.
+
 ## 0.3.0 - 2026-07-16
 
 - Add `FipsNostrPubsubClient`, the shared browser `nostr.pubsub/1`
