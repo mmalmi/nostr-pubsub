@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 - 2026-07-16
+
+- Add `FipsNostrPubsubClient`, the shared browser `nostr.pubsub/1`
+  `REQ`/`EVENT`/`CLOSE` carrier for signed Nostr events.
+- Keep peer admission application-owned and explicit; connected peers are never
+  inferred, and subscriptions refresh when admitted standalone links reconnect.
+- Bound replay, subscriptions, filters, peers, frames, and pending work; failed
+  publications remain retryable and invalid or non-admitted traffic is dropped.
+- Match the native FSP datagram maximum exactly: accept 65,525 bytes and reject
+  65,526, with a real Rust process roundtrip gate.
+- Include TypeScript sources referenced by the published declaration and source
+  maps so clean-installed artifacts are self-contained.
+
 ## 0.2.0 - 2026-07-16
 
 - Add the bounded `FipsInvWantStream` and `FipsInvWantTcpDriver` over the

@@ -12,8 +12,10 @@ export { DEFAULT_INV_WANT_MAX_CACHE_BYTES, type InvWantMeshRetainedState, } from
 export { meshPeer, selectMeshPeers, type MeshPeer, } from './mesh-peer.js';
 export { InMemoryEventBus, type EventBus, type PublishReport, type QueryEvent, type QueryReport, } from './event-bus.js';
 export { fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRoutePriority, withRouteReason, type RouteAttempt, type RouteQuerySource, type RoutedQueryOptions, type RoutedQueryReport, type SourceRoute, } from './routing.js';
-export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FipsPubsubWireAdapter, FipsPubsubWireCodec, type FipsPubsubInbound, type FipsPubsubWireMessage, } from './wire.js';
+export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES, FipsPubsubWireAdapter, FipsPubsubWireCodec, type FipsPubsubInbound, type FipsPubsubWireMessage, } from './wire.js';
 export { FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS, FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsNostrRelayService, defaultFipsNostrRelayServiceLimits, type FipsNostrRelayServiceErrorContext, type FipsNostrRelayServiceLimits, type FipsNostrRelayServiceOptions, type FipsPubsubServiceContext, type FipsPubsubServiceHandler, type FipsPubsubServiceNode, type NostrRelaySubscription, type NostrRelayTransport, type NostrRelayTransportHandlers, } from './fips-relay-service.js';
+export { FIPS_NOSTR_PUBSUB_CAPABILITY, FipsNostrPubsubClient, } from './fips-pubsub-client.js';
+export { defaultFipsNostrPubsubClientLimits, type FipsNostrPubsubClientErrorContext, type FipsNostrPubsubClientLimits, type FipsNostrPubsubClientOptions, type FipsNostrPubsubEventHandler, type FipsNostrPubsubSubscription, type FipsPubsubClientNode, } from './fips-pubsub-client-types.js';
 export { FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL, FIPS_NOSTR_PUBSUB_INV_WANT_VERSION, FipsInvWantStream, defaultFipsInvWantStreamOptions, type FipsInvWantStreamAction, type FipsInvWantStreamOptions, type MeshPeerPolicy, } from './fips-invwant-stream.js';
 export { FipsInvWantTcpDriver } from './fips-invwant-tcp-driver.js';
 export { fipsInvWantTcpCapabilityName, fipsInvWantTcpPeerOrderKey, type FipsInvWantTcpDriveReport, type FipsInvWantTcpDriverOptions, type FipsInvWantTcpQueueSnapshot, } from './fips-invwant-tcp-types.js';

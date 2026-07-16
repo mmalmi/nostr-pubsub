@@ -143,6 +143,7 @@ export {
 
 export {
   DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES,
+  FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES,
   FipsPubsubWireAdapter,
   FipsPubsubWireCodec,
   type FipsPubsubInbound,
@@ -164,6 +165,20 @@ export {
   type NostrRelayTransport,
   type NostrRelayTransportHandlers,
 } from './fips-relay-service.js';
+
+export {
+  FIPS_NOSTR_PUBSUB_CAPABILITY,
+  FipsNostrPubsubClient,
+} from './fips-pubsub-client.js';
+export {
+  defaultFipsNostrPubsubClientLimits,
+  type FipsNostrPubsubClientErrorContext,
+  type FipsNostrPubsubClientLimits,
+  type FipsNostrPubsubClientOptions,
+  type FipsNostrPubsubEventHandler,
+  type FipsNostrPubsubSubscription,
+  type FipsPubsubClientNode,
+} from './fips-pubsub-client-types.js';
 
 export {
   FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL,

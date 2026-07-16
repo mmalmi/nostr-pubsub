@@ -4,6 +4,7 @@ import { finalizeEvent } from 'nostr-tools/pure';
 import vectors from '../../../../crates/nostr-pubsub/tests/data/interop-vectors.json';
 import {
   FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+  FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES,
   FipsNostrRelayService,
   FipsPubsubWireAdapter,
   type FipsPubsubServiceContext,
@@ -212,8 +213,8 @@ describe('FipsNostrRelayService', () => {
     await expect(node.receive(client.context)).rejects.toThrow(/invalid Nostr event/);
     expect(relay.published).toHaveLength(1);
 
-    client.context.payload = new Uint8Array(64 * 1024 + 1);
-    await expect(node.receive(client.context)).rejects.toThrow(/limit is 65536/);
+    client.context.payload = new Uint8Array(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES + 1);
+    await expect(node.receive(client.context)).rejects.toThrow(/limit is 65525/);
     await service.stop();
   });
 

@@ -23,6 +23,32 @@ admission, and outbound connection policy. This package does not contain a
 default relay or gateway. See the repository `docs/inv-want-wire.md` for
 compatibility and security boundaries.
 
+`FipsNostrPubsubClient` is the browser peer carrier matching Rust
+`FipsPubsubClient` on authenticated FSP service `nostr.pubsub/1` (port 7368).
+It carries only verified Nostr `REQ`, `EVENT`, and `CLOSE` frames. The
+application supplies the admitted peer identities explicitly, so arbitrary
+connected FIPS peers are never treated as pubsub providers:
+
+```ts
+import { FipsNostrPubsubClient } from 'nostr-pubsub';
+
+const pubsub = new FipsNostrPubsubClient({
+  node: fipsNode,
+  peers: () => appOwnedStandaloneLinks.map((link) => link.remotePubkey),
+  allowedKinds: [1059, 1060, 30078, 37368],
+}).start();
+
+const subscription = pubsub.subscribe([{ kinds: [1060] }], (event) => {
+  receiveSignedChatEvent(event);
+});
+await pubsub.publish(signedChatEvent);
+subscription.close();
+```
+
+Frames are bounded to the native FSP service-body maximum of 65,525 bytes.
+Peer refresh events can add or restore explicitly admitted standalone links;
+they do not create links or infer admission policy.
+
 For reliable authenticated carriage, `FipsInvWantStream` applies the same
 four-byte big-endian record framing and bounds as Rust. `FipsInvWantTcpDriver`
 binds that stream to `@fips/tcp`, accepts only the peer identity supplied by the

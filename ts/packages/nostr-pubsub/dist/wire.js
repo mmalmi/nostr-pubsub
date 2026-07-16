@@ -1,6 +1,8 @@
 import { PubsubError, verifyNostrEvent } from './types.js';
 import { PubsubPeerSubscriptionStore, } from './subscription.js';
-export const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES = 64 * 1024;
+/** Maximum FSP service body after its encrypted inner and port headers. */
+export const FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES = 65_525;
+export const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES = FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES;
 export class FipsPubsubWireCodec {
     maxFrameBytes;
     constructor(maxFrameBytes = DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES) {
