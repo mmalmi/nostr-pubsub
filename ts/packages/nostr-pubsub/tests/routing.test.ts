@@ -283,16 +283,16 @@ describe('routed Nostr event queries', () => {
     expect(report.complete).toBe(true);
   });
 
-  it('keeps the old EventBus and route bus alias compatible', async () => {
+  it('composes the combined EventBus through the canonical reader route', async () => {
     const bus: EventBus = new InMemoryEventBus();
     const publisher: NostrEventPublisher = bus;
     const readerContract: NostrEventReader = bus;
-    const event = note(10, 'legacy bus');
-    await publisher.publish(event, localIndexSource('legacy'));
+    const event = note(10, 'combined bus');
+    await publisher.publish(event, localIndexSource('combined'));
 
     expect((await readerContract.query([{}])).events).toHaveLength(1);
     const report = await queryRoutesWithPolicy([
-      { route: localIndexRoute('legacy-route'), bus },
+      { route: localIndexRoute('combined-route'), reader: bus },
     ], [{}], {}, allowAll);
     expect(report.events.map(({ event: result }) => result.id)).toEqual([event.id]);
     expect(report.attempts[0].route.datasetId).toBe('default');

@@ -1,15 +1,23 @@
 //! Actual Nostr relay backend for `nostr-pubsub`.
 
-use std::{borrow::Cow, fmt::Debug, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use nostr_pubsub::{
-    EventBus, EventSource, PublishReport, PubsubError, PubsubProvider, PubsubProviderMode,
-    QueryEvent, QueryOptions, QueryReport, Result, VerifiedEvent,
+    EventBus, EventSource, MatchEventOptions, NostrEventHandler, NostrEventSubscriber,
+    NostrEventSubscription, PublishReport, PubsubError, PubsubProvider, PubsubProviderMode,
+    QueryEvent, QueryOptions, QueryReport, Result, SOURCE_PRIORITY_RELAY, VerifiedEvent,
 };
 use nostr_sdk::{
-    Client, ClientMessage, Filter, Keys, nostr::message::MachineReadablePrefix, pool::Output,
+    Client, ClientMessage, Filter, Keys, RelayMessage, RelayPoolNotification, SubscriptionId,
+    nostr::message::MachineReadablePrefix, pool::Output,
 };
+use tokio::task::JoinHandle;
 
 #[derive(Clone)]
 pub struct RelayEventBus {
@@ -64,9 +72,9 @@ impl RelayEventBus {
     /// Queue an event on every configured relay without waiting for relay `OK`
     /// acknowledgements.
     ///
-    /// This is appropriate for datagram-like traffic whose caller already
-    /// owns bounded retry or redundancy policy. The report describes whether
-    /// each relay accepted the message into its local send queue.
+    /// This is appropriate when the caller owns bounded retry or redundancy
+    /// policy and does not require relay `OK` acknowledgements. The report
+    /// describes whether each relay accepted the message into its local queue.
     pub async fn enqueue(&self, event: &VerifiedEvent) -> Result<PublishReport> {
         let output = self
             .client
@@ -87,31 +95,39 @@ impl EventBus for RelayEventBus {
     }
 
     async fn query(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport> {
+        let filters = if filters.is_empty() {
+            vec![Filter::new()]
+        } else {
+            filters
+        };
         let mut events = Vec::new();
-        let limit = options
-            .limit
-            .or_else(|| filters.iter().filter_map(|filter| filter.limit).min());
+        let mut seen = HashSet::new();
         for filter in filters {
-            if limit.is_some_and(|limit| events.len() >= limit) {
-                break;
-            }
             let fetched = self
                 .client
                 .fetch_events(filter, self.query_timeout)
                 .await
                 .map_err(|error| PubsubError::Storage(format!("fetch relay events: {error}")))?;
             for event in fetched {
-                if limit.is_some_and(|limit| events.len() >= limit) {
-                    break;
-                }
                 let event = VerifiedEvent::try_from(event)?;
-                events.push(QueryEvent {
-                    event,
-                    source: EventSource::relay(self.relays.join(",")),
-                    priority: 0,
-                });
+                if seen.insert(event.as_event().id) {
+                    events.push(QueryEvent {
+                        event,
+                        source: EventSource::relay(self.relays.join(",")),
+                        priority: SOURCE_PRIORITY_RELAY,
+                    });
+                }
             }
         }
+        events.sort_by(|left, right| {
+            right
+                .event
+                .as_event()
+                .created_at
+                .cmp(&left.event.as_event().created_at)
+                .then_with(|| left.event.as_event().id.cmp(&right.event.as_event().id))
+        });
+        events.truncate(options.limit.unwrap_or(usize::MAX));
         Ok(QueryReport { events })
     }
 }
@@ -119,6 +135,117 @@ impl EventBus for RelayEventBus {
 impl PubsubProvider for RelayEventBus {
     fn mode(&self) -> PubsubProviderMode {
         PubsubProviderMode::DirectRelay
+    }
+}
+
+#[async_trait]
+impl NostrEventSubscriber for RelayEventBus {
+    async fn subscribe(
+        &self,
+        filters: Vec<Filter>,
+        handler: NostrEventHandler,
+    ) -> Result<Box<dyn NostrEventSubscription>> {
+        let mut notifications = self.client.notifications();
+        let filters = if filters.is_empty() {
+            vec![Filter::new()]
+        } else {
+            filters
+        };
+        let mut subscriptions = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let output = match self
+                .client
+                .subscribe_to(self.relays.iter().map(String::as_str), filter.clone(), None)
+                .await
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    unsubscribe_pairs(&self.client, &subscriptions).await;
+                    return Err(PubsubError::Storage(format!(
+                        "subscribe to configured relays: {error}"
+                    )));
+                }
+            };
+            if output.success.is_empty() {
+                unsubscribe_pairs(&self.client, &subscriptions).await;
+                return Err(PubsubError::Storage(
+                    "no configured relay accepted live subscription".to_string(),
+                ));
+            }
+            subscriptions.push((output.val, filter));
+        }
+
+        let watched_filters = subscriptions.iter().cloned().collect::<HashMap<_, _>>();
+        let notifications_task = tokio::spawn(async move {
+            loop {
+                match notifications.recv().await {
+                    Ok(RelayPoolNotification::Message {
+                        relay_url,
+                        message:
+                            RelayMessage::Event {
+                                subscription_id,
+                                event,
+                            },
+                    }) if watched_filters.contains_key(subscription_id.as_ref()) => {
+                        if let Ok(event) = VerifiedEvent::try_from(event.into_owned())
+                            && watched_filters[subscription_id.as_ref()]
+                                .match_event(event.as_event(), MatchEventOptions::new())
+                        {
+                            handler(QueryEvent {
+                                event,
+                                source: EventSource::relay(relay_url.to_string()),
+                                priority: SOURCE_PRIORITY_RELAY,
+                            });
+                        }
+                    }
+                    Ok(RelayPoolNotification::Shutdown)
+                    | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                }
+            }
+        });
+        Ok(Box::new(RelayLiveSubscription {
+            client: self.client.clone(),
+            subscription_ids: subscriptions.into_iter().map(|(id, _)| id).collect(),
+            notifications_task: Some(notifications_task),
+        }))
+    }
+}
+
+struct RelayLiveSubscription {
+    client: Client,
+    subscription_ids: Vec<SubscriptionId>,
+    notifications_task: Option<JoinHandle<()>>,
+}
+
+impl Drop for RelayLiveSubscription {
+    fn drop(&mut self) {
+        if let Some(task) = self.notifications_task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[async_trait]
+impl NostrEventSubscription for RelayLiveSubscription {
+    async fn close(mut self: Box<Self>) -> Result<()> {
+        unsubscribe_all(&self.client, &self.subscription_ids).await;
+        if let Some(task) = self.notifications_task.take() {
+            task.abort();
+        }
+        Ok(())
+    }
+}
+
+async fn unsubscribe_all(client: &Client, subscription_ids: &[SubscriptionId]) {
+    for subscription_id in subscription_ids {
+        client.unsubscribe(subscription_id).await;
+    }
+}
+
+async fn unsubscribe_pairs(client: &Client, subscriptions: &[(SubscriptionId, Filter)]) {
+    for (subscription_id, _) in subscriptions {
+        client.unsubscribe(subscription_id).await;
     }
 }
 
@@ -206,14 +333,21 @@ const fn relay_label(count: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
-    use futures_util::StreamExt;
-    use nostr_pubsub::{EventBus, EventSource, VerifiedEvent};
-    use nostr_sdk::{EventBuilder, Keys, Kind, RelayUrl, pool::Output, prelude::RelayStatus};
+    use futures_util::{SinkExt, StreamExt};
+    use nostr_pubsub::{EventBus, EventSource, NostrEventSubscriber, QueryEvent, VerifiedEvent};
+    use nostr_sdk::{
+        ClientMessage, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayMessage, RelayUrl,
+        SubscriptionId, pool::Output, prelude::RelayStatus,
+    };
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
     use tokio::time::{sleep, timeout};
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use super::{RelayEventBus, publish_report};
 
@@ -302,6 +436,146 @@ mod tests {
         assert!(report.accepted);
         relay.await.expect("test relay task");
         bus.client().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn live_subscription_delivers_relay_events_and_sends_close() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test relay");
+        let relay_url = format!(
+            "ws://{}",
+            listener.local_addr().expect("test relay address")
+        );
+        let expected_event = EventBuilder::new(Kind::TextNote, "live relay event")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign relay event");
+        let wrong_kind_event = EventBuilder::new(Kind::Metadata, "{}")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign non-matching relay event");
+        let event_for_relay = expected_event.clone();
+        let relay = tokio::spawn(serve_live_relay(
+            listener,
+            wrong_kind_event,
+            event_for_relay,
+        ));
+        let bus = RelayEventBus::new([relay_url.clone()], Duration::from_secs(5))
+            .await
+            .expect("start relay event bus");
+        wait_until_connected(&bus, &relay_url).await;
+        let (sender, receiver) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let output = Arc::clone(&sender);
+        let subscription = bus
+            .subscribe(
+                vec![Filter::new().kind(Kind::TextNote)],
+                Arc::new(move |event: QueryEvent| {
+                    if let Some(sender) = output.lock().unwrap().take() {
+                        let _ = sender.send(event);
+                    }
+                }),
+            )
+            .await
+            .expect("subscribe through relay event bus");
+        let delivered = timeout(Duration::from_secs(2), receiver)
+            .await
+            .expect("receive live event")
+            .expect("handler remains available");
+        assert_eq!(delivered.event.as_event().id, expected_event.id);
+        assert_eq!(delivered.priority, nostr_pubsub::SOURCE_PRIORITY_RELAY);
+        assert_eq!(
+            delivered.source,
+            EventSource::relay(relay_url.parse::<RelayUrl>().unwrap().to_string())
+        );
+
+        subscription.close().await.expect("close live subscription");
+        relay.await.expect("test relay task");
+        bus.client().shutdown().await;
+    }
+
+    async fn serve_live_relay(listener: TcpListener, wrong_kind_event: Event, live_event: Event) {
+        let (stream, _) = listener.accept().await.expect("accept relay client");
+        let mut websocket = accept_async(stream).await.expect("accept websocket");
+        let subscription_id = timeout(Duration::from_secs(2), async {
+            loop {
+                let message = websocket
+                    .next()
+                    .await
+                    .expect("relay websocket remains open")
+                    .expect("read client message");
+                let Ok(client_message) = ClientMessage::from_json(message.into_data()) else {
+                    continue;
+                };
+                if let ClientMessage::Req {
+                    subscription_id, ..
+                } = client_message
+                {
+                    break subscription_id.into_owned();
+                }
+            }
+        })
+        .await
+        .expect("receive subscription request");
+        for message in [
+            RelayMessage::event(subscription_id.clone(), wrong_kind_event),
+            RelayMessage::event(
+                SubscriptionId::new("another-client-subscription"),
+                live_event.clone(),
+            ),
+        ] {
+            websocket
+                .send(Message::Text(message.as_json().into()))
+                .await
+                .expect("send irrelevant relay event");
+        }
+        websocket
+            .send(Message::Text(
+                RelayMessage::event(subscription_id.clone(), live_event)
+                    .as_json()
+                    .into(),
+            ))
+            .await
+            .expect("send relay event");
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let message = websocket
+                    .next()
+                    .await
+                    .expect("relay websocket remains open")
+                    .expect("read client message");
+                let Ok(client_message) = ClientMessage::from_json(message.into_data()) else {
+                    continue;
+                };
+                if matches!(
+                    client_message,
+                    ClientMessage::Close(id) if id.as_ref() == &subscription_id
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("receive subscription close");
+    }
+
+    async fn wait_until_connected(bus: &RelayEventBus, relay_url: &str) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let connected = bus
+                    .client()
+                    .relay(relay_url)
+                    .await
+                    .expect("configured relay")
+                    .status()
+                    == RelayStatus::Connected;
+                if connected {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("relay client should connect");
     }
 
     #[test]

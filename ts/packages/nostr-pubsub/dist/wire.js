@@ -1,8 +1,9 @@
 import { PubsubError, verifyNostrEvent } from './types.js';
 import { PubsubPeerSubscriptionStore, } from './subscription.js';
-/** Maximum FSP service body after its encrypted inner and port headers. */
-export const FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES = 65_525;
-export const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES = FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES;
+/** Maximum encoded Nostr frame carried in one reliable TCP record. */
+export const FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES = 65_525;
+export const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES = FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES;
+export const FIPS_NOSTR_PUBSUB_SERVICE_PORT = 7368;
 export class FipsPubsubWireCodec {
     maxFrameBytes;
     constructor(maxFrameBytes = DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES) {
@@ -91,6 +92,19 @@ function encodeWireMessage(message) {
                 ? ['EVENT', wireEvent]
                 : ['EVENT', message.subscriptionId, wireEvent];
         }
+        case 'inv':
+            validateInventory(message);
+            return [
+                'INV',
+                message.subscriptionIds,
+                message.eventId,
+                message.eventKind,
+                message.payloadBytes,
+                message.hopLimit,
+            ];
+        case 'want':
+            validateEventId(message.eventId, 'WANT');
+            return ['WANT', message.eventId];
     }
 }
 function decodeWireMessage(value) {
@@ -128,7 +142,56 @@ function decodeWireMessage(value) {
         }
         throw invalidFrame('EVENT requires an event and optional subscription id');
     }
+    if (messageType === 'INV') {
+        if (value.length !== 6) {
+            throw invalidFrame('INV requires subscription ids, event id, kind, byte size, and hop limit');
+        }
+        const [, subscriptionIds, eventId, eventKind, payloadBytes, hopLimit] = value;
+        const message = {
+            type: 'inv',
+            subscriptionIds,
+            eventId,
+            eventKind,
+            payloadBytes,
+            hopLimit,
+        };
+        validateInventory(message);
+        return message;
+    }
+    if (messageType === 'WANT') {
+        if (value.length !== 2 || typeof value[1] !== 'string') {
+            throw invalidFrame('WANT requires exactly an event id');
+        }
+        validateEventId(value[1], 'WANT');
+        return { type: 'want', eventId: value[1] };
+    }
     throw invalidFrame(`unsupported Nostr message type ${messageType}`);
+}
+function validateInventory(message) {
+    if (!Array.isArray(message.subscriptionIds) ||
+        message.subscriptionIds.length === 0 ||
+        message.subscriptionIds.some((id) => typeof id !== 'string')) {
+        throw invalidFrame('INV requires at least one string subscription id');
+    }
+    if (new Set(message.subscriptionIds).size !== message.subscriptionIds.length) {
+        throw invalidFrame('INV subscription ids must be unique');
+    }
+    validateEventId(message.eventId, 'INV');
+    validateUnsigned(message.eventKind, 0xffff, 'INV event kind');
+    validateUnsigned(message.payloadBytes, 0xffff_ffff, 'INV payload bytes');
+    validateUnsigned(message.hopLimit, 0xff, 'INV hop limit');
+    if (message.hopLimit === 0)
+        throw invalidFrame('INV hop limit must be greater than zero');
+}
+function validateEventId(value, messageType) {
+    if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
+        throw invalidFrame(`${messageType} event id is invalid`);
+    }
+}
+function validateUnsigned(value, maximum, field) {
+    if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+        throw invalidFrame(`${field} must be an unsigned integer in range`);
+    }
 }
 function normalizeFilter(value) {
     if (!isRecord(value))

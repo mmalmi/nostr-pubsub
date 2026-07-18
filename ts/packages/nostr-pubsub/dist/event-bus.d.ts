@@ -22,14 +22,22 @@ export interface NostrEventReader {
 export interface NostrEventPublisher {
     publish(event: NostrEvent, source: EventSource): Promise<PublishReport>;
 }
+export interface NostrEventSubscription {
+    close(): void;
+}
+export interface NostrEventSubscriber {
+    subscribe(filters: NostrFilter[], handler: (event: QueryEvent) => void): NostrEventSubscription | Promise<NostrEventSubscription>;
+}
 /** Backwards-compatible combined read/write event bus. */
 export interface EventBus extends NostrEventReader, NostrEventPublisher {
 }
-export declare class InMemoryEventBus implements EventBus {
+export declare class InMemoryEventBus implements EventBus, NostrEventSubscriber {
     private readonly policy?;
     private readonly events;
+    private readonly subscriptions;
     constructor(policy?: PubsubPolicy | undefined);
     publish(event: NostrEvent, source: EventSource): Promise<PublishReport>;
     query(filters: NostrFilter[], options?: QueryOptions): Promise<QueryReport>;
+    subscribe(filters: NostrFilter[], handler: (event: QueryEvent) => void): NostrEventSubscription;
 }
 //# sourceMappingURL=event-bus.d.ts.map

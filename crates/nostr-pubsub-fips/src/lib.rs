@@ -11,11 +11,12 @@ use fips_core::{FipsEndpoint, PeerIdentity};
 use nostr::JsonUtil;
 use nostr_pubsub::{
     EventBus, EventId, EventSource, Filter, FipsPubsubWireCodec, FipsPubsubWireMessage,
-    PublishReport, PubsubError, PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubProvider,
-    PubsubProviderMode, PubsubSubscriptionLimits, QueryEvent, QueryOptions, QueryReport, Result,
+    NostrEventHandler, NostrEventSubscriber, NostrEventSubscription, PublishReport, PubsubError,
+    PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubProvider, PubsubProviderMode,
+    PubsubSubscriptionLimits, QueryEvent, QueryOptions, QueryReport, Result,
     SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, VerifiedEvent,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -342,6 +343,59 @@ impl EventBus for FipsPubsubClient {
 impl PubsubProvider for FipsPubsubClient {
     fn mode(&self) -> PubsubProviderMode {
         PubsubProviderMode::LocalOnly
+    }
+}
+
+#[async_trait]
+impl NostrEventSubscriber for FipsPubsubClient {
+    async fn subscribe(
+        &self,
+        filters: Vec<Filter>,
+        handler: NostrEventHandler,
+    ) -> Result<Box<dyn NostrEventSubscription>> {
+        let mut subscription = FipsPubsubClient::subscribe(self, filters).await?;
+        let (close_sender, close_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = close_receiver => {}
+                () = async {
+                    while let Some(event) = subscription.recv().await {
+                        handler(event);
+                    }
+                } => {}
+            }
+            subscription.close();
+        });
+        Ok(Box::new(FipsRoutedSubscription {
+            close_sender: Some(close_sender),
+            task: Some(task),
+        }))
+    }
+}
+
+struct FipsRoutedSubscription {
+    close_sender: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl Drop for FipsRoutedSubscription {
+    fn drop(&mut self) {
+        self.close_sender.take();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[async_trait]
+impl NostrEventSubscription for FipsRoutedSubscription {
+    async fn close(mut self: Box<Self>) -> Result<()> {
+        self.close_sender.take();
+        if let Some(task) = self.task.take() {
+            task.await
+                .map_err(|error| PubsubError::Storage(format!("close FIPS live route: {error}")))?;
+        }
+        Ok(())
     }
 }
 

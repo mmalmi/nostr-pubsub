@@ -4,6 +4,7 @@ import { verifyNostrEvent, validateQueryOptions, } from './types.js';
 export class InMemoryEventBus {
     policy;
     events = [];
+    subscriptions = new Set();
     constructor(policy) {
         this.policy = policy;
     }
@@ -14,7 +15,13 @@ export class InMemoryEventBus {
             : await this.policy.checkEvent({ event: verifiedEvent, source });
         const report = reportParts(decision);
         if (report.accepted) {
-            this.events.push({ event: verifiedEvent, source, priority: report.priority });
+            const stored = { event: verifiedEvent, source, priority: report.priority };
+            this.events.push(stored);
+            for (const subscription of this.subscriptions) {
+                if (subscription.filters.some((filter) => matchFilter(filter, verifiedEvent))) {
+                    subscription.handler(stored);
+                }
+            }
         }
         return report;
     }
@@ -40,6 +47,11 @@ export class InMemoryEventBus {
         }
         const events = [...byId.values()].sort((left, right) => right.event.created_at - left.event.created_at || compareText(left.event.id, right.event.id));
         return { events: options.limit === undefined ? events : events.slice(0, options.limit) };
+    }
+    subscribe(filters, handler) {
+        const subscription = { filters: filters.length === 0 ? [{}] : filters, handler };
+        this.subscriptions.add(subscription);
+        return { close: () => this.subscriptions.delete(subscription) };
     }
 }
 function throwIfQueryStopped(options) {

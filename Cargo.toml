@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.11"
+version = "0.1.13"
 edition = "2024"
 license = "MIT"
 authors = ["Nostr Pubsub contributors"]
@@ -22,7 +22,7 @@ fips-tcp = "=0.2.0"
 fips-tcp-endpoint = "=0.2.0"
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
-nostr-pubsub = { version = "0.1.12", path = "crates/nostr-pubsub" }
+nostr-pubsub = { version = "0.1.13", path = "crates/nostr-pubsub" }
 nostr-pubsub-social-graph = { version = "0.2.2", path = "crates/nostr-pubsub-social-graph" }
 nostr-social-graph = "0.1.4"
 nostr-social-memory = "0.1.1"

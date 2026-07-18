@@ -68,6 +68,16 @@ export class InvWantRecordQueues {
     delete(peerId) {
         this.queues.delete(peerId);
     }
+    restart(peerId) {
+        const queue = this.queues.get(peerId);
+        if (queue === undefined)
+            return;
+        queue.bytes = 0;
+        for (const record of queue.records) {
+            record.offset = 0;
+            queue.bytes = saturatingAdd(queue.bytes, record.bytes.byteLength);
+        }
+    }
     clear() {
         this.queues.clear();
     }

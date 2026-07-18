@@ -1,6 +1,6 @@
 import { PubsubPeerSubscriptionStore } from './subscription.js';
 import { PubsubError } from './types.js';
-import { FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES } from './wire.js';
+import { FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES } from './wire.js';
 import {
   defaultFipsNostrPubsubClientLimits,
   type FipsNostrPubsubClientLimits,
@@ -15,8 +15,8 @@ export function validateClientLimits(
       throw clientError(`${name} must be a positive safe integer`);
     }
   }
-  if (limits.maxFrameBytes > FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES) {
-    throw clientError(`maxFrameBytes cannot exceed ${FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES}`);
+  if (limits.maxFrameBytes > FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES) {
+    throw clientError(`maxFrameBytes cannot exceed ${FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES}`);
   }
   if (limits.maxReplayEvents > limits.maxCachedEvents) {
     throw clientError('maxReplayEvents cannot exceed maxCachedEvents');

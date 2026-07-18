@@ -55,6 +55,24 @@ enum WireMessageVector {
         subscription_id: Option<String>,
         event: String,
     },
+    #[serde(rename = "inv")]
+    Inv {
+        #[serde(rename = "subscriptionIds")]
+        subscription_ids: Vec<String>,
+        #[serde(rename = "eventId")]
+        event_id: String,
+        #[serde(rename = "eventKind")]
+        event_kind: u16,
+        #[serde(rename = "payloadBytes")]
+        payload_bytes: u32,
+        #[serde(rename = "hopLimit")]
+        hop_limit: u8,
+    },
+    #[serde(rename = "want")]
+    Want {
+        #[serde(rename = "eventId")]
+        event_id: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -638,6 +656,22 @@ fn wire_message_from_vector(
                     )
                 },
             )
+        }
+        WireMessageVector::Inv {
+            subscription_ids,
+            event_id,
+            event_kind,
+            payload_bytes,
+            hop_limit,
+        } => FipsPubsubWireMessage::inv(
+            subscription_ids.iter().map(SubscriptionId::new).collect(),
+            nostr::EventId::from_hex(event_id).unwrap(),
+            *event_kind,
+            *payload_bytes,
+            *hop_limit,
+        ),
+        WireMessageVector::Want { event_id } => {
+            FipsPubsubWireMessage::want(nostr::EventId::from_hex(event_id).unwrap())
         }
     }
 }

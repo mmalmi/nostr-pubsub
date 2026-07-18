@@ -1,15 +1,8 @@
-import type { FipsPubsubServiceHandler } from './fips-relay-service.js';
+import type { FipsDatagramEndpoint } from '@fips/tcp';
 import type { NostrVerifiedEvent } from './types.js';
-import { FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES } from './wire.js';
+import { FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES } from './wire.js';
 
-export interface FipsPubsubClientNode {
-  registerService(port: number, handler: FipsPubsubServiceHandler): () => void;
-  sendDatagram(args: {
-    dst: string;
-    srcPort?: number;
-    dstPort: number;
-    payload: Uint8Array;
-  }): Promise<void>;
+export interface FipsPubsubClientNode extends FipsDatagramEndpoint {
   on?(event: 'peer' | 'session', listener: (event: unknown) => void): () => void;
 }
 
@@ -21,6 +14,8 @@ export interface FipsNostrPubsubClientLimits {
   maxReplayEvents: number;
   maxCachedEvents: number;
   maxFrameBytes: number;
+  maxHops: number;
+  receiveBatchSize: number;
 }
 
 export interface FipsNostrPubsubClientErrorContext {
@@ -31,6 +26,8 @@ export interface FipsNostrPubsubClientErrorContext {
 
 export interface FipsNostrPubsubClientOptions {
   node: FipsPubsubClientNode;
+  /** Local compressed FIPS public key used for deterministic TCP stream ownership. */
+  localPeerId: string;
   /** Explicit application-admitted FIPS identities. Connected peers are not inferred. */
   peers: () => readonly string[];
   allowedKinds?: readonly number[];
@@ -56,6 +53,8 @@ export function defaultFipsNostrPubsubClientLimits(): FipsNostrPubsubClientLimit
     maxFiltersPerSubscription: 4,
     maxReplayEvents: 8,
     maxCachedEvents: 256,
-    maxFrameBytes: FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES,
+    maxFrameBytes: FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES,
+    maxHops: 4,
+    receiveBatchSize: 64,
   };
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.13 - 2026-07-18
+
+- Add one transport-neutral router model for Hashtree/local indexes, FIPS
+  peers, generic peers, and traditional Nostr relays.
+- Query additive datasets concurrently, fail over ordered replicas, isolate
+  source failures, and merge verified event IDs with complete provenance and
+  one deterministic newest-first limit.
+- Route noisy live subscriptions through the same source policy, globally
+  deduplicate event IDs, and fan one close across every selected source.
+- Add an owned `NostrPubsubRouter` implementing query, publish, live subscribe,
+  and `PubsubProvider`, so daemons can store an explicit modular router without
+  a consumer-local wrapper.
+
 ## 0.1.12 - 2026-07-18
 
 - Add subscription-scoped `INV` and `WANT` extensions to the existing Nostr

@@ -4,15 +4,17 @@ import { fileURLToPath } from 'node:url';
 import { createInterface, type Interface } from 'node:readline';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
+import type { FipsServiceContext } from '@fips/tcp';
 import {
-  FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES,
+  FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES,
   FIPS_NOSTR_PUBSUB_SERVICE_PORT,
   FipsNostrPubsubClient,
+  FipsNostrPubsubEventSource,
   FipsPubsubWireCodec,
   type FipsPubsubClientNode,
-  type FipsPubsubServiceContext,
-  type FipsPubsubServiceHandler,
 } from '../src/index.js';
+
+type FipsPubsubServiceHandler = (context: FipsServiceContext) => Promise<void> | void;
 
 const ALICE = `02${'11'.repeat(32)}`;
 const BOB = `03${'22'.repeat(32)}`;
@@ -113,25 +115,25 @@ class MemoryFipsNode implements FipsPubsubClientNode {
   }): Promise<void> {
     const target = this.network.get(args.dst);
     if (target === undefined) throw new Error(`unroutable FIPS peer ${args.dst}`);
-    await target.receive({
-      src: this.id,
-      srcPort: args.srcPort ?? 0,
-      dstPort: args.dstPort,
-      payload: new Uint8Array(args.payload),
-      reply: async (payload, destinationPort) => target.sendDatagram({
-        dst: this.id,
-        srcPort: args.dstPort,
-        dstPort: destinationPort ?? args.srcPort ?? 0,
-        payload,
-      }),
-    });
+    queueMicrotask(() => void target.receive({
+        src: this.id,
+        srcPort: args.srcPort ?? 0,
+        dstPort: args.dstPort,
+        payload: new Uint8Array(args.payload),
+        reply: async (payload, destinationPort) => target.sendDatagram({
+          dst: this.id,
+          srcPort: args.dstPort,
+          dstPort: destinationPort ?? args.srcPort ?? 0,
+          payload,
+        }),
+      }).catch(() => undefined));
   }
 
   emit(event: 'peer' | 'session', value: unknown): void {
     for (const listener of this.listeners.get(event) ?? []) listener(value);
   }
 
-  private async receive(context: FipsPubsubServiceContext): Promise<void> {
+  private async receive(context: FipsServiceContext): Promise<void> {
     const handler = this.services.get(context.dstPort);
     if (handler === undefined) throw new Error(`no FIPS service on ${context.dstPort}`);
     await handler(context);
@@ -154,8 +156,8 @@ function chatEvent(createdAt: number, content: string) {
 }
 
 describe('FipsNostrPubsubClient', () => {
-  it('uses the native FSP datagram maximum exactly', () => {
-    expect(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES).toBe(65_525);
+  it('uses the shared TCP/FIPS record maximum exactly', () => {
+    expect(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES).toBe(65_525);
     const codec = new FipsPubsubWireCodec();
     const base = codec.encodeFrame({
       type: 'req',
@@ -165,15 +167,15 @@ describe('FipsNostrPubsubClient', () => {
     const exact = codec.encodeFrame({
       type: 'req',
       subscriptionId: 'boundary',
-      filters: [{ search: 'x'.repeat(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES - base.length) }],
+      filters: [{ search: 'x'.repeat(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES - base.length) }],
     });
 
-    expect(exact).toHaveLength(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES);
+    expect(exact).toHaveLength(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES);
     expect(codec.decodeFrame(exact).type).toBe('req');
     expect(() => codec.encodeFrame({
       type: 'req',
       subscriptionId: 'boundary',
-      filters: [{ search: `${'x'.repeat(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES - base.length)}x` }],
+      filters: [{ search: `${'x'.repeat(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES - base.length)}x` }],
     })).toThrow(/limit is 65525/);
   });
 
@@ -189,7 +191,7 @@ describe('FipsNostrPubsubClient', () => {
     const exact = codec.encodeFrame({
       type: 'req',
       subscriptionId: 'rust-boundary',
-      filters: [{ search: 'x'.repeat(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES - base.length) }],
+      filters: [{ search: 'x'.repeat(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES - base.length) }],
     });
     const exactResponse = await rust.roundtrip(exact);
     expect(exactResponse.ok).toBe(true);
@@ -203,7 +205,26 @@ describe('FipsNostrPubsubClient', () => {
     expect(decoded.type).toBe('event');
     if (decoded.type === 'event') expect(decoded.event.id).toBe(event.id);
 
-    const oversized = new Uint8Array(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES + 1);
+    const inventory = {
+      type: 'inv',
+      subscriptionIds: ['rust-history', 'rust-live'],
+      eventId: event.id,
+      eventKind: event.kind,
+      payloadBytes: new TextEncoder().encode(JSON.stringify(event)).byteLength,
+      hopLimit: 4,
+    } as const;
+    const inventoryResponse = await rust.roundtrip(codec.encodeFrame(inventory));
+    expect(inventoryResponse.ok).toBe(true);
+    expect(codec.decodeFrame(Uint8Array.from(Buffer.from(inventoryResponse.frame!, 'hex'))))
+      .toEqual(inventory);
+
+    const want = { type: 'want', eventId: event.id } as const;
+    const wantResponse = await rust.roundtrip(codec.encodeFrame(want));
+    expect(wantResponse.ok).toBe(true);
+    expect(codec.decodeFrame(Uint8Array.from(Buffer.from(wantResponse.frame!, 'hex'))))
+      .toEqual(want);
+
+    const oversized = new Uint8Array(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES + 1);
     const oversizedResponse = await rust.roundtrip(oversized);
     expect(oversizedResponse.ok).toBe(false);
     expect(oversizedResponse.error).toMatch(/limit is 65525/);
@@ -212,11 +233,13 @@ describe('FipsNostrPubsubClient', () => {
   it('carries signed REQ EVENT CLOSE traffic over admitted FIPS peers', async () => {
     const network = new MemoryFipsNetwork();
     const alice = new FipsNostrPubsubClient({
+      localPeerId: ALICE,
       node: network.node(ALICE),
       peers: () => [BOB],
       allowedKinds: [1060],
     }).start();
     const bob = new FipsNostrPubsubClient({
+      localPeerId: BOB,
       node: network.node(BOB),
       peers: () => [ALICE],
       allowedKinds: [1060],
@@ -247,16 +270,19 @@ describe('FipsNostrPubsubClient', () => {
   it('replays bounded signed events and drops traffic outside admission policy', async () => {
     const network = new MemoryFipsNetwork();
     const alice = new FipsNostrPubsubClient({
+      localPeerId: ALICE,
       node: network.node(ALICE),
       peers: () => [BOB],
       allowedKinds: [1060],
     }).start();
     const bob = new FipsNostrPubsubClient({
+      localPeerId: BOB,
       node: network.node(BOB),
       peers: () => [ALICE],
       allowedKinds: [1060],
     }).start();
     const charlie = new FipsNostrPubsubClient({
+      localPeerId: CHARLIE,
       node: network.node(CHARLIE),
       peers: () => [BOB],
       allowedKinds: [1060],
@@ -288,16 +314,51 @@ describe('FipsNostrPubsubClient', () => {
     await charlie.stop();
   });
 
+  it('adapts the same historical INV/WANT flow to the generic event router', async () => {
+    const network = new MemoryFipsNetwork();
+    const alice = new FipsNostrPubsubClient({
+      localPeerId: ALICE,
+      node: network.node(ALICE),
+      peers: () => [BOB],
+      allowedKinds: [1060],
+    }).start();
+    const bob = new FipsNostrPubsubClient({
+      localPeerId: BOB,
+      node: network.node(BOB),
+      peers: () => [ALICE],
+      allowedKinds: [1060],
+    }).start();
+    const event = chatEvent(1_700_000_013, 'router history');
+    await alice.publish(event);
+    await settle(alice, bob);
+
+    const source = new FipsNostrPubsubEventSource(bob, 200);
+    const pending = source.query([{ kinds: [1060] }], {
+      limit: 1,
+      deadline: Date.now() + 1_000,
+    });
+    await settle(alice, bob);
+    const report = await pending;
+    expect(report.complete).toBe(true);
+    expect(report.events.map(({ event: received }) => received.id)).toEqual([event.id]);
+    expect(report.events[0]?.source).toEqual({ id: ALICE, kind: 'fips-endpoint' });
+
+    await alice.stop();
+    await bob.stop();
+  });
+
   it('refreshes subscriptions when an admitted standalone link appears', async () => {
     const network = new MemoryFipsNetwork();
     const aliceNode = network.node(ALICE);
     const bobNode = network.node(BOB);
     const alicePeers = new Set<string>();
     const alice = new FipsNostrPubsubClient({
+      localPeerId: ALICE,
       node: aliceNode,
       peers: () => [...alicePeers],
     }).start();
     const bob = new FipsNostrPubsubClient({
+      localPeerId: BOB,
       node: bobNode,
       peers: () => [ALICE],
     }).start();
@@ -329,6 +390,7 @@ describe('FipsNostrPubsubClient', () => {
       },
     };
     const alice = new FipsNostrPubsubClient({
+      localPeerId: ALICE,
       node,
       peers: () => [BOB],
       onError: (error) => errors.push(error.message),
@@ -337,7 +399,9 @@ describe('FipsNostrPubsubClient', () => {
 
     await alice.idle();
     expect(sendDatagram).toHaveBeenCalledTimes(1);
-    expect(errors).toEqual(['temporary route failure']);
+    expect(errors).toEqual([
+      'connect TCP/FIPS Nostr pubsub peer: temporary route failure',
+    ]);
 
     for (const listener of peerListeners) {
       listener({ remotePubkey: BOB, state: 'connected' });
@@ -345,66 +409,62 @@ describe('FipsNostrPubsubClient', () => {
     await alice.idle();
 
     expect(sendDatagram).toHaveBeenCalledTimes(2);
-    const retry = sendDatagram.mock.calls[1]?.[0];
-    expect(alice.codec.decodeFrame(retry.payload)).toEqual(expect.objectContaining({ type: 'req' }));
+    expect(errors).toHaveLength(1);
     await alice.stop();
   });
 
-  it('retries when the route disconnects while a subscription request is in flight', async () => {
-    const peerListeners = new Set<(event: unknown) => void>();
-    let resolveFirstSend = () => {};
-    const firstSend = new Promise<void>((resolve) => { resolveFirstSend = resolve; });
-    const sendDatagram = vi.fn()
-      .mockImplementationOnce(() => firstSend)
-      .mockResolvedValue(undefined);
-    const node: FipsPubsubClientNode = {
-      registerService: () => () => {},
-      sendDatagram,
-      on: (event, listener) => {
-        if (event === 'peer') peerListeners.add(listener);
-        return () => peerListeners.delete(listener);
-      },
-    };
+  it('reconnects the reliable stream after the admitted FIPS route returns', async () => {
+    const network = new MemoryFipsNetwork();
+    const aliceNode = network.node(ALICE);
+    const bobNode = network.node(BOB);
     const alice = new FipsNostrPubsubClient({
-      node,
+      localPeerId: ALICE,
+      node: aliceNode,
       peers: () => [BOB],
     }).start();
-    alice.subscribe([{ kinds: [1060] }], vi.fn());
-    expect(sendDatagram).toHaveBeenCalledTimes(1);
+    const bob = new FipsNostrPubsubClient({
+      localPeerId: BOB,
+      node: bobNode,
+      peers: () => [ALICE],
+    }).start();
+    const received = vi.fn();
+    bob.subscribe([{ kinds: [1060] }], received);
+    await settle(alice, bob);
 
-    for (const listener of peerListeners) {
-      listener({ remotePubkey: BOB, state: 'disconnected' });
-    }
-    resolveFirstSend();
-    await alice.idle();
+    aliceNode.emit('peer', { remotePubkey: BOB, state: 'disconnected' });
+    bobNode.emit('peer', { remotePubkey: ALICE, state: 'disconnected' });
+    await settle(alice, bob);
+    aliceNode.emit('peer', { remotePubkey: BOB, state: 'connected' });
+    bobNode.emit('peer', { remotePubkey: ALICE, state: 'connected' });
+    await settle(alice, bob);
 
-    for (const listener of peerListeners) {
-      listener({ remotePubkey: BOB, state: 'connected' });
-    }
-    await alice.idle();
-
-    const messageTypes = sendDatagram.mock.calls.map(([request]) =>
-      alice.codec.decodeFrame(request.payload).type,
-    );
-    expect(messageTypes).toEqual(['req', 'close', 'req']);
+    const event = chatEvent(1_700_000_018, 'after reliable reconnect');
+    await alice.publish(event);
+    await settle(alice, bob);
+    expect(received).toHaveBeenCalledWith(expect.objectContaining({ id: event.id }), ALICE);
     await alice.stop();
+    await bob.stop();
   });
 
   it('forwards a new signed event across explicit admitted peer links', async () => {
     const network = new MemoryFipsNetwork();
     const alice = new FipsNostrPubsubClient({
+      localPeerId: ALICE,
       node: network.node(ALICE),
       peers: () => [BOB],
     }).start();
     const bob = new FipsNostrPubsubClient({
+      localPeerId: BOB,
       node: network.node(BOB),
       peers: () => [ALICE, CHARLIE],
     }).start();
     const charlie = new FipsNostrPubsubClient({
+      localPeerId: CHARLIE,
       node: network.node(CHARLIE),
       peers: () => [BOB],
     }).start();
     const received = vi.fn();
+    bob.subscribe([{ kinds: [1060] }], vi.fn());
     charlie.subscribe([{ kinds: [1060] }], received);
     await settle(alice, bob, charlie);
 
@@ -419,25 +479,27 @@ describe('FipsNostrPubsubClient', () => {
     await charlie.stop();
   });
 
-  it('retries events that were not sent to an admitted peer', async () => {
-    const peers = new Set<string>();
-    const sendDatagram = vi.fn()
-      .mockRejectedValueOnce(new Error('temporary route failure'))
-      .mockResolvedValue(undefined);
+  it('caches a publication until a peer opens a matching historical REQ', async () => {
+    const network = new MemoryFipsNetwork();
     const alice = new FipsNostrPubsubClient({
-      node: { registerService: () => () => {}, sendDatagram },
-      peers: () => [...peers],
+      localPeerId: ALICE,
+      node: network.node(ALICE),
+      peers: () => [BOB],
+    }).start();
+    const bob = new FipsNostrPubsubClient({
+      localPeerId: BOB,
+      node: network.node(BOB),
+      peers: () => [ALICE],
     }).start();
     const event = chatEvent(1_700_000_020, 'retry me');
 
-    await expect(alice.publish(event)).rejects.toThrow(/no admitted/);
-    expect(sendDatagram).not.toHaveBeenCalled();
-
-    peers.add(BOB);
-    await expect(alice.publish(event)).rejects.toThrow(/all FIPS pubsub deliveries failed/);
-    await expect(alice.publish(event)).resolves.toBeUndefined();
-    expect(sendDatagram).toHaveBeenCalledTimes(2);
+    await alice.publish(event);
+    const received = vi.fn();
+    bob.subscribe([{ kinds: [1060] }], received);
+    await settle(alice, bob);
+    expect(received).toHaveBeenCalledWith(expect.objectContaining({ id: event.id }), ALICE);
 
     await alice.stop();
+    await bob.stop();
   });
 });

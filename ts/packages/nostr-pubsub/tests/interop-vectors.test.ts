@@ -185,7 +185,7 @@ describe('Rust/TypeScript interop vectors', () => {
       for (const eventName of route.events) {
         await bus.publish(events[eventName], sourceRoute.source);
       }
-      routeSources.push({ route: sourceRoute, bus });
+      routeSources.push({ route: sourceRoute, reader: bus });
     }
 
     const report = await queryRoutesWithPolicy(
@@ -214,6 +214,17 @@ function wireMessageFromVector(message: (typeof vectors.wireCases)[number]['mess
             subscriptionId: message.subscriptionId,
             event: events[message.event],
           };
+    case 'inv':
+      return {
+        type: 'inv',
+        subscriptionIds: message.subscriptionIds,
+        eventId: message.eventId,
+        eventKind: message.eventKind,
+        payloadBytes: message.payloadBytes,
+        hopLimit: message.hopLimit,
+      };
+    case 'want':
+      return { type: 'want', eventId: message.eventId };
   }
 }
 
@@ -229,6 +240,10 @@ function wireMessageSummary(message: FipsPubsubWireMessage): unknown {
         subscriptionId: message.subscriptionId,
         eventId: message.event.id,
       };
+    case 'inv':
+      return message;
+    case 'want':
+      return message;
   }
 }
 

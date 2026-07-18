@@ -1,8 +1,9 @@
 import type { NostrFilter, NostrVerifiedEvent, SourceId } from './types.js';
 import { PubsubPeerSubscriptionStore, type PubsubPeerSubscription, type PubsubSubscriptionUpdate } from './subscription.js';
-/** Maximum FSP service body after its encrypted inner and port headers. */
-export declare const FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES = 65525;
+/** Maximum encoded Nostr frame carried in one reliable TCP record. */
+export declare const FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES = 65525;
 export declare const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES = 65525;
+export declare const FIPS_NOSTR_PUBSUB_SERVICE_PORT = 7368;
 export type FipsPubsubWireMessage = {
     type: 'req';
     subscriptionId: string;
@@ -14,6 +15,16 @@ export type FipsPubsubWireMessage = {
     type: 'event';
     event: NostrVerifiedEvent;
     subscriptionId?: string;
+} | {
+    type: 'inv';
+    subscriptionIds: string[];
+    eventId: string;
+    eventKind: number;
+    payloadBytes: number;
+    hopLimit: number;
+} | {
+    type: 'want';
+    eventId: string;
 };
 export declare class FipsPubsubWireCodec {
     readonly maxFrameBytes: number;

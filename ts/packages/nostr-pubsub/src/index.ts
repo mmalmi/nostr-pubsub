@@ -119,6 +119,8 @@ export {
   type EventBus,
   type NostrEventPublisher,
   type NostrEventReader,
+  type NostrEventSubscriber,
+  type NostrEventSubscription,
   type PublishReport,
   type QueryEvent,
   type QueryReport,
@@ -151,8 +153,23 @@ export {
 } from './routing.js';
 
 export {
+  allowAllLiveRoutes,
+  subscribeRoutesWithPolicy,
+  type LiveRouteSource,
+  type RoutedLiveEvent,
+  type RoutedLiveSubscription,
+} from './live-routing.js';
+
+export {
+  NostrPubsubRouter,
+  type NostrPubsubRouterOptions,
+  type RouterPublishSource,
+} from './router.js';
+
+export {
   DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES,
-  FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES,
+  FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES,
+  FIPS_NOSTR_PUBSUB_SERVICE_PORT,
   FipsPubsubWireAdapter,
   FipsPubsubWireCodec,
   type FipsPubsubInbound,
@@ -160,25 +177,20 @@ export {
 } from './wire.js';
 
 export {
-  FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS,
-  FIPS_NOSTR_PUBSUB_SERVICE_PORT,
-  FipsNostrRelayService,
-  defaultFipsNostrRelayServiceLimits,
-  type FipsNostrRelayServiceErrorContext,
-  type FipsNostrRelayServiceLimits,
-  type FipsNostrRelayServiceOptions,
-  type FipsPubsubServiceContext,
-  type FipsPubsubServiceHandler,
-  type FipsPubsubServiceNode,
+  NostrRelayEventSource,
   type NostrRelaySubscription,
   type NostrRelayTransport,
   type NostrRelayTransportHandlers,
-} from './fips-relay-service.js';
+} from './relay-event-source.js';
 
 export {
   FIPS_NOSTR_PUBSUB_CAPABILITY,
   FipsNostrPubsubClient,
 } from './fips-pubsub-client.js';
+export {
+  DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS,
+  FipsNostrPubsubEventSource,
+} from './fips-pubsub-event-source.js';
 export {
   defaultFipsNostrPubsubClientLimits,
   type FipsNostrPubsubClientErrorContext,

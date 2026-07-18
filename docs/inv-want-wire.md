@@ -40,3 +40,21 @@ Peer discovery is outside this wire format. Applications can discover signed
 FIPS endpoint adverts over ordinary Nostr subscriptions, admit those peers
 under product policy, connect them with FIPS, and pass the connected peer IDs
 to `InvWantMesh`. No relay URL or gateway is built into this package.
+
+## Nostr subscription INV/WANT
+
+The high-level FIPS pubsub client uses ordinary Nostr arrays on reliable
+FIPS-TCP port 7368. `REQ`, addressed `EVENT`, and `CLOSE` retain their Nostr
+meanings. The extension is:
+
+```json
+["INV", ["history-sub", "live-sub"], "<event id>", 1, 512, 4]
+["WANT", "<event id>"]
+```
+
+One provider groups every matching open subscription ID into one inventory.
+The receiver deduplicates an event ID globally across peers and subscriptions,
+sends one `WANT` for that one event, accepts one ordinary addressed `EVENT`, and
+fans it out to every matching local subscription. Historical replay and live
+publication use exactly the same exchange. Shared Rust/TypeScript vectors cover
+all five message types.

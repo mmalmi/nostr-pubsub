@@ -1,5 +1,5 @@
 import { type NostrFilter, type QueryOptions } from './types.js';
-import type { EventBus, NostrEventReader, QueryEvent } from './event-bus.js';
+import type { NostrEventReader, QueryEvent } from './event-bus.js';
 import { type PolicyDecision, type PubsubPolicy } from './policy.js';
 import { type EventSource } from './source.js';
 export declare const DEFAULT_ROUTE_DATASET_ID = "default";
@@ -14,9 +14,7 @@ export interface SourceRoute {
 }
 export interface RouteQuerySource {
     route: SourceRoute;
-    reader?: NostrEventReader;
-    /** @deprecated Use reader. Retained while EventBus callers migrate. */
-    bus?: EventBus;
+    reader: NostrEventReader;
 }
 export interface RoutedQueryOptions {
     query?: QueryOptions;

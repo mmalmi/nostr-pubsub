@@ -186,13 +186,7 @@ function mergeRoutedEvents(events) {
     return [...byId.values()].sort((left, right) => right.event.created_at - left.event.created_at || compareText(left.event.id, right.event.id));
 }
 function runReader(routeSource, filters, options) {
-    const reader = routeSource.reader ?? routeSource.bus;
-    if (reader === undefined) {
-        return Promise.resolve({
-            type: 'failure',
-            error: new Error(`Route ${routeSource.route.id} has no event reader`),
-        });
-    }
+    const reader = routeSource.reader;
     if (options.signal?.aborted)
         return Promise.resolve({ type: 'cancelled', stop: true });
     if (options.deadline !== undefined && Date.now() >= options.deadline) {

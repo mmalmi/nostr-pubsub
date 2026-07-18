@@ -25,9 +25,10 @@ compatibility and security boundaries.
 
 ## Event readers and dataset routing
 
-`NostrEventReader` and `NostrEventPublisher` let applications compose read-only
-indexes without granting them publication authority. `EventBus` remains the
-backwards-compatible combination of both contracts. Routes with one `datasetId`
+`NostrEventReader`, `NostrEventPublisher`, and `NostrEventSubscriber` let
+applications compose read-only indexes and live sources without granting them
+publication authority. `EventBus` combines the reader and publisher contracts.
+Routes with one `datasetId`
 are replicas of the same logical data; different dataset identities are
 additive and their verified events are merged:
 
@@ -50,25 +51,33 @@ const report = await queryRoutesWithPolicy([
 }, policy);
 ```
 
-The router tries same-dataset replicas in policy order until one produces a
-complete response, queries allowed additive datasets concurrently, isolates
-source failures, and applies one newest-first limit after verified-ID
-deduplication. The report retains all route provenance and exposes attempt and
-dataset completeness. Policy drops happen before reader invocation. Legacy
-routes use the shared `default` dataset and `{ route, bus }` remains supported
-during migration.
+The historical router tries same-dataset replicas in policy order until one
+produces a complete response, queries allowed additive datasets concurrently,
+isolates source failures, and applies one newest-first limit after verified-ID
+deduplication. The live router opens every allowed source, globally deduplicates
+event IDs across noisy mesh/index/relay subscriptions, and closes every source
+as one subscription. Reports retain route provenance and dataset completeness;
+there is no legacy `{ route, bus }` alias.
+
+`NostrPubsubRouter` owns those explicit query, publish, and live route lists for
+long-running services. A Hashtree index can be query-only, while FIPS and relay
+adapters can independently participate in publication and live subscription;
+the router never invents a fallback backend.
 
 `FipsNostrPubsubClient` is the browser peer carrier matching Rust
-`FipsPubsubClient` on authenticated FSP service `nostr.pubsub/1` (port 7368).
-It carries only verified Nostr `REQ`, `EVENT`, and `CLOSE` frames. The
-application supplies the admitted peer identities explicitly, so arbitrary
-connected FIPS peers are never treated as pubsub providers:
+`FipsPubsubClient` on authenticated reliable FIPS-TCP service
+`nostr.pubsub/1` (port 7368). It carries verified Nostr `REQ`, `EVENT`, and
+`CLOSE` frames plus grouped `INV` and one-event `WANT`. Historical catch-up and
+new live events use this same flow. The application supplies admitted peer
+identities explicitly, so arbitrary connected FIPS peers are never treated as
+pubsub providers:
 
 ```ts
 import { FipsNostrPubsubClient } from 'nostr-pubsub';
 
 const pubsub = new FipsNostrPubsubClient({
   node: fipsNode,
+  localPeerId: fipsNode.identity.publicKey,
   peers: () => appOwnedStandaloneLinks.map((link) => link.remotePubkey),
   allowedKinds: [1059, 1060, 30078, 37368],
 }).start();
@@ -80,7 +89,7 @@ await pubsub.publish(signedChatEvent);
 subscription.close();
 ```
 
-Frames are bounded to the native FSP service-body maximum of 65,525 bytes.
+Records are bounded to the shared TCP/FIPS maximum of 65,525 bytes.
 Peer refresh events can add or restore explicitly admitted standalone links;
 they do not create links or infer admission policy.
 
@@ -117,9 +126,9 @@ const report = await driver.poll();
 the configured namespace and version. Capability roster registration remains
 an FSP concern; the TypeScript FIPS API does not yet expose the Rust endpoint's
 lifecycle-bound capability registration. The driver does not advertise through
-plaintext discovery or add a product-local fallback. The existing
-`FipsNostrRelayService` datagram adapter remains available for its separate
-`REQ`/`EVENT`/`CLOSE` contract.
+plaintext discovery or add a product-local fallback. The old
+`FipsNostrRelayService` datagram bridge has been removed; use
+`FipsNostrPubsubClient` and the router adapters.
 
 The simultaneous-connect tie-break normalizes FIPS's compressed hex peer keys
 to NIP-19 `npub` strings before ordering them. This deliberately matches the

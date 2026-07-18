@@ -10,11 +10,14 @@ export { DEFAULT_INV_WANT_FANOUT, DEFAULT_INV_WANT_MAX_EVENT_BYTES, DEFAULT_INV_
 export { InvWantMesh, defaultInvWantMeshOptions, type InvWantAction, type InvWantMeshOptions, type PeerBehaviorObservation, } from './mesh.js';
 export { DEFAULT_INV_WANT_MAX_CACHE_BYTES, type InvWantMeshRetainedState, } from './mesh-resources.js';
 export { meshPeer, selectMeshPeers, type MeshPeer, } from './mesh-peer.js';
-export { InMemoryEventBus, type EventBus, type NostrEventPublisher, type NostrEventReader, type PublishReport, type QueryEvent, type QueryReport, } from './event-bus.js';
+export { InMemoryEventBus, type EventBus, type NostrEventPublisher, type NostrEventReader, type NostrEventSubscriber, type NostrEventSubscription, type PublishReport, type QueryEvent, type QueryReport, } from './event-bus.js';
 export { DEFAULT_ROUTE_DATASET_ID, fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRouteDataset, withRoutePriority, withRouteReason, type RouteAttempt, type RouteAttemptOutcome, type RouteFailure, type RouteQuerySource, type RoutedDatasetReport, type RoutedEventProvenance, type RoutedQueryEvent, type RoutedQueryOptions, type RoutedQueryReport, type SourceRoute, } from './routing.js';
-export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES, FipsPubsubWireAdapter, FipsPubsubWireCodec, type FipsPubsubInbound, type FipsPubsubWireMessage, } from './wire.js';
-export { FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS, FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsNostrRelayService, defaultFipsNostrRelayServiceLimits, type FipsNostrRelayServiceErrorContext, type FipsNostrRelayServiceLimits, type FipsNostrRelayServiceOptions, type FipsPubsubServiceContext, type FipsPubsubServiceHandler, type FipsPubsubServiceNode, type NostrRelaySubscription, type NostrRelayTransport, type NostrRelayTransportHandlers, } from './fips-relay-service.js';
+export { allowAllLiveRoutes, subscribeRoutesWithPolicy, type LiveRouteSource, type RoutedLiveEvent, type RoutedLiveSubscription, } from './live-routing.js';
+export { NostrPubsubRouter, type NostrPubsubRouterOptions, type RouterPublishSource, } from './router.js';
+export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsPubsubWireAdapter, FipsPubsubWireCodec, type FipsPubsubInbound, type FipsPubsubWireMessage, } from './wire.js';
+export { NostrRelayEventSource, type NostrRelaySubscription, type NostrRelayTransport, type NostrRelayTransportHandlers, } from './relay-event-source.js';
 export { FIPS_NOSTR_PUBSUB_CAPABILITY, FipsNostrPubsubClient, } from './fips-pubsub-client.js';
+export { DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS, FipsNostrPubsubEventSource, } from './fips-pubsub-event-source.js';
 export { defaultFipsNostrPubsubClientLimits, type FipsNostrPubsubClientErrorContext, type FipsNostrPubsubClientLimits, type FipsNostrPubsubClientOptions, type FipsNostrPubsubEventHandler, type FipsNostrPubsubSubscription, type FipsPubsubClientNode, } from './fips-pubsub-client-types.js';
 export { FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL, FIPS_NOSTR_PUBSUB_INV_WANT_VERSION, FipsInvWantStream, defaultFipsInvWantStreamOptions, type FipsInvWantStreamAction, type FipsInvWantStreamOptions, type MeshPeerPolicy, } from './fips-invwant-stream.js';
 export { FipsInvWantTcpDriver } from './fips-invwant-tcp-driver.js';

@@ -1,38 +1,63 @@
-import { cloneFilter, subscriptionFiltersMatch } from './filter.js';
+import { cloneFilter } from './filter.js';
 import { verifyNostrEvent, } from './types.js';
 import { FipsPubsubWireCodec, } from './wire.js';
-import { FIPS_NOSTR_PUBSUB_SERVICE_PORT, } from './fips-relay-service.js';
-import { clientError, createClientPeerSubscriptionStore, normalizeAllowedKinds, normalizePeerId, parseConnectionEvent, rememberId, validateClientLimits, } from './fips-pubsub-client-support.js';
+import { FIPS_NOSTR_PUBSUB_SERVICE_PORT } from './wire.js';
+import { FipsPubsubTcpTransport } from './fips-pubsub-tcp-transport.js';
+import { FipsPubsubInvWantState } from './fips-pubsub-invwant.js';
+import { FipsPubsubEventCache, acceptEvent, acceptInventory, answerWant, deliverSubscription, inventoryMessage, replayLocalSubscription, retryPendingWants, } from './fips-pubsub-client-protocol.js';
+import { clientError, createClientPeerSubscriptionStore, normalizeAllowedKinds, normalizePeerId, parseConnectionEvent, validateClientLimits, } from './fips-pubsub-client-support.js';
 export const FIPS_NOSTR_PUBSUB_CAPABILITY = 'nostr.pubsub/1';
 export class FipsNostrPubsubClient {
     limits;
     codec;
     node;
+    localPeerId;
     peers;
     allowedKinds;
     onError;
     peerSubscriptions;
     subscriptions = new Map();
-    cachedEvents = new Map();
-    cachedEventOrder = [];
+    events;
+    invWant;
     pending = new Set();
-    unregisterService;
+    transport;
     removePeerListener;
     removeSessionListener;
     nextSubscriptionId = 1;
     constructor(options) {
         this.node = options.node;
+        this.localPeerId = normalizePeerId(options.localPeerId) ?? '';
+        if (this.localPeerId === '')
+            throw clientError('localPeerId must be a compressed FIPS key');
         this.peers = options.peers;
         this.onError = options.onError ?? (() => { });
         this.limits = validateClientLimits(options.limits);
+        this.invWant = new FipsPubsubInvWantState(this.limits.maxActiveSubscriptions * this.limits.maxReplayEvents, this.limits.maxPeers);
+        this.events = new FipsPubsubEventCache(this.limits.maxCachedEvents);
         this.codec = new FipsPubsubWireCodec(this.limits.maxFrameBytes);
         this.allowedKinds = normalizeAllowedKinds(options.allowedKinds);
         this.peerSubscriptions = createClientPeerSubscriptionStore(this.limits);
     }
     start() {
-        if (this.unregisterService !== undefined)
+        if (this.transport !== undefined)
             return this;
-        this.unregisterService = this.node.registerService(FIPS_NOSTR_PUBSUB_SERVICE_PORT, (context) => this.handle(context));
+        const maxQueuedRecordsPerPeer = this.limits.maxActiveSubscriptions
+            + this.limits.maxReplayEvents + 1;
+        this.transport = new FipsPubsubTcpTransport(this.node, this.localPeerId, {
+            servicePort: FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+            maxPeers: this.limits.maxPeers,
+            maxFrameBytes: this.limits.maxFrameBytes,
+            maxQueuedRecordsPerPeer,
+            maxQueuedBytesPerPeer: (this.limits.maxFrameBytes + 4) * maxQueuedRecordsPerPeer,
+            maxIoBytesPerDrive: 512 * 1024,
+            maxFramesPerDrive: this.limits.receiveBatchSize,
+        }, {
+            frame: (peerId, frame) => this.handleFrame(peerId, frame),
+            connected: (peerId) => this.handleTransportConnected(peerId),
+            disconnected: (peerId) => this.handleTransportDisconnected(peerId),
+            tick: (nowMs) => this.retryPendingWants(nowMs),
+            error: (error) => this.report(error, { operation: 'receive' }),
+        });
         this.removePeerListener = this.node.on?.('peer', (event) => this.handlePeerEvent(event));
         this.removeSessionListener = this.node.on?.('session', (event) => this.handleSessionEvent(event));
         this.refreshPeers();
@@ -43,15 +68,16 @@ export class FipsNostrPubsubClient {
             this.closeSubscription(subscriptionId);
         }
         await this.idle();
-        this.unregisterService?.();
-        this.unregisterService = undefined;
         this.removePeerListener?.();
         this.removePeerListener = undefined;
         this.removeSessionListener?.();
         this.removeSessionListener = undefined;
+        const transport = this.transport;
+        this.transport = undefined;
+        await transport?.dispose();
         this.peerSubscriptions = createClientPeerSubscriptionStore(this.limits);
-        this.cachedEvents.clear();
-        this.cachedEventOrder.length = 0;
+        this.events.clear();
+        this.invWant.clear();
     }
     subscribe(filters, handler) {
         this.requireStarted();
@@ -75,7 +101,7 @@ export class FipsNostrPubsubClient {
         };
         this.subscriptions.set(id, subscription);
         this.refreshSubscriptionPeers(subscription);
-        this.replayLocal(subscription);
+        replayLocalSubscription(this.events, subscription, this.limits.maxReplayEvents, this.limits.maxCachedEvents, (error) => this.report(error, { operation: 'event-handler', subscriptionId: id }));
         let closed = false;
         return {
             id,
@@ -93,22 +119,18 @@ export class FipsNostrPubsubClient {
         const peers = this.currentPeers();
         if (peers.length === 0)
             throw clientError('no admitted FIPS pubsub peers are available');
-        if (!this.rememberEvent(verified))
+        if (!this.events.remember(verified, undefined, this.limits.maxHops))
             return;
-        const addressed = peers.flatMap((peerId) => this.peerSubscriptions.matchingSubscriptions(peerId, verified).map((subscription) => ({
-            peerId,
-            message: {
-                type: 'event',
-                subscriptionId: subscription.subscriptionId,
-                event: verified,
-            },
-        })));
-        const deliveries = addressed.length > 0
-            ? addressed
-            : peers.map((peerId) => ({
-                peerId,
-                message: { type: 'event', event: verified },
-            }));
+        const deliveries = peers.flatMap((peerId) => {
+            const subscriptionIds = this.peerSubscriptions
+                .matchingSubscriptions(peerId, verified)
+                .map((subscription) => subscription.subscriptionId);
+            return subscriptionIds.length === 0
+                ? []
+                : [{ peerId, message: inventoryMessage(verified, subscriptionIds, this.limits.maxHops) }];
+        });
+        if (deliveries.length === 0)
+            return;
         const results = await Promise.all(deliveries.map(async ({ peerId, message }) => {
             try {
                 await this.track(this.send(peerId, message));
@@ -120,11 +142,7 @@ export class FipsNostrPubsubClient {
             }
         }));
         if (!results.some(Boolean)) {
-            this.cachedEvents.delete(verified.id);
-            const cachedIndex = this.cachedEventOrder.indexOf(verified.id);
-            if (cachedIndex >= 0)
-                this.cachedEventOrder.splice(cachedIndex, 1);
-            throw clientError('all FIPS pubsub deliveries failed');
+            throw clientError('all FIPS pubsub inventory deliveries failed');
         }
     }
     refreshPeers() {
@@ -139,16 +157,16 @@ export class FipsNostrPubsubClient {
         return this.subscriptions.size;
     }
     async idle() {
-        while (this.pending.size > 0)
-            await Promise.allSettled([...this.pending]);
+        for (let turn = 0; turn < 4; turn += 1) {
+            while (this.pending.size > 0)
+                await Promise.allSettled([...this.pending]);
+            await this.transport?.idle();
+        }
     }
-    async handle(context) {
-        const peerId = normalizePeerId(context.src);
-        if (peerId === undefined ||
-            context.srcPort !== FIPS_NOSTR_PUBSUB_SERVICE_PORT ||
-            context.dstPort !== FIPS_NOSTR_PUBSUB_SERVICE_PORT ||
-            !this.currentPeers().includes(peerId)) {
-            this.report(clientError('dropped a datagram outside admitted nostr.pubsub/1 peers'), {
+    handleFrame(sourcePeer, frame) {
+        const peerId = normalizePeerId(sourcePeer);
+        if (peerId === undefined || !this.currentPeers().includes(peerId)) {
+            this.report(clientError('dropped a frame outside admitted nostr.pubsub/1 peers'), {
                 operation: 'receive',
                 peerId,
             });
@@ -156,7 +174,7 @@ export class FipsNostrPubsubClient {
         }
         let message;
         try {
-            message = this.codec.decodeFrame(context.payload);
+            message = this.codec.decodeFrame(frame);
             if (message.type === 'event')
                 this.admitEvent(message.event);
         }
@@ -166,13 +184,8 @@ export class FipsNostrPubsubClient {
         }
         if (message.type === 'req') {
             this.peerSubscriptions.upsertFilters(peerId, message.subscriptionId, message.filters);
-            for (const cached of this.replayEvents(message.filters)) {
-                const frame = this.codec.encodeFrame({
-                    type: 'event',
-                    subscriptionId: message.subscriptionId,
-                    event: cached.event,
-                });
-                this.background(context.reply(frame, FIPS_NOSTR_PUBSUB_SERVICE_PORT), { operation: 'send', peerId, subscriptionId: message.subscriptionId });
+            for (const cached of this.events.replay(message.filters, this.limits.maxReplayEvents)) {
+                this.background(this.send(peerId, inventoryMessage(cached.event, [message.subscriptionId], cached.hopLimit)), { operation: 'send', peerId, subscriptionId: message.subscriptionId });
             }
             return;
         }
@@ -180,32 +193,72 @@ export class FipsNostrPubsubClient {
             this.peerSubscriptions.remove(peerId, message.subscriptionId);
             return;
         }
-        const isNew = this.rememberEvent(message.event, peerId);
-        if (message.subscriptionId !== undefined) {
-            const subscription = this.subscriptions.get(message.subscriptionId);
-            if (subscription !== undefined)
-                this.deliver(subscription, message.event, peerId);
+        if (message.type === 'inv') {
+            acceptInventory(this.protocolContext(), peerId, message);
+            return;
         }
-        else {
-            for (const subscription of this.subscriptions.values()) {
-                this.deliver(subscription, message.event, peerId);
-            }
+        if (message.type === 'want') {
+            answerWant(this.protocolContext(), peerId, message.eventId);
+            return;
         }
-        if (isNew)
-            this.forwardEvent(message.event, peerId);
+        acceptEvent(this.protocolContext(), peerId, message);
     }
-    forwardEvent(event, sourcePeer) {
+    forwardEvent(event, sourcePeer, hopLimit) {
+        if (hopLimit === 0)
+            return;
         for (const peerId of this.currentPeers()) {
             if (peerId === sourcePeer)
                 continue;
-            for (const subscription of this.peerSubscriptions.matchingSubscriptions(peerId, event)) {
-                this.background(this.send(peerId, {
-                    type: 'event',
-                    subscriptionId: subscription.subscriptionId,
-                    event,
-                }), { operation: 'send', peerId, subscriptionId: subscription.subscriptionId });
-            }
+            const subscriptionIds = this.peerSubscriptions
+                .matchingSubscriptions(peerId, event)
+                .map((subscription) => subscription.subscriptionId);
+            if (subscriptionIds.length === 0)
+                continue;
+            this.background(this.send(peerId, inventoryMessage(event, subscriptionIds, hopLimit)), { operation: 'send', peerId });
         }
+    }
+    retryPendingWants(nowMs) {
+        retryPendingWants(this.protocolContext(), nowMs);
+    }
+    protocolContext() {
+        return {
+            maxActiveSubscriptions: this.limits.maxActiveSubscriptions,
+            maxHops: this.limits.maxHops,
+            invWant: this.invWant,
+            events: this.events,
+            validSubscriptionIds: (peerId, subscriptionIds, eventId) => subscriptionIds.filter((subscriptionId) => {
+                const subscription = this.subscriptions.get(subscriptionId);
+                return subscription !== undefined &&
+                    (subscription.peers.has(peerId) || subscription.pendingPeers.has(peerId)) &&
+                    !subscription.recentIds.has(eventId);
+            }),
+            eventForWant: (peerId, eventId) => {
+                const cached = this.events.get(eventId);
+                if (cached === undefined)
+                    return undefined;
+                const subscription = this.peerSubscriptions
+                    .matchingSubscriptions(peerId, cached.event)[0];
+                return subscription === undefined
+                    ? undefined
+                    : { subscriptionId: subscription.subscriptionId, event: cached.event };
+            },
+            deliverEvent: (peerId, event) => {
+                let delivered = false;
+                for (const subscription of this.subscriptions.values()) {
+                    delivered = deliverSubscription(subscription, event, peerId, this.limits.maxCachedEvents, (error) => this.report(error, {
+                        operation: 'event-handler',
+                        peerId,
+                        subscriptionId: subscription.id,
+                    })) || delivered;
+                }
+                return delivered;
+            },
+            forwardEvent: (peerId, event, hopLimit) => this.forwardEvent(event, peerId, hopLimit),
+            send: (peerId, message) => this.background(this.send(peerId, message), {
+                operation: 'send',
+                peerId,
+            }),
+        };
     }
     normalizedFilters(subscriptionId, filters) {
         const decoded = this.codec.decodeFrame(this.codec.encodeFrame({
@@ -231,8 +284,25 @@ export class FipsNostrPubsubClient {
             if (subscription.peers.has(peerId) || subscription.pendingPeers.has(peerId))
                 continue;
             subscription.pendingPeers.add(peerId);
-            this.background(this.sendSubscriptionRequest(subscription, peerId), { operation: 'send', peerId, subscriptionId: subscription.id });
+            if (this.transport?.isConnected(peerId))
+                this.queueSubscriptionRequest(subscription, peerId);
+            else
+                this.connectPeer(peerId);
         }
+    }
+    connectPeer(peerId) {
+        const transport = this.transport;
+        if (transport === undefined)
+            return;
+        this.background(transport.connectPeer(peerId).catch((error) => {
+            for (const subscription of this.subscriptions.values()) {
+                subscription.pendingPeers.delete(peerId);
+            }
+            throw error;
+        }), { operation: 'send', peerId });
+    }
+    queueSubscriptionRequest(subscription, peerId) {
+        this.background(this.sendSubscriptionRequest(subscription, peerId), { operation: 'send', peerId, subscriptionId: subscription.id });
     }
     async sendSubscriptionRequest(subscription, peerId) {
         try {
@@ -259,6 +329,7 @@ export class FipsNostrPubsubClient {
         if (subscription === undefined)
             return;
         this.subscriptions.delete(subscriptionId);
+        this.invWant.removeSubscription(subscriptionId);
         for (const peerId of subscription.peers) {
             this.background(this.send(peerId, { type: 'close', subscriptionId }), {
                 operation: 'send',
@@ -266,48 +337,6 @@ export class FipsNostrPubsubClient {
                 subscriptionId,
             });
         }
-    }
-    deliver(subscription, event, sourcePeer) {
-        if ((!subscription.peers.has(sourcePeer) && !subscription.pendingPeers.has(sourcePeer)) ||
-            !subscriptionFiltersMatch(subscription.filters, event) ||
-            subscription.recentIds.has(event.id))
-            return;
-        rememberId(subscription.recentIds, subscription.recentOrder, event.id, this.limits.maxCachedEvents);
-        try {
-            subscription.handler(event, sourcePeer);
-        }
-        catch (error) {
-            this.report(error, {
-                operation: 'event-handler',
-                peerId: sourcePeer,
-                subscriptionId: subscription.id,
-            });
-        }
-    }
-    replayLocal(subscription) {
-        for (const cached of this.replayEvents(subscription.filters)) {
-            if (cached.sourcePeer !== undefined) {
-                this.deliver(subscription, cached.event, cached.sourcePeer);
-            }
-        }
-    }
-    replayEvents(filters) {
-        return this.cachedEventOrder
-            .map((eventId) => this.cachedEvents.get(eventId))
-            .filter((cached) => cached !== undefined && subscriptionFiltersMatch(filters, cached.event))
-            .slice(-this.limits.maxReplayEvents);
-    }
-    rememberEvent(event, sourcePeer) {
-        if (this.cachedEvents.has(event.id))
-            return false;
-        this.cachedEvents.set(event.id, { event, sourcePeer });
-        this.cachedEventOrder.push(event.id);
-        while (this.cachedEventOrder.length > this.limits.maxCachedEvents) {
-            const removed = this.cachedEventOrder.shift();
-            if (removed !== undefined)
-                this.cachedEvents.delete(removed);
-        }
-        return true;
     }
     admitEvent(event) {
         const verified = verifyNostrEvent(event);
@@ -328,12 +357,16 @@ export class FipsNostrPubsubClient {
         return [...peers].sort();
     }
     send(peerId, message) {
-        return this.node.sendDatagram({
-            dst: peerId,
-            srcPort: FIPS_NOSTR_PUBSUB_SERVICE_PORT,
-            dstPort: FIPS_NOSTR_PUBSUB_SERVICE_PORT,
-            payload: this.codec.encodeFrame(message),
-        });
+        const transport = this.transport;
+        if (transport === undefined)
+            return Promise.reject(clientError('client is not started'));
+        try {
+            transport.queueFrame(peerId, this.codec.encodeFrame(message));
+            return Promise.resolve();
+        }
+        catch (error) {
+            return Promise.reject(error);
+        }
     }
     background(task, context) {
         void this.track(task).catch((error) => this.report(error, context));
@@ -362,14 +395,38 @@ export class FipsNostrPubsubClient {
             this.dropPeer(parsed.peerId);
     }
     dropPeer(peerId) {
+        void this.transport?.abortPeer(peerId).catch((error) => {
+            this.report(error, { operation: 'receive', peerId });
+        });
+        this.handleTransportDisconnected(peerId, false);
+    }
+    handleTransportConnected(peerId) {
+        if (!this.currentPeers().includes(peerId)) {
+            void this.transport?.abortPeer(peerId);
+            return;
+        }
+        for (const subscription of this.subscriptions.values()) {
+            if (!subscription.peers.has(peerId)) {
+                subscription.pendingPeers.add(peerId);
+                this.queueSubscriptionRequest(subscription, peerId);
+            }
+        }
+    }
+    handleTransportDisconnected(peerId, reconnect = true) {
         this.peerSubscriptions.removePeer(peerId);
         for (const subscription of this.subscriptions.values()) {
             subscription.peers.delete(peerId);
-            subscription.pendingPeers.delete(peerId);
+            if (reconnect && this.currentPeers().includes(peerId))
+                subscription.pendingPeers.add(peerId);
+            else
+                subscription.pendingPeers.delete(peerId);
         }
+        this.invWant.dropPeer(peerId);
+        if (reconnect && this.currentPeers().includes(peerId))
+            this.connectPeer(peerId);
     }
     requireStarted() {
-        if (this.unregisterService === undefined)
+        if (this.transport === undefined)
             throw clientError('client is not started');
     }
     report(error, context) {

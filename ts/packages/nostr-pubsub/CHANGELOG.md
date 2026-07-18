@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 - 2026-07-18
+
+- Replace the raw-datagram FIPS relay bridge with the reliable FIPS-TCP
+  `nostr.pubsub/1` client on port 7368; `localPeerId` is now required for
+  deterministic simultaneous-stream ownership.
+- Use compatible grouped `INV`, one-event `WANT`, and ordinary addressed
+  `EVENT` for both bounded historical replay and new live events, with global
+  event-ID deduplication and alternate-provider retry.
+- Add matching historical and live routers for Hashtree/local indexes, FIPS
+  peers, and traditional Nostr relays; remove the legacy route `bus` alias and
+  obsolete `FipsNostrRelayService` API.
+- Add the owned `NostrPubsubRouter` for applications that need one reusable
+  query/publish/live provider rather than one-shot route helper calls.
+- Add shared Rust-process wire vectors and real FIPS-TCP coverage for all five
+  `REQ`/`INV`/`WANT`/`EVENT`/`CLOSE` messages.
+
 ## 0.4.0 - 2026-07-18
 
 - Split the read-only `NostrEventReader` and write-only `NostrEventPublisher`

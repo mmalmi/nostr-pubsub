@@ -11,14 +11,18 @@ mod mesh;
 mod wire;
 
 mod inv_want;
+mod live_routes;
 mod memory;
+mod router;
 mod routes;
 mod subscriptions;
 pub use mesh::*;
 pub use wire::*;
 
 pub use inv_want::*;
+pub use live_routes::*;
 pub use memory::*;
+pub use router::*;
 pub use routes::*;
 pub use subscriptions::*;
 pub const CAP_HASHTREE_FETCH: &str = "hashtree.fetch";
@@ -260,12 +264,14 @@ pub trait EventBus: Send + Sync {
 
 /// The explicitly selected provider class for a pubsub consumer.
 ///
-/// Provider construction belongs to the application. The base crate does not
-/// open sockets, combine providers, or fall back from one mode to another.
+/// Provider construction belongs to the application. `Router` means the
+/// application explicitly composed multiple backends; no mode falls back or
+/// opens a socket implicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PubsubProviderMode {
     LocalOnly,
     DirectRelay,
+    Router,
 }
 
 impl PubsubProviderMode {
@@ -274,6 +280,7 @@ impl PubsubProviderMode {
         match self {
             Self::LocalOnly => "local-only",
             Self::DirectRelay => "direct-relay",
+            Self::Router => "router",
         }
     }
 }
@@ -291,8 +298,9 @@ impl FromStr for PubsubProviderMode {
         match value {
             "local-only" => Ok(Self::LocalOnly),
             "direct-relay" => Ok(Self::DirectRelay),
+            "router" => Ok(Self::Router),
             _ => Err(PubsubError::Validation(format!(
-                "unknown pubsub provider mode {value:?}; expected local-only or direct-relay"
+                "unknown pubsub provider mode {value:?}; expected local-only, direct-relay, or router"
             ))),
         }
     }
@@ -323,10 +331,6 @@ fn subscription_filters_match(filters: &[Filter], event: &Event) -> bool {
             .any(|filter| filter.match_event(event, MatchEventOptions::new()))
 }
 
-fn filter_limit(filters: &[Filter]) -> Option<usize> {
-    filters.iter().filter_map(|filter| filter.limit).min()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +356,10 @@ mod tests {
         assert_eq!(
             "direct-relay".parse::<PubsubProviderMode>().unwrap(),
             PubsubProviderMode::DirectRelay
+        );
+        assert_eq!(
+            "router".parse::<PubsubProviderMode>().unwrap(),
+            PubsubProviderMode::Router
         );
         assert!("relay".parse::<PubsubProviderMode>().is_err());
         assert!("".parse::<PubsubProviderMode>().is_err());

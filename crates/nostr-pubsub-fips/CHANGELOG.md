@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-07-18
+
+- Use grouped `INV`, one-event `WANT`, and ordinary addressed `EVENT` for both
+  bounded historical replay and new live events over reliable FIPS-TCP.
+- Depend on `nostr-pubsub` 0.1.13 so FIPS sources compose with the shared
+  historical/live router used by Hashtree indexes and traditional relays.
+
 ## 0.4.0 - 2026-07-18
 
 - Carry ordinary Nostr `REQ`, `EVENT`, and `CLOSE` frames exclusively over

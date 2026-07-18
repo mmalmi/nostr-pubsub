@@ -36,6 +36,17 @@ export interface NostrEventPublisher {
   publish(event: NostrEvent, source: EventSource): Promise<PublishReport>;
 }
 
+export interface NostrEventSubscription {
+  close(): void;
+}
+
+export interface NostrEventSubscriber {
+  subscribe(
+    filters: NostrFilter[],
+    handler: (event: QueryEvent) => void,
+  ): NostrEventSubscription | Promise<NostrEventSubscription>;
+}
+
 /** Backwards-compatible combined read/write event bus. */
 export interface EventBus extends NostrEventReader, NostrEventPublisher {}
 
@@ -45,8 +56,12 @@ interface StoredEvent {
   priority: number;
 }
 
-export class InMemoryEventBus implements EventBus {
+export class InMemoryEventBus implements EventBus, NostrEventSubscriber {
   private readonly events: StoredEvent[] = [];
+  private readonly subscriptions = new Set<{
+    filters: NostrFilter[];
+    handler: (event: QueryEvent) => void;
+  }>();
 
   constructor(private readonly policy?: PubsubPolicy) {}
 
@@ -58,7 +73,13 @@ export class InMemoryEventBus implements EventBus {
         : await this.policy.checkEvent({ event: verifiedEvent, source });
     const report = reportParts(decision);
     if (report.accepted) {
-      this.events.push({ event: verifiedEvent, source, priority: report.priority });
+      const stored = { event: verifiedEvent, source, priority: report.priority };
+      this.events.push(stored);
+      for (const subscription of this.subscriptions) {
+        if (subscription.filters.some((filter) => matchFilter(filter, verifiedEvent))) {
+          subscription.handler(stored);
+        }
+      }
     }
     return report;
   }
@@ -86,6 +107,12 @@ export class InMemoryEventBus implements EventBus {
       right.event.created_at - left.event.created_at || compareText(left.event.id, right.event.id)
     );
     return { events: options.limit === undefined ? events : events.slice(0, options.limit) };
+  }
+
+  subscribe(filters: NostrFilter[], handler: (event: QueryEvent) => void): NostrEventSubscription {
+    const subscription = { filters: filters.length === 0 ? [{}] : filters, handler };
+    this.subscriptions.add(subscription);
+    return { close: () => this.subscriptions.delete(subscription) };
   }
 }
 

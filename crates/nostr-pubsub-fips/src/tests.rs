@@ -14,7 +14,8 @@ use nostr::{
     Timestamp, ToBech32,
 };
 use nostr_pubsub::{
-    EventBus, EventSourceKind, InMemoryEventBus, PubsubPeerSubscriptionSnapshot, VerifiedEvent,
+    EventBus, EventSourceKind, InMemoryEventBus, NostrEventSubscriber,
+    PubsubPeerSubscriptionSnapshot, VerifiedEvent,
 };
 use nostr_social_graph::Rating;
 use nostr_social_memory::RatingEventExt;
@@ -400,6 +401,52 @@ async fn connected_fips_peers_subscribe_and_receive_cached_update_announcements(
 
     subscription.close();
     wait_for_no_peer_subscriptions(&client_b).await;
+    client_a.shutdown().await;
+    client_b.shutdown().await;
+    endpoint_a.shutdown().await.expect("shutdown endpoint A");
+    endpoint_b.shutdown().await.expect("shutdown endpoint B");
+    unregister_sim_network(&network_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fips_client_is_a_generic_live_router_source() {
+    let network_id = format!("nostr-pubsub-fips-live-route-{}", std::process::id());
+    let (endpoint_a, endpoint_b, client_a, client_b) = connected_update_clients(&network_id).await;
+    let event = VerifiedEvent::try_from(
+        EventBuilder::new(Kind::TextNote, "generic FIPS live route")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign routed event"),
+    )
+    .expect("verify routed event");
+    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let subscription = NostrEventSubscriber::subscribe(
+        &client_a,
+        vec![Filter::new().kind(Kind::TextNote)],
+        Arc::new(move |incoming| {
+            let _ = sender.send(incoming);
+        }),
+    )
+    .await
+    .expect("open generic FIPS live route");
+
+    client_b
+        .publish(event.clone(), EventSource::local_index("live-route-test"))
+        .await
+        .expect("publish routed event");
+    let incoming = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("routed event timeout")
+        .expect("live route remains open");
+    assert_eq!(incoming.event, event);
+    assert_eq!(
+        incoming.source,
+        EventSource::fips_endpoint(endpoint_b.npub())
+    );
+    subscription
+        .close()
+        .await
+        .expect("close generic FIPS route");
+
     client_a.shutdown().await;
     client_b.shutdown().await;
     endpoint_a.shutdown().await.expect("shutdown endpoint A");

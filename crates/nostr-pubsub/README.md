@@ -8,7 +8,8 @@ This crate re-exports standard `nostr` protocol message types for normal
 building blocks for:
 
 - bounded event retention policies based on Nostr filters
-- source routes and priority-aware routed queries
+- source routes plus policy-aware historical and live routing across additive
+  Hashtree/local-index, FIPS, peer, and traditional relay sources
 - inv/want content keys, inventory announcements, wants, and frames
 - a bounded signed-event `InvWantMesh` state machine with reverse wants,
   exactly-once local delivery, and configurable protocol envelopes
@@ -22,7 +23,8 @@ building blocks for:
 - bounded route-local attribution for confirmed transport disruptions
 - priority-aware peer fanout with explicit unknown-peer exploration capacity
 - peer subscription tracking so inventory is sent only after a matching filter
-- bounded FIPS payload-frame codecs for standard Nostr `REQ`/`CLOSE`/`EVENT`
+- bounded FIPS-TCP record codecs for standard Nostr `REQ`/`CLOSE`/`EVENT` plus
+  grouped subscription-scoped `INV` and one-event `WANT`
 
 `VerifiedEvent` verifies both the event ID and Schnorr signature. The FIPS wire
 adapter updates bounded peer subscriptions and never returns an unverified
@@ -79,6 +81,7 @@ the evidence appropriate to a machine-rating policy instead of treating every
 negative score as the same failure mode. The TypeScript mesh mirrors these
 admission, recovery, maintenance, and evidence semantics.
 
-Consumers select exactly one `PubsubProvider`: `local-only` for a local peer
-provider or `direct-relay` for direct relay sockets. Provider construction is
-explicit and the core never falls back between the two modes at runtime.
+Consumers expose exactly one `PubsubProvider`: `local-only` for a local peer
+provider, `direct-relay` for direct relay sockets, or `router` for an explicitly
+composed `NostrPubsubRouter`. Provider construction is application-owned; the
+core never opens or falls back to an unconfigured backend.

@@ -72,6 +72,26 @@
         "event": "fipsAdvert"
       },
       "json": "[\"EVENT\",\"fips-approval\",{\"content\":\"fips advert\",\"created_at\":1700000001,\"id\":\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",\"kind\":37195,\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"sig\":\"474b0e4a07f6d0b4f583c6b881017d1c7f081335b62ad318d07d07522289543a0f520e12f5b1ecc0dbe5242bca30a134ebe4ea96c201940684c838e799def653\",\"tags\":[[\"d\",\"fips.peer\"]]}]"
+    },
+    {
+      "name": "grouped live and historical inventory",
+      "message": {
+        "type": "inv",
+        "subscriptionIds": ["fips-history", "fips-live"],
+        "eventId": "59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6",
+        "eventKind": 37195,
+        "payloadBytes": 374,
+        "hopLimit": 4
+      },
+      "json": "[\"INV\",[\"fips-history\",\"fips-live\"],\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\",37195,374,4]"
+    },
+    {
+      "name": "one event want",
+      "message": {
+        "type": "want",
+        "eventId": "59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6"
+      },
+      "json": "[\"WANT\",\"59fdd0719f42ee5b55a4c59eb76db97c16f823c1f2a99f8c0d34eeb3be8af4b6\"]"
     }
   ],
   "invalidWireCases": [

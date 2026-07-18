@@ -40,9 +40,7 @@ export interface SourceRoute {
 
 export interface RouteQuerySource {
   route: SourceRoute;
-  reader?: NostrEventReader;
-  /** @deprecated Use reader. Retained while EventBus callers migrate. */
-  bus?: EventBus;
+  reader: NostrEventReader;
 }
 
 export interface RoutedQueryOptions {
@@ -342,13 +340,7 @@ function runReader(
   filters: NostrFilter[],
   options: QueryOptions,
 ): Promise<ReaderResult> {
-  const reader = routeSource.reader ?? routeSource.bus;
-  if (reader === undefined) {
-    return Promise.resolve({
-      type: 'failure',
-      error: new Error(`Route ${routeSource.route.id} has no event reader`),
-    });
-  }
+  const reader = routeSource.reader;
   if (options.signal?.aborted) return Promise.resolve({ type: 'cancelled', stop: true });
   if (options.deadline !== undefined && Date.now() >= options.deadline) {
     return Promise.resolve({ type: 'deadline-exceeded', stop: true });

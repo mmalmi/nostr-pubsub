@@ -12,8 +12,9 @@ delivery sources.
 
 Use the standard `nostr` crate message types for normal Nostr protocol traffic:
 `REQ`/`CLOSE` subscriptions, `EVENT` publish/delivery, and relay responses. The
-core crate re-exports those types so transports do not invent parallel
-subscription messages.
+FIPS subscription extension adds only `INV` and one-event `WANT`: historical
+catch-up and new live events use the same inventory-first transfer, while the
+requested signed payload remains an ordinary addressed `EVENT`.
 
 `nostr-pubsub` only adds the missing transport-neutral extension for
 inventory-first delivery: content keys, inventory announcements, wants, and
@@ -66,22 +67,27 @@ bounded peer subscription records, inventory/want, source selection, and
 policy/scoring semantics.
 
 The Rust and TypeScript cores expose matching `FipsPubsubWireCodec` and
-`FipsPubsubWireAdapter` boundaries. Each codec consumes one payload frame
-provided by FIPS, enforces a configurable byte limit, and carries ordinary
-Nostr `REQ`, `CLOSE`, client `EVENT`, and subscription `EVENT` JSON arrays.
-Decoded events are accepted only after their IDs and Schnorr signatures verify.
-The codec does not define stream framing or peer admission.
+`FipsPubsubWireAdapter` boundaries. Each codec consumes one length-delimited
+record over reliable `fips-tcp`, enforces a configurable byte limit, and carries
+ordinary Nostr `REQ`, `CLOSE`, client `EVENT`, and subscription `EVENT` JSON
+arrays plus grouped `INV` and one-event `WANT`. Decoded events are accepted only
+after their IDs and Schnorr signatures verify. FIPS owns stream admission,
+liveness, and backpressure; there is no raw-datagram compatibility path.
 
 Source routing defaults prefer local indexes, then FIPS-carried endpoint routes,
-then generic peer routes, with actual Nostr relay routes last. Product code can
-override route priority per source, but relay fallback should be explicit rather
-than the first peerfinding path.
+then generic peer routes, with actual Nostr relay routes last. The matching Rust
+and TypeScript routers support both bounded historical queries and noisy live
+subscriptions: same-dataset routes are ordered replicas, different dataset IDs
+are additive, and signed event IDs are globally deduplicated across Hashtree
+indexes, FIPS peers, and traditional relays. Product code can override route
+priority per source, but relay fallback should be explicit rather than the first
+peerfinding path.
 
 ## Crates
 
 - `nostr-pubsub`: core `EventBus`, route, source, query, policy, retention, and
   inv/want types, plus the transport-blind provider interface and explicit
-  `local-only` / `direct-relay` modes.
+  `local-only` / `direct-relay` / composed `router` modes.
 - `nostr-pubsub-fips`: local-only `FipsEndpoint` provider over authenticated
   connected peers and FIPS service port 7368, with bounded replay for late
   subscribers.
