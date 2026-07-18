@@ -47,6 +47,31 @@ describe('live source router', () => {
 });
 
 describe('owned Nostr pubsub router', () => {
+  it('preserves relay-only publish priority', async () => {
+    const route = relayRoute('wss://relay.example');
+    const router = new NostrPubsubRouter({
+      policy: allowAllLiveRoutes,
+      publishSources: [{
+        route,
+        publisher: {
+          publish: async () => ({ accepted: true, priority: -100 }),
+        },
+      }],
+    });
+    const event = finalizeEvent({
+      kind: 1,
+      created_at: 11,
+      tags: [],
+      content: 'relay only',
+    }, generateSecretKey());
+
+    await expect(router.publish(event, localIndexSource('producer'))).resolves.toEqual({
+      accepted: true,
+      priority: -100,
+      reason: undefined,
+    });
+  });
+
   it('combines explicit query, publish, and live index/relay routes', async () => {
     const index = new InMemoryEventBus();
     const relay = new InMemoryEventBus();

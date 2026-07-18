@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 - 2026-07-18
+
+- Preserve a negative backend priority in the owned router when a relay is the
+  only successful publish route instead of incorrectly flooring it at zero.
+
 ## 0.5.0 - 2026-07-18
 
 - Replace the raw-datagram FIPS relay bridge with the reliable FIPS-TCP

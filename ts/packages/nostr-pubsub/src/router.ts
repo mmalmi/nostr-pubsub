@@ -104,10 +104,12 @@ export class NostrPubsubRouter implements EventBus, NostrEventSubscriber {
     });
     return {
       accepted: accepted.length > 0,
-      priority: accepted.reduce(
-        (maximum, result) => Math.max(maximum, result.report!.priority),
-        0,
-      ),
+      priority: accepted.length === 0
+        ? 0
+        : accepted.reduce(
+          (maximum, result) => Math.max(maximum, result.report!.priority),
+          Number.NEGATIVE_INFINITY,
+        ),
       reason: failures.length > 0
         ? failures.join('; ')
         : selected.length === 0 ? 'no publish route was selected' : undefined,
