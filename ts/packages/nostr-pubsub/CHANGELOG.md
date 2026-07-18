@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add the shared `SimplePoolNostrRelayTransport` browser relay carrier with
+  boundary verification, bounded historical query completion, live
+  subscriptions, and at-least-one-relay publication success.
+
 ## 0.5.1 - 2026-07-18
 
 - Preserve a negative backend priority in the owned router when a relay is the

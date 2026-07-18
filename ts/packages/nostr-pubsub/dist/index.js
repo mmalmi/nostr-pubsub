@@ -15,6 +15,7 @@ export { allowAllLiveRoutes, subscribeRoutesWithPolicy, } from './live-routing.j
 export { NostrPubsubRouter, } from './router.js';
 export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsPubsubWireAdapter, FipsPubsubWireCodec, } from './wire.js';
 export { NostrRelayEventSource, } from './relay-event-source.js';
+export { SimplePoolNostrRelayTransport, } from './simple-pool-relay-transport.js';
 export { FIPS_NOSTR_PUBSUB_CAPABILITY, FipsNostrPubsubClient, } from './fips-pubsub-client.js';
 export { DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS, FipsNostrPubsubEventSource, } from './fips-pubsub-event-source.js';
 export { defaultFipsNostrPubsubClientLimits, } from './fips-pubsub-client-types.js';

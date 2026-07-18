@@ -7,17 +7,21 @@ import {
   type NostrRelaySubscription,
   type NostrRelayTransport,
   type NostrRelayTransportHandlers,
+  type NostrRelayTransportSubscribeOptions,
   type NostrVerifiedEvent,
 } from '../src/index.js';
 
 class MemoryRelay implements NostrRelayTransport {
   readonly subscriptions = new Set<NostrRelayTransportHandlers>();
   readonly published: NostrVerifiedEvent[] = [];
+  lastSubscribeOptions: NostrRelayTransportSubscribeOptions | undefined;
 
   subscribe(
     _filters: NostrFilter[],
     handlers: NostrRelayTransportHandlers,
+    options?: NostrRelayTransportSubscribeOptions,
   ): NostrRelaySubscription {
+    this.lastSubscribeOptions = options;
     this.subscriptions.add(handlers);
     return { close: () => this.subscriptions.delete(handlers) };
   }
@@ -52,6 +56,7 @@ describe('traditional relay router source', () => {
         priority: -100,
       }],
     });
+    expect(relay.lastSubscribeOptions).toEqual({ closeOnEose: true });
   });
 
   it('publishes and exposes a verified live subscription', async () => {
@@ -59,6 +64,7 @@ describe('traditional relay router source', () => {
     const source = new NostrRelayEventSource('wss://relay.example', relay);
     const handler = vi.fn();
     const subscription = source.subscribe([{ kinds: [1] }], handler);
+    expect(relay.lastSubscribeOptions).toBeUndefined();
     const event = note('live', 3);
 
     relay.event(event);

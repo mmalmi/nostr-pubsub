@@ -181,7 +181,12 @@ export {
   type NostrRelaySubscription,
   type NostrRelayTransport,
   type NostrRelayTransportHandlers,
+  type NostrRelayTransportSubscribeOptions,
 } from './relay-event-source.js';
+export {
+  SimplePoolNostrRelayTransport,
+  type SimplePoolNostrRelayTransportOptions,
+} from './simple-pool-relay-transport.js';
 
 export {
   FIPS_NOSTR_PUBSUB_CAPABILITY,

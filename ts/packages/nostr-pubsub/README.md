@@ -18,10 +18,11 @@ for (const action of mesh.publish(signedEvent, [meshPeer(remoteFipsPubkey)], Dat
 }
 ```
 
-The application owns Nostr relay connections, peer-advert meaning, FIPS peer
-admission, and outbound connection policy. This package does not contain a
-default relay or gateway. See the repository `docs/inv-want-wire.md` for
-compatibility and security boundaries.
+The application owns the relay URL list, peer-advert meaning, FIPS peer
+admission, and outbound connection policy. `SimplePoolNostrRelayTransport`
+provides the browser/WebSocket relay mechanics without choosing a default relay
+or gateway. See the repository `docs/inv-want-wire.md` for compatibility and
+security boundaries.
 
 ## Event readers and dataset routing
 
@@ -63,6 +64,30 @@ there is no legacy `{ route, bus }` alias.
 long-running services. A Hashtree index can be query-only, while FIPS and relay
 adapters can independently participate in publication and live subscription;
 the router never invents a fallback backend.
+
+The standard relay adapter reads the application's relay list at operation
+start, verifies every inbound and outbound event at its boundary, deduplicates
+relay URLs, and accepts publication when at least one relay succeeds. Historical
+queries finish on aggregate EOSE or a configurable inactivity window; ordinary
+live subscriptions remain open:
+
+```ts
+import {
+  NostrRelayEventSource,
+  SimplePoolNostrRelayTransport,
+} from 'nostr-pubsub';
+
+const relayTransport = new SimplePoolNostrRelayTransport({
+  getRelays: () => settings.readRelays(),
+  queryQuietWindowMs: 600,
+});
+const relayEvents = new NostrRelayEventSource('configured-relays', relayTransport);
+
+const historical = await relayEvents.query([{ kinds: [0], authors }], {
+  deadline: Date.now() + 2_000,
+});
+const live = relayEvents.subscribe([{ kinds: [1], since }], receiveEvent);
+```
 
 `FipsNostrPubsubClient` is the browser peer carrier matching Rust
 `FipsPubsubClient` on authenticated reliable FIPS-TCP service

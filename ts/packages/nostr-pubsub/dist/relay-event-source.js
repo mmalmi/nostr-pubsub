@@ -85,7 +85,7 @@ export class NostrRelayEventSource {
                     }
                 },
                 onClose: () => finish(),
-            });
+            }, { closeOnEose: true });
             if (closeOnAssign)
                 subscription.close('nostr-pubsub query complete');
         });

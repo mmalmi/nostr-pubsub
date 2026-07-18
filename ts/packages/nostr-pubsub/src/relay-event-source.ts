@@ -27,14 +27,20 @@ export interface NostrRelaySubscription {
 
 export interface NostrRelayTransportHandlers {
   onEvent(event: NostrEvent): void;
-  /** Called after EOSE or terminal subscription close. */
+  /** Called after a terminal subscription close. */
   onClose?(reasons?: readonly string[]): void;
+}
+
+export interface NostrRelayTransportSubscribeOptions {
+  /** Historical queries may close on aggregate EOSE or a transport-owned bound. */
+  closeOnEose?: boolean;
 }
 
 export interface NostrRelayTransport {
   subscribe(
     filters: NostrFilter[],
     handlers: NostrRelayTransportHandlers,
+    options?: NostrRelayTransportSubscribeOptions,
   ): NostrRelaySubscription;
   publish(event: NostrVerifiedEvent): Promise<void> | void;
 }
@@ -118,7 +124,7 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
           }
         },
         onClose: () => finish(),
-      });
+      }, { closeOnEose: true });
       if (closeOnAssign) subscription.close('nostr-pubsub query complete');
     });
   }
