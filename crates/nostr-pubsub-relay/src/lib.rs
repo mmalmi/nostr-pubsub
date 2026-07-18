@@ -1,13 +1,15 @@
 //! Actual Nostr relay backend for `nostr-pubsub`.
 
-use std::{fmt::Debug, time::Duration};
+use std::{borrow::Cow, fmt::Debug, time::Duration};
 
 use async_trait::async_trait;
 use nostr_pubsub::{
     EventBus, EventSource, PublishReport, PubsubError, PubsubProvider, PubsubProviderMode,
     QueryEvent, QueryOptions, QueryReport, Result, VerifiedEvent,
 };
-use nostr_sdk::{Client, Filter, Keys, nostr::message::MachineReadablePrefix, pool::Output};
+use nostr_sdk::{
+    Client, ClientMessage, Filter, Keys, nostr::message::MachineReadablePrefix, pool::Output,
+};
 
 #[derive(Clone)]
 pub struct RelayEventBus {
@@ -58,17 +60,30 @@ impl RelayEventBus {
     pub fn relays(&self) -> &[String] {
         &self.relays
     }
+
+    /// Queue an event on every configured relay without waiting for relay `OK`
+    /// acknowledgements.
+    ///
+    /// This is appropriate for datagram-like traffic whose caller already
+    /// owns bounded retry or redundancy policy. The report describes whether
+    /// each relay accepted the message into its local send queue.
+    pub async fn enqueue(&self, event: &VerifiedEvent) -> Result<PublishReport> {
+        let output = self
+            .client
+            .send_msg_to(
+                self.relays.iter().map(String::as_str),
+                ClientMessage::Event(Cow::Borrowed(event.as_event())),
+            )
+            .await
+            .map_err(|error| PubsubError::Storage(format!("queue event for relays: {error}")))?;
+        Ok(publish_report(output))
+    }
 }
 
 #[async_trait]
 impl EventBus for RelayEventBus {
     async fn publish(&self, event: VerifiedEvent, _source: EventSource) -> Result<PublishReport> {
-        let output = self
-            .client
-            .send_event_to(self.relays.iter().map(String::as_str), event.as_event())
-            .await
-            .map_err(|error| PubsubError::Storage(format!("send event to relays: {error}")))?;
-        Ok(publish_report(output))
+        self.enqueue(&event).await
     }
 
     async fn query(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport> {
@@ -191,9 +206,16 @@ const fn relay_label(count: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use nostr_sdk::{RelayUrl, pool::Output};
+    use std::time::Duration;
 
-    use super::publish_report;
+    use futures_util::StreamExt;
+    use nostr_pubsub::{EventBus, EventSource, VerifiedEvent};
+    use nostr_sdk::{EventBuilder, Keys, Kind, RelayUrl, pool::Output, prelude::RelayStatus};
+    use tokio::net::TcpListener;
+    use tokio::time::{sleep, timeout};
+    use tokio_tungstenite::accept_async;
+
+    use super::{RelayEventBus, publish_report};
 
     fn output(success: &[&str], failed: &[(&str, &str)]) -> Output<()> {
         Output {
@@ -212,6 +234,74 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn publish_returns_after_queueing_without_waiting_for_relay_ok() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test relay");
+        let relay_url = format!(
+            "ws://{}",
+            listener.local_addr().expect("test relay address")
+        );
+        let relay = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept relay client");
+            let mut websocket = accept_async(stream).await.expect("accept websocket");
+            timeout(Duration::from_secs(2), async {
+                loop {
+                    let message = websocket
+                        .next()
+                        .await
+                        .expect("relay websocket remains open")
+                        .expect("read relay message");
+                    if String::from_utf8_lossy(&message.into_data()).contains("EVENT") {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("event should reach relay");
+            sleep(Duration::from_secs(1)).await;
+        });
+        let bus = RelayEventBus::new([relay_url.clone()], Duration::from_secs(5))
+            .await
+            .expect("start relay event bus");
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let connected = bus
+                    .client()
+                    .relay(&relay_url)
+                    .await
+                    .expect("configured relay")
+                    .status()
+                    == RelayStatus::Connected;
+                if connected {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("relay client should connect");
+        let event = VerifiedEvent::try_from(
+            EventBuilder::new(Kind::Custom(21_060), "queued event")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign test event"),
+        )
+        .expect("verify test event");
+
+        let report = timeout(
+            Duration::from_millis(500),
+            bus.publish(event, EventSource::local_index("test")),
+        )
+        .await
+        .expect("publish must not wait for relay OK")
+        .expect("queue event");
+
+        assert!(report.accepted);
+        relay.await.expect("test relay task");
+        bus.client().shutdown().await;
     }
 
     #[test]
