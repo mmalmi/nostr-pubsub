@@ -22,6 +22,41 @@ use nostr_social_memory::RatingEventExt;
 use tokio::time::timeout;
 
 use super::*;
+use crate::client_inner::{InventoryProvider, PendingInventory};
+
+#[test]
+fn pending_want_retries_its_only_provider_until_event_arrives() {
+    let provider = InventoryProvider {
+        peer_npub: Keys::generate()
+            .public_key()
+            .to_bech32()
+            .expect("encode provider npub"),
+        subscription_ids: vec!["live".to_string()],
+    };
+    let mut pending = PendingWants::new(8, 8);
+    assert!(pending.insert(
+        "event-id".to_string(),
+        PendingInventory {
+            selected: provider.clone(),
+            alternatives: std::collections::VecDeque::new(),
+            event_kind: Kind::TextNote.as_u16(),
+            payload_bytes: 128,
+            hop_limit: 8,
+            requested_at_ms: 100,
+        },
+    ));
+
+    assert!(pending.retry_due(599, 500).is_empty());
+    assert_eq!(
+        pending.retry_due(600, 500),
+        vec![("event-id".to_string(), provider.clone())]
+    );
+    assert!(pending.retry_due(1_099, 500).is_empty());
+    assert_eq!(
+        pending.retry_due(1_100, 500),
+        vec![("event-id".to_string(), provider)]
+    );
+}
 
 #[tokio::test]
 async fn client_advertises_only_while_its_fsp_service_is_registered() {

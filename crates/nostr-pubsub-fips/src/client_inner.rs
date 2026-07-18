@@ -721,7 +721,7 @@ pub(super) struct InventoryAdvertisement {
     pub(super) hop_limit: u8,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct InventoryProvider {
     pub(super) peer_npub: String,
     pub(super) subscription_ids: Vec<String>,
@@ -852,11 +852,10 @@ impl PendingWants {
             if now_ms.saturating_sub(pending.requested_at_ms) < retry_after_ms {
                 continue;
             }
-            let Some(next) = pending.alternatives.pop_front() else {
-                continue;
-            };
-            let previous = std::mem::replace(&mut pending.selected, next);
-            pending.alternatives.push_back(previous);
+            if let Some(next) = pending.alternatives.pop_front() {
+                let previous = std::mem::replace(&mut pending.selected, next);
+                pending.alternatives.push_back(previous);
+            }
             pending.requested_at_ms = now_ms;
             retries.push((event_id.clone(), pending.selected.clone()));
         }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 - 2026-07-18
+
+- Retry `WANT` against its sole advertised provider until the ordinary
+  addressed `EVENT` arrives; alternate providers still rotate first. This
+  closes live mesh delivery gaps when a queued request coincides with a
+  FIPS-TCP connection transition.
+
 ## 0.4.1 - 2026-07-18
 
 - Use grouped `INV`, one-event `WANT`, and ordinary addressed `EVENT` for both
