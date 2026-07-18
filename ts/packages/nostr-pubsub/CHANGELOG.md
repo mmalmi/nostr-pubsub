@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 - 2026-07-18
 
 - Add the shared `SimplePoolNostrRelayTransport` browser relay carrier with
   boundary verification, bounded historical query completion, live
