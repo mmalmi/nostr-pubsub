@@ -7,6 +7,9 @@ capability `nostr.pubsub/1`; dropping the client withdraws it.
 
 The provider fans each subscription and publication to authenticated,
 connected peers reported by FIPS, regardless of underlay transport.
+Applications whose pubsub carrier wraps another FIPS transport can use
+`start_excluding_peer_transports` to prevent recursive carrier selection while
+leaving all other authenticated transports eligible.
 Subscription replies are accepted only from the peers that received that
 subscription. Each client also serves peer subscriptions and keeps a bounded
 event cache, so late subscribers can receive announcements without a relay.

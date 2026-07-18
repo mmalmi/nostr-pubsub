@@ -111,7 +111,27 @@ impl FipsPubsubClient {
         endpoint: Arc<FipsEndpoint>,
         options: FipsPubsubClientOptions,
     ) -> Result<Self> {
-        Self::start_for_peer_transport(endpoint, options, None).await
+        Self::start_for_peer_selection(endpoint, options, None, HashSet::new()).await
+    }
+
+    /// Start a client that never uses peers carried by the named FIPS
+    /// transports. This prevents a provider from recursively selecting the
+    /// transport that it is itself carrying while leaving every other
+    /// authenticated peer eligible.
+    pub async fn start_excluding_peer_transports<I, S>(
+        endpoint: Arc<FipsEndpoint>,
+        options: FipsPubsubClientOptions,
+        excluded_peer_transports: I,
+    ) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let excluded_peer_transports = excluded_peer_transports
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        Self::start_for_peer_selection(endpoint, options, None, excluded_peer_transports).await
     }
 
     #[cfg(test)]
@@ -120,13 +140,15 @@ impl FipsPubsubClient {
         options: FipsPubsubClientOptions,
         peer_transport: &'static str,
     ) -> Result<Self> {
-        Self::start_for_peer_transport(endpoint, options, Some(peer_transport)).await
+        Self::start_for_peer_selection(endpoint, options, Some(peer_transport), HashSet::new())
+            .await
     }
 
-    async fn start_for_peer_transport(
+    async fn start_for_peer_selection(
         endpoint: Arc<FipsEndpoint>,
         options: FipsPubsubClientOptions,
         peer_transport: Option<&'static str>,
+        excluded_peer_transports: HashSet<String>,
     ) -> Result<Self> {
         options.validate()?;
         let service_receiver = endpoint
@@ -149,6 +171,7 @@ impl FipsPubsubClient {
             codec,
             options,
             peer_transport,
+            excluded_peer_transports,
             next_subscription_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
             peer_subscriptions: Mutex::new(PubsubPeerSubscriptionStore::new(subscription_limits)),
@@ -339,6 +362,7 @@ struct ClientInner {
     codec: FipsPubsubWireCodec,
     options: FipsPubsubClientOptions,
     peer_transport: Option<&'static str>,
+    excluded_peer_transports: HashSet<String>,
     next_subscription_id: AtomicU64,
     subscriptions: Mutex<HashMap<String, ActiveSubscription>>,
     peer_subscriptions: Mutex<PubsubPeerSubscriptionStore>,
@@ -359,6 +383,10 @@ impl ClientInner {
                     && self
                         .peer_transport
                         .is_none_or(|transport| peer.transport_type.as_deref() == Some(transport))
+                    && peer
+                        .transport_type
+                        .as_deref()
+                        .is_none_or(|transport| !self.excluded_peer_transports.contains(transport))
             })
             .map(|peer| {
                 let npub = peer.npub;

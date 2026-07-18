@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 - 2026-07-18
+
+- Add an explicit excluded-transport set for applications whose FIPS pubsub
+  carrier must not recursively select the transport it is carrying.
+- Keep every other authenticated connected peer eligible; default clients
+  retain the existing all-transport behavior.
+
 ## 0.3.1 - 2026-07-16
 
 - Add a bounded, sans-I/O Inv/WANT record layer for reliable `fips-tcp`

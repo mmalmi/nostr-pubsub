@@ -250,6 +250,63 @@ fn client_limits_reject_unbounded_fips_frames() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_excludes_recursive_underlay_transports() {
+    let network_id = format!("nostr-pubsub-fips-excluded-{}", std::process::id());
+    register_sim_network(&network_id, SimNetwork::new(7368));
+
+    let identity_a = Identity::from_secret_bytes(&[21; 32]).expect("identity A");
+    let identity_b = Identity::from_secret_bytes(&[22; 32]).expect("identity B");
+    let endpoint_a = Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(endpoint_config(
+                    &network_id,
+                    "excluded-a",
+                    [21; 32],
+                    identity_b.npub(),
+                    "excluded-b",
+                ))
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .expect("bind endpoint A"),
+    );
+    let endpoint_b = Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(endpoint_config(
+                    &network_id,
+                    "excluded-b",
+                    [22; 32],
+                    identity_a.npub(),
+                    "excluded-a",
+                ))
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .expect("bind endpoint B"),
+    );
+    wait_for_connected_peer(&endpoint_a, endpoint_b.npub()).await;
+    wait_for_connected_peer(&endpoint_b, endpoint_a.npub()).await;
+
+    let client = FipsPubsubClient::start_excluding_peer_transports(
+        Arc::clone(&endpoint_a),
+        FipsPubsubClientOptions::default(),
+        ["sim"],
+    )
+    .await
+    .expect("start transport-filtered client");
+    assert_eq!(client.connected_peer_count().await.expect("peer count"), 0);
+
+    client.shutdown().await;
+    endpoint_a.shutdown().await.expect("shutdown endpoint A");
+    endpoint_b.shutdown().await.expect("shutdown endpoint B");
+    unregister_sim_network(&network_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_fips_endpoints_query_publish_and_close_over_service_port() {
     let network_id = format!("nostr-pubsub-fips-{}", std::process::id());
     register_sim_network(&network_id, SimNetwork::new(7368));
