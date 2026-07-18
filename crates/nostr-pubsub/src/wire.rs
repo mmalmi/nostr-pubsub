@@ -1,9 +1,12 @@
+use std::collections::HashSet;
+
 use nostr::JsonUtil;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
-    ClientMessage, Filter, PubsubError, PubsubPeerSubscription, PubsubPeerSubscriptionStore,
-    PubsubSubscriptionUpdate, RelayMessage, Result, SourceId, SubscriptionId, VerifiedEvent,
+    ClientMessage, EventId, Filter, PubsubError, PubsubPeerSubscription,
+    PubsubPeerSubscriptionStore, PubsubSubscriptionUpdate, RelayMessage, Result, SourceId,
+    SubscriptionId, VerifiedEvent,
 };
 
 pub const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -21,6 +24,19 @@ pub enum FipsPubsubWireMessage {
     Event {
         subscription_id: Option<SubscriptionId>,
         event: VerifiedEvent,
+    },
+    /// A subscription-scoped live-event inventory announcement.
+    Inv {
+        subscription_ids: Vec<SubscriptionId>,
+        event_id: EventId,
+        event_kind: u16,
+        payload_bytes: u32,
+        hop_limit: u8,
+    },
+    /// A request for one advertised event. The response is an ordinary
+    /// subscription-scoped `EVENT` frame.
+    Want {
+        event_id: EventId,
     },
 }
 
@@ -52,6 +68,28 @@ impl FipsPubsubWireMessage {
             subscription_id: Some(subscription_id),
             event,
         }
+    }
+
+    #[must_use]
+    pub fn inv(
+        subscription_ids: Vec<SubscriptionId>,
+        event_id: EventId,
+        event_kind: u16,
+        payload_bytes: u32,
+        hop_limit: u8,
+    ) -> Self {
+        Self::Inv {
+            subscription_ids,
+            event_id,
+            event_kind,
+            payload_bytes,
+            hop_limit,
+        }
+    }
+
+    #[must_use]
+    pub fn want(event_id: EventId) -> Self {
+        Self::Want { event_id }
     }
 }
 
@@ -101,6 +139,27 @@ impl FipsPubsubWireCodec {
                 subscription_id: Some(subscription_id),
                 event,
             } => RelayMessage::event(subscription_id.clone(), event.as_event().clone()).as_json(),
+            FipsPubsubWireMessage::Inv {
+                subscription_ids,
+                event_id,
+                event_kind,
+                payload_bytes,
+                hop_limit,
+            } => json!([
+                "INV",
+                subscription_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                event_id.to_hex(),
+                event_kind,
+                payload_bytes,
+                hop_limit,
+            ])
+            .to_string(),
+            FipsPubsubWireMessage::Want { event_id } => {
+                json!(["WANT", event_id.to_hex()]).to_string()
+            }
         };
         let frame = json.into_bytes();
         self.check_frame_size(frame.len())?;
@@ -131,11 +190,17 @@ impl FipsPubsubWireCodec {
             ("CLOSE", 2) => decode_close(value),
             ("EVENT", 2) => decode_published_event(value),
             ("EVENT", 3) => decode_delivered_event(value),
+            ("INV", 6) => decode_inv(&value),
+            ("WANT", 2) => decode_want(&value),
             ("REQ", _) => Err(invalid_frame("REQ requires an id and at least one filter")),
             ("CLOSE", _) => Err(invalid_frame("CLOSE requires exactly an id")),
             ("EVENT", _) => Err(invalid_frame(
                 "EVENT requires an event and optional subscription id",
             )),
+            ("INV", _) => Err(invalid_frame(
+                "INV requires subscription ids, event id, kind, byte size, and hop limit",
+            )),
+            ("WANT", _) => Err(invalid_frame("WANT requires exactly an event id")),
             (other, _) => Err(invalid_frame(format!(
                 "unsupported Nostr message type {other}"
             ))),
@@ -221,7 +286,9 @@ impl FipsPubsubWireAdapter {
                     .remove(&peer_id, &subscription_id.to_string());
                 PubsubSubscriptionUpdate::Closed
             }
-            FipsPubsubWireMessage::Event { .. } => PubsubSubscriptionUpdate::Ignored,
+            FipsPubsubWireMessage::Event { .. }
+            | FipsPubsubWireMessage::Inv { .. }
+            | FipsPubsubWireMessage::Want { .. } => PubsubSubscriptionUpdate::Ignored,
         };
         Ok(FipsPubsubInbound {
             message,
@@ -285,10 +352,140 @@ fn decode_delivered_event(value: Value) -> Result<FipsPubsubWireMessage> {
     ))
 }
 
+fn decode_inv(value: &Value) -> Result<FipsPubsubWireMessage> {
+    let fields = value
+        .as_array()
+        .ok_or_else(|| invalid_frame("INV must be a JSON array"))?;
+    let subscription_ids = decode_subscription_ids(fields, 1)?;
+    let event_id = decode_event_id(fields, 2, "INV")?;
+    let event_kind = decode_unsigned::<u16>(fields, 3, "INV event kind")?;
+    let payload_bytes = decode_unsigned::<u32>(fields, 4, "INV payload bytes")?;
+    let hop_limit = decode_unsigned::<u8>(fields, 5, "INV hop limit")?;
+    if hop_limit == 0 {
+        return Err(invalid_frame("INV hop limit must be greater than zero"));
+    }
+    Ok(FipsPubsubWireMessage::inv(
+        subscription_ids,
+        event_id,
+        event_kind,
+        payload_bytes,
+        hop_limit,
+    ))
+}
+
+fn decode_subscription_ids(fields: &[Value], index: usize) -> Result<Vec<SubscriptionId>> {
+    let values = fields
+        .get(index)
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_frame("INV subscription ids must be an array"))?;
+    if values.is_empty() {
+        return Err(invalid_frame("INV requires at least one subscription id"));
+    }
+    let mut seen = HashSet::with_capacity(values.len());
+    values
+        .iter()
+        .map(|value| {
+            let id = value
+                .as_str()
+                .ok_or_else(|| invalid_frame("INV subscription id must be a string"))?;
+            if !seen.insert(id) {
+                return Err(invalid_frame("INV subscription ids must be unique"));
+            }
+            Ok(SubscriptionId::new(id))
+        })
+        .collect()
+}
+
+fn decode_want(value: &Value) -> Result<FipsPubsubWireMessage> {
+    let fields = value
+        .as_array()
+        .ok_or_else(|| invalid_frame("WANT must be a JSON array"))?;
+    Ok(FipsPubsubWireMessage::want(decode_event_id(
+        fields, 1, "WANT",
+    )?))
+}
+
+fn decode_event_id(fields: &[Value], index: usize, message_type: &str) -> Result<EventId> {
+    let value = fields
+        .get(index)
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_frame(format!("{message_type} event id must be a string")))?;
+    EventId::from_hex(value)
+        .map_err(|error| invalid_frame(format!("{message_type} event id is invalid: {error}")))
+}
+
+fn decode_unsigned<T>(fields: &[Value], index: usize, name: &str) -> Result<T>
+where
+    T: TryFrom<u64>,
+{
+    let value = fields
+        .get(index)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_frame(format!("{name} must be an unsigned integer")))?;
+    T::try_from(value).map_err(|_| invalid_frame(format!("{name} is out of range")))
+}
+
 fn message_error(error: &nostr::message::MessageHandleError) -> PubsubError {
     invalid_frame(error.to_string())
 }
 
 fn invalid_frame(message: impl Into<String>) -> PubsubError {
     PubsubError::Validation(format!("invalid FIPS pubsub frame: {}", message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_scoped_inv_and_want_round_trip() {
+        let codec = FipsPubsubWireCodec::default();
+        let subscription_id = SubscriptionId::new("live-feed");
+        let event_id = EventId::from_byte_array([7; 32]);
+        let inv = FipsPubsubWireMessage::inv(
+            vec![subscription_id.clone(), SubscriptionId::new("alerts")],
+            event_id,
+            1,
+            4_096,
+            4,
+        );
+        let want = FipsPubsubWireMessage::want(event_id);
+
+        assert_eq!(
+            codec
+                .decode_frame(&codec.encode_frame(&inv).unwrap())
+                .unwrap(),
+            inv
+        );
+        assert_eq!(
+            codec
+                .decode_frame(&codec.encode_frame(&want).unwrap())
+                .unwrap(),
+            want
+        );
+    }
+
+    #[test]
+    fn inv_rejects_empty_subscriptions_zero_hops_and_noncanonical_event_ids() {
+        let codec = FipsPubsubWireCodec::default();
+        assert!(
+            codec
+                .decode_frame(
+                    br#"["INV",["live"],"0707070707070707070707070707070707070707070707070707070707070707",1,10,0]"#,
+                )
+                .is_err()
+        );
+        assert!(
+            codec
+                .decode_frame(
+                    br#"["INV",[],"0707070707070707070707070707070707070707070707070707070707070707",1,10,4]"#,
+                )
+                .is_err()
+        );
+        assert!(
+            codec
+                .decode_frame(br#"["WANT","not-an-event-id"]"#)
+                .is_err()
+        );
+    }
 }

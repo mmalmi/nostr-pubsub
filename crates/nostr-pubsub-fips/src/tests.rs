@@ -14,12 +14,10 @@ use nostr::{
     Timestamp, ToBech32,
 };
 use nostr_pubsub::{
-    EventBus, EventSourceKind, InMemoryEventBus, PolicyDecision, PubsubPeerSubscriptionSnapshot,
-    PubsubProvider, QueryOptions, VerifiedEvent,
+    EventBus, EventSourceKind, InMemoryEventBus, PubsubPeerSubscriptionSnapshot, VerifiedEvent,
 };
 use nostr_social_graph::Rating;
 use nostr_social_memory::RatingEventExt;
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::*;
@@ -242,7 +240,7 @@ async fn peerfinder_rejects_embedded_relay_peerfinding_mode() {
 #[test]
 fn client_limits_reject_unbounded_fips_frames() {
     let options = FipsPubsubClientOptions {
-        max_frame_bytes: FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES + 1,
+        max_frame_bytes: FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES + 1,
         ..FipsPubsubClientOptions::default()
     };
 
@@ -298,120 +296,9 @@ async fn client_excludes_recursive_underlay_transports() {
     )
     .await
     .expect("start transport-filtered client");
-    assert_eq!(client.connected_peer_count().await.expect("peer count"), 0);
+    assert_eq!(client.connected_peer_count().expect("peer count"), 0);
 
     client.shutdown().await;
-    endpoint_a.shutdown().await.expect("shutdown endpoint A");
-    endpoint_b.shutdown().await.expect("shutdown endpoint B");
-    unregister_sim_network(&network_id);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_fips_endpoints_query_publish_and_close_over_service_port() {
-    let network_id = format!("nostr-pubsub-fips-{}", std::process::id());
-    register_sim_network(&network_id, SimNetwork::new(7368));
-
-    let identity_a = Identity::from_secret_bytes(&[1; 32]).expect("identity A");
-    let identity_b = Identity::from_secret_bytes(&[2; 32]).expect("identity B");
-    let endpoint_a = Arc::new(
-        Box::pin(
-            FipsEndpoint::builder()
-                .config(endpoint_config(
-                    &network_id,
-                    "endpoint-a",
-                    [1; 32],
-                    identity_b.npub(),
-                    "endpoint-b",
-                ))
-                .without_system_tun()
-                .bind(),
-        )
-        .await
-        .expect("bind endpoint A"),
-    );
-    let endpoint_b = Arc::new(
-        Box::pin(
-            FipsEndpoint::builder()
-                .config(endpoint_config(
-                    &network_id,
-                    "endpoint-b",
-                    [2; 32],
-                    identity_a.npub(),
-                    "endpoint-a",
-                ))
-                .without_system_tun()
-                .bind(),
-        )
-        .await
-        .expect("bind endpoint B"),
-    );
-    wait_for_connected_peer(&endpoint_a, endpoint_b.npub()).await;
-    wait_for_connected_peer(&endpoint_b, endpoint_a.npub()).await;
-
-    exercise_default_reputation(&endpoint_a, endpoint_b.npub()).await;
-
-    endpoint_b
-        .register_service(FIPS_NOSTR_PUBSUB_SERVICE_PORT)
-        .await
-        .expect("register peer pubsub service");
-    let replay_event = VerifiedEvent::try_from(
-        EventBuilder::text_note("replayed from local peer")
-            .sign_with_keys(&Keys::generate())
-            .expect("sign replay event"),
-    )
-    .expect("verify replay event");
-    let (service_tx, mut service_rx) = mpsc::unbounded_channel();
-    let service_task =
-        spawn_peer_service(Arc::clone(&endpoint_b), replay_event.clone(), service_tx);
-
-    let client = FipsPubsubClient::start_for_transport(
-        Arc::clone(&endpoint_a),
-        FipsPubsubClientOptions {
-            query_timeout: Duration::from_secs(2),
-            ..FipsPubsubClientOptions::default()
-        },
-        "sim",
-    )
-    .await
-    .expect("start FIPS pubsub client");
-    assert_eq!(client.mode(), PubsubProviderMode::LocalOnly);
-    assert_eq!(client.connected_peer_count().await.expect("peer count"), 1);
-
-    let report = client
-        .query(
-            vec![Filter::new().kind(Kind::TextNote)],
-            QueryOptions { limit: Some(1) },
-        )
-        .await
-        .expect("query local FIPS peer");
-    assert_eq!(report.events.len(), 1);
-    assert_eq!(report.events[0].event, replay_event);
-    assert_eq!(report.events[0].source.kind, EventSourceKind::FipsEndpoint);
-    assert_eq!(report.events[0].source.id.as_str(), endpoint_b.npub());
-    assert_eq!(
-        client.active_subscription_count().expect("subscriptions"),
-        0
-    );
-
-    let req_id = recv_req_id(&mut service_rx).await;
-    recv_close(&mut service_rx, &req_id).await;
-
-    let published = VerifiedEvent::try_from(
-        EventBuilder::text_note("published to local peer")
-            .sign_with_keys(&Keys::generate())
-            .expect("sign published event"),
-    )
-    .expect("verify published event");
-    let publish_report = client
-        .publish(published.clone(), EventSource::local_index("test"))
-        .await
-        .expect("publish to local FIPS peer");
-    assert!(publish_report.accepted);
-    recv_publish(&mut service_rx, &published).await;
-
-    client.shutdown().await;
-    service_task.abort();
-    let _ = service_task.await;
     endpoint_a.shutdown().await.expect("shutdown endpoint A");
     endpoint_b.shutdown().await.expect("shutdown endpoint B");
     unregister_sim_network(&network_id);
@@ -520,12 +407,170 @@ async fn connected_fips_peers_subscribe_and_receive_cached_update_announcements(
     unregister_sim_network(&network_id);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_duplicate_inventories_fetch_one_event_for_all_matching_subscriptions() {
+    let network_id = format!("nostr-pubsub-fips-live-dedup-{}", std::process::id());
+    let (endpoint_a, endpoint_b, endpoint_c, client_a, client_b, client_c) =
+        connected_live_mesh(&network_id).await;
+
+    let filter = Filter::new().kind(Kind::TextNote);
+    let mut first = client_a
+        .subscribe(vec![filter.clone()])
+        .await
+        .expect("first live subscription");
+    let mut second = client_a
+        .subscribe(vec![filter])
+        .await
+        .expect("second live subscription");
+    wait_for_peer_subscription_count(&client_b, 2).await;
+    wait_for_peer_subscription_count(&client_c, 2).await;
+
+    let event = VerifiedEvent::try_from(
+        EventBuilder::text_note("one live event from two mesh paths")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign live event"),
+    )
+    .expect("verify live event");
+    let (published_b, published_c) = tokio::join!(
+        client_b.publish(event.clone(), EventSource::local_index("provider-b")),
+        client_c.publish(event.clone(), EventSource::local_index("provider-c")),
+    );
+    assert!(published_b.expect("publish from B").accepted);
+    assert!(published_c.expect("publish from C").accepted);
+
+    let received_first = timeout(Duration::from_secs(3), first.recv())
+        .await
+        .expect("first subscription timeout")
+        .expect("first subscription open");
+    let received_second = timeout(Duration::from_secs(3), second.recv())
+        .await
+        .expect("second subscription timeout")
+        .expect("second subscription open");
+    assert_eq!(received_first.event, event);
+    assert_eq!(received_second.event, event);
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = client_a.delivery_snapshot();
+            if snapshot.inv_frames_received >= 2 {
+                assert_eq!(snapshot.want_frames_sent, 1);
+                assert_eq!(snapshot.subscription_events_received, 1);
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all duplicate inventories should arrive");
+    assert!(
+        timeout(Duration::from_millis(200), first.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(200), second.recv())
+            .await
+            .is_err()
+    );
+
+    first.close();
+    second.close();
+    client_a.shutdown().await;
+    client_b.shutdown().await;
+    client_c.shutdown().await;
+    endpoint_a.shutdown().await.expect("shutdown endpoint A");
+    endpoint_b.shutdown().await.expect("shutdown endpoint B");
+    endpoint_c.shutdown().await.expect("shutdown endpoint C");
+    unregister_sim_network(&network_id);
+}
+
+async fn connected_live_mesh(
+    network_id: &str,
+) -> (
+    Arc<FipsEndpoint>,
+    Arc<FipsEndpoint>,
+    Arc<FipsEndpoint>,
+    FipsPubsubClient,
+    FipsPubsubClient,
+    FipsPubsubClient,
+) {
+    register_sim_network(network_id, SimNetwork::new(7370));
+    let identity_a = Identity::from_secret_bytes(&[31; 32]).expect("identity A");
+    let identity_b = Identity::from_secret_bytes(&[32; 32]).expect("identity B");
+    let identity_c = Identity::from_secret_bytes(&[33; 32]).expect("identity C");
+    let endpoint_a = live_endpoint(
+        network_id,
+        "live-a",
+        [31; 32],
+        [(identity_b.npub(), "live-b"), (identity_c.npub(), "live-c")],
+    )
+    .await;
+    let endpoint_b = live_endpoint(
+        network_id,
+        "live-b",
+        [32; 32],
+        [(identity_a.npub(), "live-a")],
+    )
+    .await;
+    let endpoint_c = live_endpoint(
+        network_id,
+        "live-c",
+        [33; 32],
+        [(identity_a.npub(), "live-a")],
+    )
+    .await;
+    wait_for_connected_peer(&endpoint_a, endpoint_b.npub()).await;
+    wait_for_connected_peer(&endpoint_a, endpoint_c.npub()).await;
+    wait_for_connected_peer(&endpoint_b, endpoint_a.npub()).await;
+    wait_for_connected_peer(&endpoint_c, endpoint_a.npub()).await;
+
+    let client_a = start_sim_client(&endpoint_a, "receiver").await;
+    let client_b = start_sim_client(&endpoint_b, "provider B").await;
+    let client_c = start_sim_client(&endpoint_c, "provider C").await;
+    wait_for_pubsub_connections(&client_a, 2).await;
+    wait_for_pubsub_connections(&client_b, 1).await;
+    wait_for_pubsub_connections(&client_c, 1).await;
+    (
+        endpoint_a, endpoint_b, endpoint_c, client_a, client_b, client_c,
+    )
+}
+
+async fn live_endpoint<const N: usize>(
+    network_id: &str,
+    address: &str,
+    secret: [u8; 32],
+    peers: [(String, &str); N],
+) -> Arc<FipsEndpoint> {
+    Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(endpoint_config_with_peers(
+                    network_id, address, secret, peers,
+                ))
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("bind endpoint {address}: {error}")),
+    )
+}
+
+async fn start_sim_client(endpoint: &Arc<FipsEndpoint>, name: &str) -> FipsPubsubClient {
+    FipsPubsubClient::start_for_transport(
+        Arc::clone(endpoint),
+        FipsPubsubClientOptions::default(),
+        "sim",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("start {name}: {error}"))
+}
+
 fn assert_peer_subscription_snapshot(
     client: &FipsPubsubClient,
     subscription_id: &nostr_pubsub::SubscriptionId,
     filter: &Filter,
 ) {
-    let encoded_req_bytes = FipsPubsubWireCodec::new(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES)
+    let encoded_req_bytes = FipsPubsubWireCodec::new(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES)
         .expect("FIPS codec")
         .encode_frame(&FipsPubsubWireMessage::req(
             subscription_id.clone(),
@@ -655,50 +700,6 @@ async fn connected_update_clients(
     (endpoint_a, endpoint_b, client_a, client_b)
 }
 
-async fn exercise_default_reputation(endpoint: &Arc<FipsEndpoint>, peer_npub: &str) {
-    let reputation = FipsPeerReputation::new(
-        Arc::clone(endpoint),
-        std::iter::empty(),
-        FipsPeerReputationOptions::default(),
-    )
-    .expect("start default FIPS peer reputation");
-    assert!(
-        reputation
-            .peer_policy()
-            .select_mesh_peer(peer_npub)
-            .expect("unknown peer policy")
-            .expect("unknown peer remains eligible")
-            .is_unknown()
-    );
-    reputation
-        .publication_candidates(1_000)
-        .await
-        .expect("snapshot signed FIPS ratings");
-
-    let mut policy = FipsPubsubPolicy::new(
-        Arc::clone(endpoint),
-        std::iter::empty(),
-        FipsPubsubPolicyOptions::default(),
-    )
-    .expect("start pubsub policy");
-    let event = EventBuilder::text_note("ordinary event")
-        .sign_with_keys(&Keys::generate())
-        .expect("sign ordinary event");
-    assert!(
-        !policy
-            .observe_event(&event)
-            .expect("observe ordinary event")
-    );
-    assert!(!matches!(
-        policy
-            .check_event(&event, &EventSource::relay("wss://bootstrap.example"))
-            .await
-            .expect("check relay event author"),
-        PolicyDecision::Drop { .. }
-    ));
-    assert!(policy.maintenance_events(1_000).await.unwrap().is_empty());
-}
-
 fn exercise_explicit_time_reputation(
     endpoint: &Arc<FipsEndpoint>,
     peer_npub: &str,
@@ -813,6 +814,35 @@ fn endpoint_config(
     config
 }
 
+fn endpoint_config_with_peers<const N: usize>(
+    network_id: &str,
+    local_addr: &str,
+    secret: [u8; 32],
+    peers: [(String, &str); N],
+) -> Config {
+    let mut config = Config::new();
+    config.node.identity = IdentityConfig {
+        nsec: Some(hex::encode(secret)),
+        persistent: false,
+    };
+    config.node.rate_limit.handshake_burst = 1_000;
+    config.node.rate_limit.handshake_rate = 1_000.0;
+    config.node.retry.base_interval_secs = 1;
+    config.node.retry.max_backoff_secs = 1;
+    config.transports.sim = TransportInstances::Single(SimTransportConfig {
+        network: Some(network_id.to_string()),
+        addr: Some(local_addr.to_string()),
+        mtu: Some(1280),
+        auto_connect: Some(false),
+        accept_connections: Some(true),
+    });
+    config.peers = peers
+        .into_iter()
+        .map(|(npub, addr)| PeerConfig::new(npub, "sim", addr))
+        .collect();
+    config
+}
+
 fn peerfinding_endpoint_config(
     secret: [u8; 32],
     external_addr: &str,
@@ -860,120 +890,32 @@ async fn wait_for_connected_peer(endpoint: &FipsEndpoint, expected_npub: &str) {
     .expect("FIPS endpoints connect");
 }
 
-fn spawn_peer_service(
-    endpoint: Arc<FipsEndpoint>,
-    replay_event: VerifiedEvent,
-    messages: mpsc::UnboundedSender<FipsPubsubWireMessage>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let codec =
-            FipsPubsubWireCodec::new(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES).expect("service codec");
-        let mut datagrams = Vec::new();
+async fn wait_for_pubsub_connections(client: &FipsPubsubClient, expected: usize) {
+    timeout(Duration::from_secs(5), async {
         loop {
-            let Some(_) = endpoint
-                .recv_service_datagram_batch_into(&mut datagrams, 16)
-                .await
-            else {
+            if client.connected_peer_count().expect("pubsub peers") == expected {
                 return;
-            };
-            for datagram in datagrams.drain(..) {
-                assert_eq!(datagram.source_port, FIPS_NOSTR_PUBSUB_SERVICE_PORT);
-                assert_eq!(datagram.destination_port, FIPS_NOSTR_PUBSUB_SERVICE_PORT);
-                let message = codec
-                    .decode_frame(datagram.data.as_slice())
-                    .expect("decode service request");
-                messages
-                    .send(message.clone())
-                    .expect("record service message");
-                if let FipsPubsubWireMessage::Req {
-                    subscription_id, ..
-                } = message
-                {
-                    let unrelated = codec
-                        .encode_frame(&FipsPubsubWireMessage::deliver(
-                            SubscriptionId::new("not-subscribed"),
-                            replay_event.clone(),
-                        ))
-                        .expect("encode unrelated reply");
-                    endpoint
-                        .send_datagram(
-                            datagram.source_peer,
-                            FIPS_NOSTR_PUBSUB_SERVICE_PORT,
-                            datagram.source_port,
-                            unrelated,
-                        )
-                        .await
-                        .expect("send unrelated reply");
-                    let reply = codec
-                        .encode_frame(&FipsPubsubWireMessage::deliver(
-                            subscription_id,
-                            replay_event.clone(),
-                        ))
-                        .expect("encode subscribed reply");
-                    endpoint
-                        .send_datagram(
-                            datagram.source_peer,
-                            FIPS_NOSTR_PUBSUB_SERVICE_PORT,
-                            datagram.source_port,
-                            reply,
-                        )
-                        .await
-                        .expect("send subscribed reply");
-                }
             }
+            tokio::task::yield_now().await;
         }
     })
+    .await
+    .expect("TCP/FIPS pubsub streams connect");
 }
 
-async fn recv_req_id(
-    messages: &mut mpsc::UnboundedReceiver<FipsPubsubWireMessage>,
-) -> SubscriptionId {
-    loop {
-        let message = timeout(Duration::from_secs(2), messages.recv())
-            .await
-            .expect("REQ timeout")
-            .expect("service channel open");
-        if let FipsPubsubWireMessage::Req {
-            subscription_id, ..
-        } = message
-        {
-            return subscription_id;
+async fn wait_for_peer_subscription_count(client: &FipsPubsubClient, expected: usize) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if client
+                .peer_subscription_count()
+                .expect("peer subscriptions")
+                == expected
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
         }
-    }
-}
-
-async fn recv_close(
-    messages: &mut mpsc::UnboundedReceiver<FipsPubsubWireMessage>,
-    expected: &SubscriptionId,
-) {
-    loop {
-        let message = timeout(Duration::from_secs(2), messages.recv())
-            .await
-            .expect("CLOSE timeout")
-            .expect("service channel open");
-        if let FipsPubsubWireMessage::Close { subscription_id } = message {
-            assert_eq!(&subscription_id, expected);
-            return;
-        }
-    }
-}
-
-async fn recv_publish(
-    messages: &mut mpsc::UnboundedReceiver<FipsPubsubWireMessage>,
-    expected: &VerifiedEvent,
-) {
-    loop {
-        let message = timeout(Duration::from_secs(2), messages.recv())
-            .await
-            .expect("publish timeout")
-            .expect("service channel open");
-        if let FipsPubsubWireMessage::Event {
-            subscription_id: None,
-            event,
-        } = message
-        {
-            assert_eq!(&event, expected);
-            return;
-        }
-    }
+    })
+    .await
+    .expect("peer subscriptions converge");
 }

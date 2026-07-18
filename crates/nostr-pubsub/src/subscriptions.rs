@@ -281,6 +281,17 @@ impl PubsubPeerSubscriptionStore {
             .map_or(0, |peer| peer.subscriptions.len())
     }
 
+    #[must_use]
+    pub fn subscription(
+        &self,
+        peer_id: &SourceId,
+        subscription_id: &str,
+    ) -> Option<&PubsubPeerSubscription> {
+        self.peers
+            .get(peer_id)
+            .and_then(|peer| peer.subscriptions.get(subscription_id))
+    }
+
     pub fn apply_client_message(
         &mut self,
         peer_id: SourceId,

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 - 2026-07-18
+
+- Carry ordinary Nostr `REQ`, `EVENT`, and `CLOSE` frames exclusively over
+  reliable `fips-tcp` on FIPS service port 7368; remove the raw-FSP datagram
+  carrier and compatibility fallback.
+- Add grouped subscription-scoped `INV`/`WANT` live delivery: duplicate inventories
+  from many peers and open subscriptions select one provider and fetch one
+  ordinary `EVENT`, then fan it out to every matching local subscription.
+- Bound pending inventory, alternate-provider retry, replay, peer, record, and
+  byte state; expose delivery counters for deterministic mesh observability.
+- Preserve the low-level generic Inv/WANT TCP driver for applications that do
+  not use Nostr subscription semantics.
+
 ## 0.3.2 - 2026-07-18
 
 - Add an explicit excluded-transport set for applications whose FIPS pubsub

@@ -8,7 +8,10 @@ use fips_tcp::{Config as TcpConfig, ConnectionId, State};
 use fips_tcp_endpoint::FipsTcpEndpoint;
 use nostr_pubsub::{PubsubError, QueryEvent, Result, VerifiedEvent};
 
-use crate::{FipsInvWantStream, FipsInvWantStreamAction};
+use crate::{
+    FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL, FIPS_NOSTR_PUBSUB_INV_WANT_VERSION,
+    FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsInvWantStream, FipsInvWantStreamAction,
+};
 
 const STREAM_IO_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_READY_INPUT_TURNS: usize = 16;
@@ -29,6 +32,20 @@ pub struct FipsInvWantTcpDriverOptions {
     pub max_queued_bytes_per_peer: usize,
     /// Maximum bytes read and maximum bytes written in one drive turn.
     pub max_io_bytes_per_drive: usize,
+}
+
+impl Default for FipsInvWantTcpDriverOptions {
+    fn default() -> Self {
+        Self {
+            service_namespace: FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL.to_string(),
+            service_version: FIPS_NOSTR_PUBSUB_INV_WANT_VERSION,
+            service_port: FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+            max_peers: 64,
+            max_queued_records_per_peer: 2_048,
+            max_queued_bytes_per_peer: 16 * 1_024 * 1_024,
+            max_io_bytes_per_drive: 512 * 1_024,
+        }
+    }
 }
 
 impl FipsInvWantTcpDriverOptions {

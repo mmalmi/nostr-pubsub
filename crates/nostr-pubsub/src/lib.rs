@@ -5,7 +5,7 @@ use std::{fmt, str::FromStr};
 use async_trait::async_trait;
 use nostr::Event;
 pub use nostr::filter::MatchEventOptions;
-pub use nostr::{ClientMessage, Filter, PublicKey, RelayMessage, SubscriptionId};
+pub use nostr::{ClientMessage, EventId, Filter, PublicKey, RelayMessage, SubscriptionId};
 
 mod mesh;
 mod wire;

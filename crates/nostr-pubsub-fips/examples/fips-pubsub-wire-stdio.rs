@@ -3,7 +3,7 @@
 use std::io::{self, BufRead, Write};
 
 use nostr_pubsub::FipsPubsubWireCodec;
-use nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES;
+use nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -21,7 +21,7 @@ struct Response {
 }
 
 fn main() {
-    let codec = FipsPubsubWireCodec::new(FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES)
+    let codec = FipsPubsubWireCodec::new(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES)
         .expect("native FIPS pubsub frame limit");
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
