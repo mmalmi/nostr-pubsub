@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 - 2026-07-18
+
+- Split the read-only `NostrEventReader` and write-only `NostrEventPublisher`
+  contracts while preserving the combined `EventBus` API and routed `bus` alias.
+- Give source routes explicit dataset identities: replicas fail over within one
+  dataset, while additive datasets are queried concurrently and merged.
+- Deduplicate verified events with complete provenance, deterministic ordering,
+  one global result limit, isolated source failures, and per-route/per-dataset
+  outcome reporting.
+- Propagate cancellation and one absolute deadline through routed and in-memory
+  queries without activating any relay or changing publication policy.
+- Honor NIP-01 OR semantics by applying each filter's limit independently and
+  reserving `QueryOptions.limit` for the router-wide result cap.
+
 ## 0.3.1 - 2026-07-16
 
 - Retry a local subscription's `REQ` after an initially unavailable FIPS route

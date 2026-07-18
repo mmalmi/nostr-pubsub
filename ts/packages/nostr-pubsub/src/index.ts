@@ -117,12 +117,15 @@ export {
 export {
   InMemoryEventBus,
   type EventBus,
+  type NostrEventPublisher,
+  type NostrEventReader,
   type PublishReport,
   type QueryEvent,
   type QueryReport,
 } from './event-bus.js';
 
 export {
+  DEFAULT_ROUTE_DATASET_ID,
   fipsPeerDefaultRoute,
   fipsPeerRoute,
   localIndexRoute,
@@ -132,10 +135,16 @@ export {
   sourceRouteFromSource,
   withRouteCapabilities,
   withRouteCapability,
+  withRouteDataset,
   withRoutePriority,
   withRouteReason,
   type RouteAttempt,
+  type RouteAttemptOutcome,
+  type RouteFailure,
   type RouteQuerySource,
+  type RoutedDatasetReport,
+  type RoutedEventProvenance,
+  type RoutedQueryEvent,
   type RoutedQueryOptions,
   type RoutedQueryReport,
   type SourceRoute,

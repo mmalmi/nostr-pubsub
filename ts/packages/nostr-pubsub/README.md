@@ -23,6 +23,41 @@ admission, and outbound connection policy. This package does not contain a
 default relay or gateway. See the repository `docs/inv-want-wire.md` for
 compatibility and security boundaries.
 
+## Event readers and dataset routing
+
+`NostrEventReader` and `NostrEventPublisher` let applications compose read-only
+indexes without granting them publication authority. `EventBus` remains the
+backwards-compatible combination of both contracts. Routes with one `datasetId`
+are replicas of the same logical data; different dataset identities are
+additive and their verified events are merged:
+
+```ts
+const report = await queryRoutesWithPolicy([
+  {
+    route: withRouteDataset(localIndexRoute('archive-primary'), 'archive'),
+    reader: archivePrimary,
+  },
+  {
+    route: withRouteDataset(localIndexRoute('archive-replica'), 'archive'),
+    reader: archiveReplica,
+  },
+  {
+    route: withRouteDataset(localIndexRoute('personal'), 'personal'),
+    reader: personalIndex,
+  },
+], filters, {
+  query: { limit: 100, signal, deadline: Date.now() + 2_000 },
+}, policy);
+```
+
+The router tries same-dataset replicas in policy order until one produces a
+complete response, queries allowed additive datasets concurrently, isolates
+source failures, and applies one newest-first limit after verified-ID
+deduplication. The report retains all route provenance and exposes attempt and
+dataset completeness. Policy drops happen before reader invocation. Legacy
+routes use the shared `default` dataset and `{ route, bus }` remains supported
+during migration.
+
 `FipsNostrPubsubClient` is the browser peer carrier matching Rust
 `FipsPubsubClient` on authenticated FSP service `nostr.pubsub/1` (port 7368).
 It carries only verified Nostr `REQ`, `EVENT`, and `CLOSE` frames. The

@@ -6,7 +6,12 @@ export type NostrVerifiedEvent = VerifiedEvent;
 export type SourceId = string;
 export interface QueryOptions {
     limit?: number;
+    /** Cancels work which is no longer useful to the caller. */
+    signal?: AbortSignal;
+    /** Absolute Unix timestamp in milliseconds shared by every queried source. */
+    deadline?: number;
 }
+export declare function validateQueryOptions(options: QueryOptions): void;
 export declare class PubsubError extends Error {
     readonly kind: 'validation' | 'storage';
     private constructor();

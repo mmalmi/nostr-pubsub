@@ -10,7 +10,7 @@ export { InvWantMesh, defaultInvWantMeshOptions, } from './mesh.js';
 export { DEFAULT_INV_WANT_MAX_CACHE_BYTES, } from './mesh-resources.js';
 export { meshPeer, selectMeshPeers, } from './mesh-peer.js';
 export { InMemoryEventBus, } from './event-bus.js';
-export { fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRoutePriority, withRouteReason, } from './routing.js';
+export { DEFAULT_ROUTE_DATASET_ID, fipsPeerDefaultRoute, fipsPeerRoute, localIndexRoute, peerRoute, queryRoutesWithPolicy, relayRoute, sourceRouteFromSource, withRouteCapabilities, withRouteCapability, withRouteDataset, withRoutePriority, withRouteReason, } from './routing.js';
 export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_MAX_DATAGRAM_BYTES, FipsPubsubWireAdapter, FipsPubsubWireCodec, } from './wire.js';
 export { FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS, FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsNostrRelayService, defaultFipsNostrRelayServiceLimits, } from './fips-relay-service.js';
 export { FIPS_NOSTR_PUBSUB_CAPABILITY, FipsNostrPubsubClient, } from './fips-pubsub-client.js';

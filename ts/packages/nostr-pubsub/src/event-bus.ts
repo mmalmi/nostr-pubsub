@@ -1,8 +1,9 @@
-import { filterLimit, filtersMatch } from './filter.js';
+import { matchFilter } from 'nostr-tools/filter';
 import { allowWithPriority, reportParts, type PubsubPolicy } from './policy.js';
 import type { EventSource } from './source.js';
 import {
   verifyNostrEvent,
+  validateQueryOptions,
   type NostrEvent,
   type NostrFilter,
   type NostrVerifiedEvent,
@@ -23,12 +24,20 @@ export interface QueryEvent {
 
 export interface QueryReport {
   events: QueryEvent[];
+  /** False means the reader returned useful partial results. Omitted means true. */
+  complete?: boolean;
 }
 
-export interface EventBus {
-  publish(event: NostrEvent, source: EventSource): Promise<PublishReport>;
+export interface NostrEventReader {
   query(filters: NostrFilter[], options?: QueryOptions): Promise<QueryReport>;
 }
+
+export interface NostrEventPublisher {
+  publish(event: NostrEvent, source: EventSource): Promise<PublishReport>;
+}
+
+/** Backwards-compatible combined read/write event bus. */
+export interface EventBus extends NostrEventReader, NostrEventPublisher {}
 
 interface StoredEvent {
   event: NostrVerifiedEvent;
@@ -55,14 +64,43 @@ export class InMemoryEventBus implements EventBus {
   }
 
   async query(filters: NostrFilter[], options: QueryOptions = {}): Promise<QueryReport> {
-    const limit = options.limit ?? filterLimit(filters);
-    const events: QueryEvent[] = [];
-    for (const stored of this.events) {
-      if (limit !== undefined && events.length >= limit) break;
-      if (filtersMatch(filters, stored.event)) {
-        events.push({ ...stored });
+    validateQueryOptions(options);
+    throwIfQueryStopped(options);
+    const ordered = [...this.events].sort((left, right) =>
+      right.event.created_at - left.event.created_at || compareText(left.event.id, right.event.id)
+    );
+    const byId = new Map<string, QueryEvent>();
+    const effectiveFilters = filters.length === 0 ? [{}] : filters;
+    for (const filter of effectiveFilters) {
+      let matched = 0;
+      const filterResultLimit = typeof filter.limit === 'number' ? filter.limit : undefined;
+      for (const stored of ordered) {
+        if (filterResultLimit !== undefined && matched >= filterResultLimit) break;
+        if (!matchFilter(filter, stored.event)) continue;
+        matched += 1;
+        if (!byId.has(stored.event.id)) byId.set(stored.event.id, { ...stored });
       }
+      throwIfQueryStopped(options);
     }
-    return { events };
+    const events = [...byId.values()].sort((left, right) =>
+      right.event.created_at - left.event.created_at || compareText(left.event.id, right.event.id)
+    );
+    return { events: options.limit === undefined ? events : events.slice(0, options.limit) };
   }
+}
+
+function throwIfQueryStopped(options: QueryOptions): void {
+  if (options.signal?.aborted) throw abortError(options.signal.reason);
+  if (options.deadline !== undefined && Date.now() >= options.deadline) {
+    throw new DOMException('Nostr event query deadline exceeded', 'TimeoutError');
+  }
+}
+
+function abortError(reason: unknown): DOMException {
+  const message = typeof reason === 'string' ? reason : 'Nostr event query cancelled';
+  return new DOMException(message, 'AbortError');
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

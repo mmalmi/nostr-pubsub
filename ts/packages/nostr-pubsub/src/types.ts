@@ -11,6 +11,22 @@ export type SourceId = string;
 
 export interface QueryOptions {
   limit?: number;
+  /** Cancels work which is no longer useful to the caller. */
+  signal?: AbortSignal;
+  /** Absolute Unix timestamp in milliseconds shared by every queried source. */
+  deadline?: number;
+}
+
+export function validateQueryOptions(options: QueryOptions): void {
+  if (
+    options.limit !== undefined &&
+    (!Number.isSafeInteger(options.limit) || options.limit < 0)
+  ) {
+    throw new RangeError('Query limit must be a non-negative safe integer');
+  }
+  if (options.deadline !== undefined && !Number.isFinite(options.deadline)) {
+    throw new RangeError('Query deadline must be a finite Unix timestamp in milliseconds');
+  }
 }
 
 export class PubsubError extends Error {

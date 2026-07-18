@@ -1,5 +1,14 @@
 import { verifiedSymbol, verifyEvent } from 'nostr-tools/pure';
 const verifiedEventCopies = new WeakSet();
+export function validateQueryOptions(options) {
+    if (options.limit !== undefined &&
+        (!Number.isSafeInteger(options.limit) || options.limit < 0)) {
+        throw new RangeError('Query limit must be a non-negative safe integer');
+    }
+    if (options.deadline !== undefined && !Number.isFinite(options.deadline)) {
+        throw new RangeError('Query deadline must be a finite Unix timestamp in milliseconds');
+    }
+}
 export class PubsubError extends Error {
     kind;
     constructor(kind, message) {

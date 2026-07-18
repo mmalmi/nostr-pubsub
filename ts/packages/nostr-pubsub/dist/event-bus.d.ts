@@ -13,10 +13,17 @@ export interface QueryEvent {
 }
 export interface QueryReport {
     events: QueryEvent[];
+    /** False means the reader returned useful partial results. Omitted means true. */
+    complete?: boolean;
 }
-export interface EventBus {
-    publish(event: NostrEvent, source: EventSource): Promise<PublishReport>;
+export interface NostrEventReader {
     query(filters: NostrFilter[], options?: QueryOptions): Promise<QueryReport>;
+}
+export interface NostrEventPublisher {
+    publish(event: NostrEvent, source: EventSource): Promise<PublishReport>;
+}
+/** Backwards-compatible combined read/write event bus. */
+export interface EventBus extends NostrEventReader, NostrEventPublisher {
 }
 export declare class InMemoryEventBus implements EventBus {
     private readonly policy?;
