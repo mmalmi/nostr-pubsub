@@ -17,9 +17,10 @@ Alternate providers are retained within fixed bounds and selected if the first
 request does not complete. `CLOSE` retains its normal subscription semantics.
 
 Recent events are kept in a bounded replay cache so a `REQ` or reconnected TCP
-peer can receive inventories for the live window. Bulk historical set
-reconciliation is intentionally separate (for example NIP-77 Negentropy); it
-is not conflated with live duplicate suppression.
+peer can receive inventories for the live window. The same `INV`/`WANT` flow
+also works for historical events. For a large stored set, a reconciliation
+layer such as NIP-77 Negentropy can identify the missing IDs first and then use
+the same event transfer path more efficiently.
 
 The package also exports the lower-level `FipsInvWantTcpDriver` for non-Nostr
 mesh protocols, plus transport-neutral FIPS peerfinding and reputation
