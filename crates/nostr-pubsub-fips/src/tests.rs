@@ -98,7 +98,7 @@ fn pending_want_retries_with_backoff_then_expires() {
 
 #[test]
 fn tcp_timer_poll_matches_the_minimum_retransmission_granularity() {
-    assert_eq!(TCP_POLL_INTERVAL, Duration::from_secs(1));
+    assert_eq!(TCP_POLL_INTERVAL, Duration::from_millis(200));
 }
 
 #[test]
