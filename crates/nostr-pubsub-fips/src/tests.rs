@@ -23,6 +23,7 @@ use tokio::time::timeout;
 
 use super::*;
 use crate::client_inner::{InventoryProvider, PendingInventory};
+use crate::client_transport::peer_link_needs_connect;
 
 #[test]
 fn pending_want_retries_its_only_provider_until_event_arrives() {
@@ -56,6 +57,20 @@ fn pending_want_retries_its_only_provider_until_event_arrives() {
         pending.retry_due(1_100, 500),
         vec![("event-id".to_string(), provider)]
     );
+}
+
+#[test]
+fn tcp_timer_poll_matches_the_minimum_retransmission_granularity() {
+    assert_eq!(TCP_POLL_INTERVAL, Duration::from_millis(200));
+}
+
+#[test]
+fn stable_peer_link_does_not_require_transport_reconnect() {
+    let known = HashMap::from([("peer-a".to_string(), 7)]);
+
+    assert!(!peer_link_needs_connect(&known, "peer-a", 7));
+    assert!(peer_link_needs_connect(&known, "peer-a", 8));
+    assert!(peer_link_needs_connect(&known, "peer-b", 1));
 }
 
 #[tokio::test]

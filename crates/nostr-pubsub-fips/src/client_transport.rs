@@ -62,9 +62,20 @@ async fn sync_transport_peers(
         let _ = driver.abort_peer(peer).await;
     }
     for peer in peers {
+        if !peer_link_needs_connect(known_links, &peer.npub, peer.link_id) {
+            continue;
+        }
         let _ = driver.connect_peer(peer.identity, now_ms()).await;
     }
     *known_links = next_links;
+}
+
+pub(super) fn peer_link_needs_connect(
+    known_links: &HashMap<String, u64>,
+    peer_npub: &str,
+    link_id: u64,
+) -> bool {
+    known_links.get(peer_npub) != Some(&link_id)
 }
 
 fn process_wire_report(inner: &ClientInner, driver: &mut WireTcpDriver, report: WireTcpReport) {
