@@ -23,7 +23,9 @@ use tokio::time::Instant;
 mod client_inner;
 mod client_transport;
 mod peerfinding;
+mod provider_behavior;
 mod reputation;
+mod seen_ids;
 mod stats;
 mod stream;
 mod stream_tcp;
@@ -41,6 +43,12 @@ pub const FIPS_NOSTR_PUBSUB_SERVICE_PORT: u16 = 7368;
 pub const FIPS_NOSTR_PUBSUB_CAPABILITY: &str = "nostr.pubsub/1";
 pub const FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS: usize = 8;
 pub const FIPS_NOSTR_PUBSUB_DEFAULT_MAX_HOPS: u8 = 4;
+/// Event IDs retained without full signed payloads for accepted-event dedup.
+pub const FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS: usize = 4_096;
+/// Unaccepted IDs retained for one authenticated peer/subscription epoch.
+pub const FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS_PER_SCOPE: usize = 1_024;
+/// Aggregate bound across all authenticated peer/subscription observations.
+pub const FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS: usize = 16_384;
 
 /// Maximum encoded Nostr frame carried in one reliable TCP record.
 pub const FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES: usize = u16::MAX as usize - 10;
@@ -122,6 +130,7 @@ pub struct FipsPubsubClient {
 
 enum TransportCommand {
     Send { peer: PeerIdentity, frame: Vec<u8> },
+    Cooldown { peer: PeerIdentity },
 }
 
 impl FipsPubsubClient {
@@ -222,6 +231,8 @@ impl FipsPubsubClient {
             want_frames_received: AtomicU64::new(0),
             want_frames_sent: AtomicU64::new(0),
             subscription_events_received: AtomicU64::new(0),
+            expired_wants: AtomicU64::new(0),
+            provider_cooldowns: AtomicU64::new(0),
             tcp_receive_batches: AtomicU64::new(0),
             tcp_datagrams_received: AtomicU64::new(0),
             tcp_datagrams_rejected: AtomicU64::new(0),
@@ -229,7 +240,19 @@ impl FipsPubsubClient {
             next_subscription_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
             peer_subscriptions: Mutex::new(PubsubPeerSubscriptionStore::new(subscription_limits)),
-            recent_events: Mutex::new(RecentEvents::new(max_replay_events)),
+            recent_events: Mutex::new(RecentEvents::new(
+                max_replay_events,
+                FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS,
+            )),
+            observed_inventories: Mutex::new(seen_ids::ScopedSeenIds::new(
+                FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS_PER_SCOPE,
+                FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS,
+            )),
+            observed_full_events: Mutex::new(seen_ids::ScopedSeenIds::new(
+                FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS_PER_SCOPE,
+                FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS,
+            )),
+            provider_behavior: Mutex::new(provider_behavior::ProviderBehavior::default()),
             pending_wants: Mutex::new(PendingWants::new(
                 max_pending_events,
                 max_pending_alternatives,

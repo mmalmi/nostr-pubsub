@@ -14,7 +14,7 @@ use nostr::{
     Timestamp, ToBech32,
 };
 use nostr_pubsub::{
-    EventBus, EventSourceKind, InMemoryEventBus, NostrEventSubscriber,
+    EventBus, EventSource, EventSourceKind, InMemoryEventBus, NostrEventSubscriber,
     PubsubPeerSubscriptionSnapshot, VerifiedEvent,
 };
 use nostr_social_graph::Rating;
@@ -22,11 +22,35 @@ use nostr_social_memory::RatingEventExt;
 use tokio::time::timeout;
 
 use super::*;
-use crate::client_inner::{InventoryProvider, PendingInventory};
+use crate::client_inner::{InventoryProvider, PendingInventory, RecentEvents};
 use crate::client_transport::peer_link_needs_connect;
 
 #[test]
-fn pending_want_retries_its_only_provider_until_event_arrives() {
+fn accepted_event_ids_outlive_full_payload_replay() {
+    let mut recent = RecentEvents::new(1, 3);
+    let events = (0..4)
+        .map(|index| {
+            VerifiedEvent::try_from(
+                EventBuilder::text_note(format!("event {index}"))
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign event"),
+            )
+            .expect("verify event")
+        })
+        .collect::<Vec<_>>();
+    for event in events.iter().take(3) {
+        assert!(recent.insert(event.clone(), EventSource::local_index("test"), 1));
+    }
+    assert_eq!(recent.entries.len(), 1);
+    assert!(recent.contains(&events[0].as_event().id.to_string()));
+
+    assert!(recent.insert(events[3].clone(), EventSource::local_index("test"), 1,));
+    assert!(!recent.contains(&events[0].as_event().id.to_string()));
+    assert!(recent.contains(&events[1].as_event().id.to_string()));
+}
+
+#[test]
+fn pending_want_retries_with_backoff_then_expires() {
     let provider = InventoryProvider {
         peer_npub: Keys::generate()
             .public_key()
@@ -44,19 +68,32 @@ fn pending_want_retries_its_only_provider_until_event_arrives() {
             payload_bytes: 128,
             hop_limit: 8,
             requested_at_ms: 100,
+            retry_count: 0,
         },
     ));
 
-    assert!(pending.retry_due(599, 500).is_empty());
+    assert!(pending.retry_due(599, 500).retries.is_empty());
     assert_eq!(
-        pending.retry_due(600, 500),
+        pending.retry_due(600, 500).retries,
         vec![("event-id".to_string(), provider.clone())]
     );
-    assert!(pending.retry_due(1_099, 500).is_empty());
+    assert!(pending.retry_due(1_599, 500).retries.is_empty());
     assert_eq!(
-        pending.retry_due(1_100, 500),
-        vec![("event-id".to_string(), provider)]
+        pending.retry_due(1_600, 500).retries,
+        vec![("event-id".to_string(), provider.clone())]
     );
+    for now_ms in [3_600, 7_600, 15_600] {
+        assert_eq!(
+            pending.retry_due(now_ms, 500).retries,
+            vec![("event-id".to_string(), provider.clone())]
+        );
+    }
+    assert!(pending.retry_due(31_599, 500).retries.is_empty());
+    let expired = pending.retry_due(31_600, 500);
+    assert!(expired.retries.is_empty());
+    assert_eq!(expired.expired_event_count, 1);
+    assert_eq!(expired.expired_providers, vec![provider]);
+    assert!(pending.retry_due(60_000, 500).retries.is_empty());
 }
 
 #[test]

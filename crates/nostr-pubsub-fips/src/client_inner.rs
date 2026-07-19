@@ -6,6 +6,9 @@ use super::{
     SubscriptionId, TransportCommand, VecDeque, VerifiedEvent, event_payload_bytes, mpsc,
     no_connected_peers, now_ms, poisoned, storage_error,
 };
+use crate::FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS;
+use crate::provider_behavior::{ProviderBehavior, ProviderViolation};
+use crate::seen_ids::ScopedSeenIds;
 
 pub(super) struct ClientInner {
     pub(super) endpoint: Arc<FipsEndpoint>,
@@ -22,6 +25,8 @@ pub(super) struct ClientInner {
     pub(super) want_frames_received: AtomicU64,
     pub(super) want_frames_sent: AtomicU64,
     pub(super) subscription_events_received: AtomicU64,
+    pub(super) expired_wants: AtomicU64,
+    pub(super) provider_cooldowns: AtomicU64,
     pub(super) tcp_receive_batches: AtomicU64,
     pub(super) tcp_datagrams_received: AtomicU64,
     pub(super) tcp_datagrams_rejected: AtomicU64,
@@ -30,6 +35,9 @@ pub(super) struct ClientInner {
     pub(super) subscriptions: Mutex<HashMap<String, ActiveSubscription>>,
     pub(super) peer_subscriptions: Mutex<PubsubPeerSubscriptionStore>,
     pub(super) recent_events: Mutex<RecentEvents>,
+    pub(super) observed_inventories: Mutex<ScopedSeenIds>,
+    pub(super) observed_full_events: Mutex<ScopedSeenIds>,
+    pub(super) provider_behavior: Mutex<ProviderBehavior>,
     pub(super) pending_wants: Mutex<PendingWants>,
 }
 
@@ -175,6 +183,7 @@ impl ClientInner {
 
     pub(super) fn handle_frame(&self, source_peer: PeerIdentity, frame: &[u8]) {
         let Ok(message) = self.codec.decode_frame(frame) else {
+            self.record_provider_violation(source_peer, ProviderViolation::MalformedFrame);
             return;
         };
 
@@ -197,6 +206,29 @@ impl ClientInner {
                 event,
             } => {
                 self.event_frames_received.fetch_add(1, Ordering::Relaxed);
+                let subscription_key = subscription_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let event_id = event.as_event().id.to_string();
+                let first_observation = self
+                    .observed_full_events
+                    .lock()
+                    .is_ok_and(|mut seen| seen.observe(&source_npub, &subscription_key, &event_id));
+                let is_subscribed =
+                    self.event_matches_subscription(&source_npub, subscription_id.as_ref(), &event);
+                if !is_subscribed {
+                    self.record_provider_violation(
+                        source_peer,
+                        ProviderViolation::OutOfFilterEvent {
+                            repeated: !first_observation,
+                        },
+                    );
+                    return;
+                }
+                if !first_observation {
+                    return;
+                }
                 self.handle_event(&source_npub, &source_id, subscription_id.as_ref(), &event);
             }
             FipsPubsubWireMessage::Inv {
@@ -262,9 +294,11 @@ impl ClientInner {
         event: &VerifiedEvent,
     ) {
         let hop_limit = match subscription_id {
-            Some(subscription_id) => self
-                .complete_want(source_npub, subscription_id, event)
-                .unwrap_or(None),
+            Some(subscription_id) => Some(
+                self.complete_want(source_npub, subscription_id, event)
+                    .unwrap_or(None)
+                    .unwrap_or(0),
+            ),
             None => Some(self.options.max_hops),
         };
         let Some(hop_limit) = hop_limit else {
@@ -355,11 +389,38 @@ impl ClientInner {
                 event.clone(),
                 EventSource::fips_endpoint(source_npub),
                 &event_id,
-                self.options.max_replay_events,
+                FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS,
             );
             delivered = true;
         }
         delivered
+    }
+
+    fn event_matches_subscription(
+        &self,
+        source_npub: &str,
+        subscription_id: Option<&SubscriptionId>,
+        event: &VerifiedEvent,
+    ) -> bool {
+        let Ok(subscriptions) = self.subscriptions.lock() else {
+            return false;
+        };
+        match subscription_id {
+            Some(subscription_id) => {
+                subscriptions
+                    .get(&subscription_id.to_string())
+                    .is_some_and(|active| {
+                        active.peers.contains(source_npub)
+                            && PubsubPeerInterest::from_filters(&active.filters, event)
+                                == PubsubPeerInterest::Subscribed
+                    })
+            }
+            None => subscriptions.values().any(|active| {
+                active.peers.contains(source_npub)
+                    && PubsubPeerInterest::from_filters(&active.filters, event)
+                        == PubsubPeerInterest::Subscribed
+            }),
+        }
     }
 
     pub(super) fn remember_event(
@@ -506,7 +567,7 @@ impl ClientInner {
             return Ok(None);
         }
         let subscriptions = self.lock_subscriptions()?;
-        let valid_subscription_ids = subscription_ids
+        let candidate_subscription_ids = subscription_ids
             .into_iter()
             .filter(|subscription_id| {
                 subscriptions
@@ -518,10 +579,19 @@ impl ClientInner {
             })
             .map(|subscription_id| subscription_id.to_string())
             .collect::<Vec<_>>();
+        drop(subscriptions);
+        let mut observed = self
+            .observed_inventories
+            .lock()
+            .map_err(|_| poisoned("FIPS observed inventory IDs"))?;
+        let valid_subscription_ids = candidate_subscription_ids
+            .into_iter()
+            .filter(|subscription_id| observed.observe(source_npub, subscription_id, &event_id_hex))
+            .collect::<Vec<_>>();
         if valid_subscription_ids.is_empty() {
             return Ok(None);
         }
-        drop(subscriptions);
+        drop(observed);
 
         let provider = InventoryProvider {
             peer_npub: source_npub.to_string(),
@@ -534,6 +604,7 @@ impl ClientInner {
             payload_bytes,
             hop_limit,
             requested_at_ms: now_ms(),
+            retry_count: 0,
         };
         let should_request = self
             .pending_wants
@@ -592,12 +663,19 @@ impl ClientInner {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
-        let retries = self
+        let due = self
             .pending_wants
             .lock()
             .map(|mut pending| pending.retry_due(now_ms, retry_after_ms))
             .unwrap_or_default();
-        retries
+        self.expired_wants
+            .fetch_add(due.expired_event_count as u64, Ordering::Relaxed);
+        for provider in due.expired_providers {
+            if let Ok(peer) = PeerIdentity::from_npub(&provider.peer_npub) {
+                self.record_provider_violation(peer, ProviderViolation::UnansweredInventory);
+            }
+        }
+        due.retries
             .into_iter()
             .filter_map(|(event_id, provider)| {
                 let peer = PeerIdentity::from_npub(&provider.peer_npub).ok()?;
@@ -652,6 +730,12 @@ impl ClientInner {
         };
         if let Ok(mut pending) = self.pending_wants.lock() {
             pending.remove_subscription(key);
+        }
+        if let Ok(mut observed) = self.observed_inventories.lock() {
+            observed.clear_subscription(key);
+        }
+        if let Ok(mut observed) = self.observed_full_events.lock() {
+            observed.clear_subscription(key);
         }
         self.send_close(key, active.peers);
     }
@@ -713,6 +797,41 @@ impl ClientInner {
         }
         frames
     }
+
+    pub(super) fn reset_peer_epoch(&self, peer_npub: &str) {
+        if let Ok(mut observed) = self.observed_inventories.lock() {
+            observed.clear_peer(peer_npub);
+        }
+        if let Ok(mut observed) = self.observed_full_events.lock() {
+            observed.clear_peer(peer_npub);
+        }
+        if let Ok(mut pending) = self.pending_wants.lock() {
+            pending.remove_peer(peer_npub);
+        }
+    }
+
+    pub(super) fn peer_is_in_cooldown(&self, peer_npub: &str, now_ms: u64) -> bool {
+        self.provider_behavior
+            .lock()
+            .is_ok_and(|mut behavior| behavior.is_in_cooldown(peer_npub, now_ms))
+    }
+
+    fn record_provider_violation(&self, peer: PeerIdentity, violation: ProviderViolation) {
+        let peer_npub = peer.npub();
+        let cooldown = self
+            .provider_behavior
+            .lock()
+            .ok()
+            .and_then(|mut behavior| behavior.record(&peer_npub, violation, now_ms()));
+        if cooldown.is_some()
+            && self
+                .transport_tx
+                .try_send(TransportCommand::Cooldown { peer })
+                .is_ok()
+        {
+            self.provider_cooldowns.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 pub(super) struct ConnectedPeer {
@@ -750,6 +869,16 @@ pub(super) struct PendingInventory {
     pub(super) payload_bytes: u32,
     pub(super) hop_limit: u8,
     pub(super) requested_at_ms: u64,
+    pub(super) retry_count: u8,
+}
+
+const MAX_WANT_RETRIES: u8 = 5;
+
+#[derive(Default)]
+pub(super) struct PendingWantRetryBatch {
+    pub(super) retries: Vec<(String, InventoryProvider)>,
+    pub(super) expired_providers: Vec<InventoryProvider>,
+    pub(super) expired_event_count: usize,
 }
 
 pub(super) struct PendingWants {
@@ -858,14 +987,22 @@ impl PendingWants {
             .retain(|event_id| self.entries.contains_key(event_id));
     }
 
-    pub(super) fn retry_due(
-        &mut self,
-        now_ms: u64,
-        retry_after_ms: u64,
-    ) -> Vec<(String, InventoryProvider)> {
-        let mut retries = Vec::new();
+    pub(super) fn retry_due(&mut self, now_ms: u64, retry_after_ms: u64) -> PendingWantRetryBatch {
+        let mut batch = PendingWantRetryBatch::default();
+        let mut expired_ids = Vec::new();
         for (event_id, pending) in &mut self.entries {
-            if now_ms.saturating_sub(pending.requested_at_ms) < retry_after_ms {
+            let retry_delay = retry_after_ms
+                .saturating_mul(1_u64 << u32::from(pending.retry_count.min(MAX_WANT_RETRIES)));
+            if now_ms.saturating_sub(pending.requested_at_ms) < retry_delay {
+                continue;
+            }
+            if pending.retry_count >= MAX_WANT_RETRIES {
+                batch.expired_event_count += 1;
+                batch.expired_providers.push(pending.selected.clone());
+                batch
+                    .expired_providers
+                    .extend(pending.alternatives.iter().cloned());
+                expired_ids.push(event_id.clone());
                 continue;
             }
             if let Some(next) = pending.alternatives.pop_front() {
@@ -873,9 +1010,36 @@ impl PendingWants {
                 pending.alternatives.push_back(previous);
             }
             pending.requested_at_ms = now_ms;
-            retries.push((event_id.clone(), pending.selected.clone()));
+            pending.retry_count += 1;
+            batch
+                .retries
+                .push((event_id.clone(), pending.selected.clone()));
         }
-        retries
+        for event_id in expired_ids {
+            self.entries.remove(&event_id);
+        }
+        self.order
+            .retain(|event_id| self.entries.contains_key(event_id));
+        batch
+    }
+
+    pub(super) fn remove_peer(&mut self, peer_npub: &str) {
+        self.entries.retain(|_, pending| {
+            pending
+                .alternatives
+                .retain(|provider| provider.peer_npub != peer_npub);
+            if pending.selected.peer_npub == peer_npub {
+                let Some(next) = pending.alternatives.pop_front() else {
+                    return false;
+                };
+                pending.selected = next;
+                pending.retry_count = 0;
+                pending.requested_at_ms = now_ms();
+            }
+            true
+        });
+        self.order
+            .retain(|event_id| self.entries.contains_key(event_id));
     }
 
     pub(super) fn clear(&mut self) {
@@ -898,16 +1062,20 @@ pub(super) struct CachedEvent {
 }
 
 pub(super) struct RecentEvents {
-    pub(super) max_events: usize,
+    pub(super) max_payload_events: usize,
+    pub(super) max_seen_ids: usize,
     pub(super) event_ids: HashSet<String>,
+    pub(super) event_id_order: VecDeque<String>,
     pub(super) entries: VecDeque<CachedEvent>,
 }
 
 impl RecentEvents {
-    pub(super) fn new(max_events: usize) -> Self {
+    pub(super) fn new(max_payload_events: usize, max_seen_ids: usize) -> Self {
         Self {
-            max_events,
+            max_payload_events,
+            max_seen_ids,
             event_ids: HashSet::new(),
+            event_id_order: VecDeque::new(),
             entries: VecDeque::new(),
         }
     }
@@ -919,19 +1087,23 @@ impl RecentEvents {
         hop_limit: u8,
     ) -> bool {
         let event_id = event.as_event().id.to_string();
-        if !self.event_ids.insert(event_id) {
+        if !self.event_ids.insert(event_id.clone()) {
             return false;
         }
+        self.event_id_order.push_back(event_id);
         self.entries.push_back(CachedEvent {
             event,
             source,
             hop_limit,
         });
-        while self.entries.len() > self.max_events {
-            if let Some(removed) = self.entries.pop_front() {
-                self.event_ids
-                    .remove(&removed.event.as_event().id.to_string());
-            }
+        while self.entries.len() > self.max_payload_events {
+            self.entries.pop_front();
+        }
+        while self.event_ids.len() > self.max_seen_ids {
+            let Some(removed) = self.event_id_order.pop_front() else {
+                break;
+            };
+            self.event_ids.remove(&removed);
         }
         true
     }
