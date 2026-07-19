@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use fips_core::FipsEndpoint;
 use nostr::Event;
-use nostr_pubsub::{EventSource, MeshPeerPolicy, PolicyDecision, PubsubError, Result};
+use nostr_pubsub::{
+    EventSource, MeshPeerPolicy, PolicyDecision, PubsubError, Result, VerifiedEvent,
+};
 use nostr_pubsub_social_graph::{
     PeerRatingPublisher, PeerRatingPublisherConfig, PeerReputation, PeerReputationConfig,
     PeerReputationPolicies,
@@ -124,6 +126,16 @@ impl FipsPeerReputation {
         self.policies.check_event(event, source).await
     }
 
+    /// Applies the shared author policy without repeating signature
+    /// verification already completed at the transport boundary.
+    pub async fn check_verified_event(
+        &self,
+        event: &VerifiedEvent,
+        source: &EventSource,
+    ) -> Result<PolicyDecision> {
+        self.policies.check_verified_event(event, source).await
+    }
+
     #[must_use]
     pub const fn evaluation_interval(&self) -> Duration {
         self.evaluation_interval
@@ -205,6 +217,16 @@ impl FipsPubsubPolicy {
     /// application cache or pubsub fanout.
     pub async fn check_event(&self, event: &Event, source: &EventSource) -> Result<PolicyDecision> {
         self.reputation.check_event(event, source).await
+    }
+
+    /// Applies transport-neutral author admission to an event whose ID and
+    /// signature have already been verified by the selected pubsub carrier.
+    pub async fn check_verified_event(
+        &self,
+        event: &VerifiedEvent,
+        source: &EventSource,
+    ) -> Result<PolicyDecision> {
+        self.reputation.check_verified_event(event, source).await
     }
 
     pub async fn maintenance_events(&mut self, now_ms: u64) -> Result<Vec<Event>> {

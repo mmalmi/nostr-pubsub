@@ -767,7 +767,7 @@ async fn reputation_facade_uses_explicit_virtual_time() {
         .expect("bind virtual-time endpoint"),
     );
 
-    exercise_explicit_time_reputation(&endpoint, &subject_npub, [7; 32]);
+    exercise_explicit_time_reputation(&endpoint, &subject_npub, [7; 32]).await;
 
     endpoint.shutdown().await.expect("shutdown endpoint");
     unregister_sim_network(&network_id);
@@ -835,7 +835,7 @@ async fn connected_update_clients(
     (endpoint_a, endpoint_b, client_a, client_b)
 }
 
-fn exercise_explicit_time_reputation(
+async fn exercise_explicit_time_reputation(
     endpoint: &Arc<FipsEndpoint>,
     peer_npub: &str,
     secret: [u8; 32],
@@ -884,6 +884,19 @@ fn exercise_explicit_time_reputation(
         NOW_SECS,
     )
     .expect("start policy at virtual time");
+    let source = EventSource::local_index("preverified-policy-test");
+    let verified = VerifiedEvent::try_from(event.clone()).expect("verify rating once");
+    assert_eq!(
+        policy
+            .check_event(&event, &source)
+            .await
+            .expect("plain event policy decision"),
+        policy
+            .check_verified_event(&verified, &source)
+            .await
+            .expect("preverified event policy decision"),
+        "preverified events must preserve the normal reputation decision"
+    );
     assert!(
         policy
             .observe_event_at(&event, NOW_SECS)
