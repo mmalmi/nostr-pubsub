@@ -25,6 +25,8 @@ pub(crate) struct WireTcpReport {
     pub frames: Vec<(PeerIdentity, Vec<u8>)>,
     pub newly_connected: Vec<PeerIdentity>,
     pub connected_peers: usize,
+    pub tcp_datagrams: usize,
+    pub rejected_tcp_datagrams: usize,
 }
 
 pub(crate) struct WireTcpDriver {
@@ -136,11 +138,15 @@ impl WireTcpDriver {
     }
 
     pub async fn receive(&mut self, now_ms: u64) -> Result<WireTcpReport> {
-        self.tcp
+        let received = self
+            .tcp
             .receive_report(now_ms)
             .await
             .map_err(|error| storage_error("receive TCP/FIPS Nostr pubsub batch", error))?;
-        self.drive_ready(now_ms).await
+        let mut report = self.drive_ready(now_ms).await?;
+        report.tcp_datagrams = received.datagrams;
+        report.rejected_tcp_datagrams = received.rejected();
+        Ok(report)
     }
 
     pub async fn poll(&mut self, now_ms: u64) -> Result<WireTcpReport> {
@@ -190,6 +196,8 @@ impl WireTcpDriver {
             frames,
             newly_connected,
             connected_peers: self.active.len(),
+            tcp_datagrams: 0,
+            rejected_tcp_datagrams: 0,
         })
     }
 

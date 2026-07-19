@@ -13,6 +13,10 @@ pub struct FipsPubsubDeliverySnapshot {
     pub want_frames_received: u64,
     pub want_frames_sent: u64,
     pub subscription_events_received: u64,
+    pub tcp_receive_batches: u64,
+    pub tcp_datagrams_received: u64,
+    pub tcp_datagrams_rejected: u64,
+    pub tcp_poll_turns: u64,
 }
 
 impl FipsPubsubClient {
@@ -29,6 +33,10 @@ impl FipsPubsubClient {
                 .inner
                 .subscription_events_received
                 .load(Ordering::Relaxed),
+            tcp_receive_batches: self.inner.tcp_receive_batches.load(Ordering::Relaxed),
+            tcp_datagrams_received: self.inner.tcp_datagrams_received.load(Ordering::Relaxed),
+            tcp_datagrams_rejected: self.inner.tcp_datagrams_rejected.load(Ordering::Relaxed),
+            tcp_poll_turns: self.inner.tcp_poll_turns.load(Ordering::Relaxed),
         }
     }
 

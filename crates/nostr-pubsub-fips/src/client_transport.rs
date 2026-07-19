@@ -28,10 +28,12 @@ pub(super) async fn transport_loop(
             }
             report = driver.receive(now_ms()) => {
                 if let Ok(report) = report {
+                    inner.tcp_receive_batches.fetch_add(1, Ordering::Relaxed);
                     process_wire_report(&inner, &mut driver, report);
                 }
             }
             _ = poll_tick.tick() => {
+                inner.tcp_poll_turns.fetch_add(1, Ordering::Relaxed);
                 sync_transport_peers(&inner, &mut driver, &mut known_links).await;
                 if let Ok(report) = driver.poll(now_ms()).await {
                     process_wire_report(&inner, &mut driver, report);
@@ -79,6 +81,12 @@ pub(super) fn peer_link_needs_connect(
 }
 
 fn process_wire_report(inner: &ClientInner, driver: &mut WireTcpDriver, report: WireTcpReport) {
+    inner
+        .tcp_datagrams_received
+        .fetch_add(report.tcp_datagrams as u64, Ordering::Relaxed);
+    inner
+        .tcp_datagrams_rejected
+        .fetch_add(report.rejected_tcp_datagrams as u64, Ordering::Relaxed);
     inner
         .connected_transport_peers
         .store(report.connected_peers, Ordering::Relaxed);
