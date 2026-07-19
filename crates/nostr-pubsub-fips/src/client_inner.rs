@@ -15,7 +15,11 @@ pub(super) struct ClientInner {
     pub(super) excluded_peer_transports: HashSet<String>,
     pub(super) transport_tx: mpsc::Sender<TransportCommand>,
     pub(super) connected_transport_peers: AtomicUsize,
+    pub(super) req_frames_received: AtomicU64,
+    pub(super) close_frames_received: AtomicU64,
+    pub(super) event_frames_received: AtomicU64,
     pub(super) inv_frames_received: AtomicU64,
+    pub(super) want_frames_received: AtomicU64,
     pub(super) want_frames_sent: AtomicU64,
     pub(super) subscription_events_received: AtomicU64,
     pub(super) next_subscription_id: AtomicU64,
@@ -176,14 +180,21 @@ impl ClientInner {
             FipsPubsubWireMessage::Req {
                 subscription_id,
                 filters,
-            } => self.handle_req(source_peer, source_id, &subscription_id, &filters),
+            } => {
+                self.req_frames_received.fetch_add(1, Ordering::Relaxed);
+                self.handle_req(source_peer, source_id, &subscription_id, &filters);
+            }
             FipsPubsubWireMessage::Close { subscription_id } => {
+                self.close_frames_received.fetch_add(1, Ordering::Relaxed);
                 self.handle_close(&source_id, &subscription_id);
             }
             FipsPubsubWireMessage::Event {
                 subscription_id,
                 event,
-            } => self.handle_event(&source_npub, &source_id, subscription_id.as_ref(), &event),
+            } => {
+                self.event_frames_received.fetch_add(1, Ordering::Relaxed);
+                self.handle_event(&source_npub, &source_id, subscription_id.as_ref(), &event);
+            }
             FipsPubsubWireMessage::Inv {
                 subscription_ids,
                 event_id,
@@ -202,6 +213,7 @@ impl ClientInner {
                 },
             ),
             FipsPubsubWireMessage::Want { event_id } => {
+                self.want_frames_received.fetch_add(1, Ordering::Relaxed);
                 self.handle_want(source_peer, &source_id, &event_id);
             }
         }

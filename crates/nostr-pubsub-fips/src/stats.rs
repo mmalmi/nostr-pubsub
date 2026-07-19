@@ -6,7 +6,11 @@ use super::{FipsPubsubClient, poisoned};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FipsPubsubDeliverySnapshot {
+    pub req_frames_received: u64,
+    pub close_frames_received: u64,
+    pub event_frames_received: u64,
     pub inv_frames_received: u64,
+    pub want_frames_received: u64,
     pub want_frames_sent: u64,
     pub subscription_events_received: u64,
 }
@@ -15,7 +19,11 @@ impl FipsPubsubClient {
     #[must_use]
     pub fn delivery_snapshot(&self) -> FipsPubsubDeliverySnapshot {
         FipsPubsubDeliverySnapshot {
+            req_frames_received: self.inner.req_frames_received.load(Ordering::Relaxed),
+            close_frames_received: self.inner.close_frames_received.load(Ordering::Relaxed),
+            event_frames_received: self.inner.event_frames_received.load(Ordering::Relaxed),
             inv_frames_received: self.inner.inv_frames_received.load(Ordering::Relaxed),
+            want_frames_received: self.inner.want_frames_received.load(Ordering::Relaxed),
             want_frames_sent: self.inner.want_frames_sent.load(Ordering::Relaxed),
             subscription_events_received: self
                 .inner

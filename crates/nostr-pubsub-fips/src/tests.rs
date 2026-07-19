@@ -551,6 +551,7 @@ async fn live_duplicate_inventories_fetch_one_event_for_all_matching_subscriptio
             let snapshot = client_a.delivery_snapshot();
             if snapshot.inv_frames_received >= 2 {
                 assert_eq!(snapshot.want_frames_sent, 1);
+                assert_eq!(snapshot.event_frames_received, 1);
                 assert_eq!(snapshot.subscription_events_received, 1);
                 return;
             }
