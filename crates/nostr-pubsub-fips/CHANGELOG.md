@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.3 - 2026-07-19
+
+- Keep separate bounded accepted-event and observed-ID caches. Structurally
+  valid full events and inventory claims are observed per authenticated peer
+  and subscription epoch before policy acceptance, with 1,024 IDs per scope
+  and a 16,384-ID aggregate ceiling.
+- Suppress repeated out-of-filter delivery, score objective provider
+  misbehavior with decay, and disconnect providers behind a bounded reconnect
+  cooldown after sustained abuse. Malformed records count more strongly;
+  isolated filter races do not affect event authors or social reputation.
+- Quiesce idle FIPS pubsub transport work, bound provider retries, and expose
+  wire/TCP/cooldown counters without changing the reliable INV/WANT/EVENT
+  protocol.
+- Expose policy checks for already verified Nostr events so callers retain the
+  verified object across admission and avoid duplicate signature validation.
+
 ## 0.4.2 - 2026-07-18
 
 - Retry `WANT` against its sole advertised provider until the ordinary
