@@ -129,7 +129,7 @@ async fn process_wire_report(
             }
             continue;
         }
-        inner.handle_frame(peer, &frame);
+        inner.handle_frame(peer, &frame).await;
     }
     for (peer, frame) in inner.retry_pending_frames(now_ms()) {
         if driver.queue_frame(peer, &frame).is_ok() {

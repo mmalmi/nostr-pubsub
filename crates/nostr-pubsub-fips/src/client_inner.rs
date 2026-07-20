@@ -1,14 +1,16 @@
 use super::{
-    Arc, AtomicU64, AtomicUsize, EventId, EventSource, Filter, FipsEndpoint,
+    Arc, AtomicU64, AtomicUsize, EventId, EventPolicyContext, EventSource, Filter, FipsEndpoint,
     FipsPubsubClientOptions, FipsPubsubSubscription, FipsPubsubWireCodec, FipsPubsubWireMessage,
-    HashMap, HashSet, Mutex, Ordering, PeerIdentity, PubsubError, PubsubPeerInterest,
-    PubsubPeerSubscriptionStore, QueryEvent, Result, SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId,
-    SubscriptionId, TransportCommand, VecDeque, VerifiedEvent, event_payload_bytes, mpsc,
-    no_connected_peers, now_ms, poisoned, storage_error,
+    HashMap, HashSet, Mutex, Ordering, PeerIdentity, PolicyDecision, PublishReport, PubsubError,
+    PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy, QueryEvent, Result,
+    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, TransportCommand, VecDeque,
+    VerifiedEvent, event_payload_bytes, mpsc, no_connected_peers, now_ms, poisoned, publish_report,
+    storage_error,
 };
 use crate::FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS;
 use crate::pending_wants::{InventoryProvider, PendingInventory, PendingWants};
 use crate::provider_behavior::{ProviderBehavior, ProviderViolation};
+use crate::recent_events::{CachedEvent, RecentEvents, deliver_local};
 use crate::seen_ids::ScopedSeenIds;
 
 pub(super) struct ClientInner {
@@ -17,6 +19,7 @@ pub(super) struct ClientInner {
     pub(super) options: FipsPubsubClientOptions,
     pub(super) peer_transport: Option<&'static str>,
     pub(super) excluded_peer_transports: HashSet<String>,
+    pub(super) event_policy: Option<Arc<dyn PubsubPolicy>>,
     pub(super) transport_tx: mpsc::Sender<TransportCommand>,
     pub(super) connected_transport_peers: AtomicUsize,
     pub(super) req_frames_received: AtomicU64,
@@ -112,9 +115,7 @@ impl ClientInner {
         }
 
         let peers = self.connected_peers().await?;
-        if peers.is_empty() {
-            return Err(no_connected_peers(self.peer_transport));
-        }
+        let had_peers = !peers.is_empty();
         let sequence = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
         let subscription_id = SubscriptionId::new(format!("fips-{sequence}"));
         let key = subscription_id.to_string();
@@ -129,9 +130,10 @@ impl ClientInner {
             .collect::<HashSet<_>>();
         {
             let mut subscriptions = self.lock_subscriptions()?;
-            if subscriptions.len() >= self.options.max_active_subscriptions {
+            let subscription_capacity = self.options.max_active_subscriptions.saturating_add(1);
+            if subscriptions.len() >= subscription_capacity {
                 return Err(PubsubError::Storage(format!(
-                    "active FIPS pubsub subscription limit is {}",
+                    "application FIPS pubsub subscription limit is {}",
                     self.options.max_active_subscriptions
                 )));
             }
@@ -162,7 +164,7 @@ impl ClientInner {
                 }
             }
         }
-        if sent == 0 {
+        if had_peers && sent == 0 {
             self.close_subscription(&key);
             return Err(last_error.unwrap_or_else(|| no_connected_peers(self.peer_transport)));
         }
@@ -182,7 +184,7 @@ impl ClientInner {
             .map_err(|error| storage_error("queue TCP/FIPS Nostr pubsub frame", error))
     }
 
-    pub(super) fn handle_frame(&self, source_peer: PeerIdentity, frame: &[u8]) {
+    pub(super) async fn handle_frame(&self, source_peer: PeerIdentity, frame: &[u8]) {
         let Ok(message) = self.codec.decode_frame(frame) else {
             self.record_provider_violation(source_peer, ProviderViolation::MalformedFrame);
             return;
@@ -228,6 +230,10 @@ impl ClientInner {
                     return;
                 }
                 if !first_observation {
+                    return;
+                }
+                let source = EventSource::fips_endpoint(&source_npub);
+                if !self.event_is_admitted(&event, &source).await {
                     return;
                 }
                 self.handle_event(&source_npub, &source_id, subscription_id.as_ref(), &event);
@@ -436,6 +442,76 @@ impl ClientInner {
             .map(|mut events| events.insert(event, source, hop_limit))
     }
 
+    pub(super) async fn publish(
+        &self,
+        event: VerifiedEvent,
+        source: EventSource,
+    ) -> Result<PublishReport> {
+        let decision = self.event_decision(&event, &source).await?;
+        let (accepted, priority, reason) = decision_report(&decision);
+        if !accepted {
+            return Ok(PublishReport {
+                accepted,
+                priority,
+                reason,
+            });
+        }
+
+        let peers = self.connected_peers().await?;
+        let is_new = self.remember_event(event.clone(), source, self.options.max_hops)?;
+        if !is_new {
+            return Ok(PublishReport {
+                accepted: true,
+                priority,
+                reason: Some("event was already published".to_string()),
+            });
+        }
+
+        let subscribed = self.peer_delivery_targets(&event, None)?;
+        if !subscribed.is_empty() {
+            let peer_count = subscribed.len();
+            let sent = self.send_inventories(subscribed, &event, self.options.max_hops);
+            let mut report = publish_report(sent, peer_count, "subscribed FIPS peers")?;
+            report.priority = priority;
+            if report.reason.is_none() {
+                report.reason = reason;
+            }
+            return Ok(report);
+        }
+
+        Ok(PublishReport {
+            accepted: true,
+            priority,
+            reason: Some(format!(
+                "cached for live subscriptions from {} connected FIPS peers",
+                peers.len()
+            )),
+        })
+    }
+
+    async fn event_is_admitted(&self, event: &VerifiedEvent, source: &EventSource) -> bool {
+        self.event_decision(event, source)
+            .await
+            .is_ok_and(|decision| !matches!(decision, PolicyDecision::Drop { .. }))
+    }
+
+    async fn event_decision(
+        &self,
+        event: &VerifiedEvent,
+        source: &EventSource,
+    ) -> Result<PolicyDecision> {
+        match &self.event_policy {
+            Some(policy) => {
+                policy
+                    .check_event(EventPolicyContext { event, source })
+                    .await
+            }
+            None => Ok(PolicyDecision::allow_with_priority(
+                SOURCE_PRIORITY_FIPS_ENDPOINT,
+            )),
+        }
+    }
+
     pub(super) fn recent_matching_events(&self, filters: &[Filter]) -> Result<Vec<CachedEvent>> {
         self.recent_events
             .lock()
@@ -555,7 +631,7 @@ impl ClientInner {
             payload_bytes,
             hop_limit,
         } = inventory;
-        if subscription_ids.len() > self.options.max_active_subscriptions {
+        if subscription_ids.len() > self.options.max_active_subscriptions.saturating_add(1) {
             return Ok(None);
         }
         let event_id_hex = event_id.to_hex();
@@ -835,6 +911,14 @@ impl ClientInner {
     }
 }
 
+fn decision_report(decision: &PolicyDecision) -> (bool, i32, Option<String>) {
+    match decision {
+        PolicyDecision::Allow { priority } => (true, *priority, None),
+        PolicyDecision::Throttle { priority, reason } => (true, *priority, Some(reason.clone())),
+        PolicyDecision::Drop { reason } => (false, 0, Some(reason.clone())),
+    }
+}
+
 pub(super) struct ConnectedPeer {
     pub(super) npub: String,
     pub(super) identity: PeerIdentity,
@@ -855,102 +939,4 @@ pub(super) struct InventoryAdvertisement {
     pub(super) event_kind: u16,
     pub(super) payload_bytes: u32,
     pub(super) hop_limit: u8,
-}
-
-#[derive(Clone)]
-pub(super) struct CachedEvent {
-    pub(super) event: VerifiedEvent,
-    pub(super) source: EventSource,
-    pub(super) hop_limit: u8,
-}
-
-pub(super) struct RecentEvents {
-    pub(super) max_payload_events: usize,
-    pub(super) max_seen_ids: usize,
-    pub(super) event_ids: HashSet<String>,
-    pub(super) event_id_order: VecDeque<String>,
-    pub(super) entries: VecDeque<CachedEvent>,
-}
-
-impl RecentEvents {
-    pub(super) fn new(max_payload_events: usize, max_seen_ids: usize) -> Self {
-        Self {
-            max_payload_events,
-            max_seen_ids,
-            event_ids: HashSet::new(),
-            event_id_order: VecDeque::new(),
-            entries: VecDeque::new(),
-        }
-    }
-
-    pub(super) fn insert(
-        &mut self,
-        event: VerifiedEvent,
-        source: EventSource,
-        hop_limit: u8,
-    ) -> bool {
-        let event_id = event.as_event().id.to_string();
-        if !self.event_ids.insert(event_id.clone()) {
-            return false;
-        }
-        self.event_id_order.push_back(event_id);
-        self.entries.push_back(CachedEvent {
-            event,
-            source,
-            hop_limit,
-        });
-        while self.entries.len() > self.max_payload_events {
-            self.entries.pop_front();
-        }
-        while self.event_ids.len() > self.max_seen_ids {
-            let Some(removed) = self.event_id_order.pop_front() else {
-                break;
-            };
-            self.event_ids.remove(&removed);
-        }
-        true
-    }
-
-    pub(super) fn contains(&self, event_id: &str) -> bool {
-        self.event_ids.contains(event_id)
-    }
-
-    pub(super) fn event(&self, event_id: &str) -> Option<&VerifiedEvent> {
-        self.entries
-            .iter()
-            .find(|cached| cached.event.as_event().id.to_string() == event_id)
-            .map(|cached| &cached.event)
-    }
-
-    pub(super) fn matching(&self, filters: &[Filter]) -> Vec<CachedEvent> {
-        self.entries
-            .iter()
-            .filter(|cached| {
-                PubsubPeerInterest::from_filters(filters, &cached.event)
-                    == PubsubPeerInterest::Subscribed
-            })
-            .cloned()
-            .collect()
-    }
-}
-
-pub(super) fn deliver_local(
-    active: &mut ActiveSubscription,
-    event: VerifiedEvent,
-    source: EventSource,
-    event_id: &str,
-    max_replay_events: usize,
-) {
-    active.recent_event_ids.insert(event_id.to_string());
-    active.recent_event_order.push_back(event_id.to_string());
-    while active.recent_event_order.len() > max_replay_events {
-        if let Some(oldest) = active.recent_event_order.pop_front() {
-            active.recent_event_ids.remove(&oldest);
-        }
-    }
-    let _ = active.sender.try_send(QueryEvent {
-        event,
-        source,
-        priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-    });
 }

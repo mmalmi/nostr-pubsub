@@ -4,7 +4,7 @@ use std::time::Duration;
 use fips_core::FipsEndpoint;
 use nostr::Event;
 use nostr_pubsub::{
-    EventSource, MeshPeerPolicy, PolicyDecision, PubsubError, Result, VerifiedEvent,
+    EventSource, MeshPeerPolicy, PolicyDecision, PubsubError, PubsubPolicy, Result, VerifiedEvent,
 };
 use nostr_pubsub_social_graph::{
     PeerRatingPublisher, PeerRatingPublisherConfig, PeerReputation, PeerReputationConfig,
@@ -121,6 +121,11 @@ impl FipsPeerReputation {
         self.policies.mesh()
     }
 
+    #[must_use]
+    pub fn event_policy(&self) -> Arc<dyn PubsubPolicy> {
+        self.policies.events()
+    }
+
     /// Applies the shared author policy to an event from any transport.
     pub async fn check_event(&self, event: &Event, source: &EventSource) -> Result<PolicyDecision> {
         self.policies.check_event(event, source).await
@@ -202,6 +207,12 @@ impl FipsPubsubPolicy {
     #[must_use]
     pub fn peer_policy(&self) -> Arc<dyn MeshPeerPolicy> {
         self.reputation.peer_policy()
+    }
+
+    /// Shared author admission used by FIPS pubsub before cache and gossip.
+    #[must_use]
+    pub fn event_policy(&self) -> Arc<dyn PubsubPolicy> {
+        self.reputation.event_policy()
     }
 
     pub fn observe_event(&mut self, event: &Event) -> Result<bool> {

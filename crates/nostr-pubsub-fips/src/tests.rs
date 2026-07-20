@@ -22,9 +22,9 @@ use nostr_social_memory::RatingEventExt;
 use tokio::time::timeout;
 
 use super::*;
-use crate::client_inner::RecentEvents;
 use crate::client_transport::peer_link_needs_connect;
 use crate::pending_wants::{InventoryProvider, PendingInventory};
+use crate::recent_events::RecentEvents;
 
 mod reputation;
 
@@ -449,7 +449,7 @@ async fn connected_fips_peers_subscribe_and_receive_cached_update_announcements(
             if client_b
                 .peer_subscription_count()
                 .expect("peer subscription count")
-                == 1
+                == 2
             {
                 break;
             }
@@ -490,7 +490,7 @@ async fn connected_fips_peers_subscribe_and_receive_cached_update_announcements(
     assert_eq!(received.event, next_announcement);
 
     subscription.close();
-    wait_for_no_peer_subscriptions(&client_b).await;
+    wait_for_default_peer_subscription(&client_b).await;
     client_a.shutdown().await;
     client_b.shutdown().await;
     endpoint_a.shutdown().await.expect("shutdown endpoint A");
@@ -559,8 +559,8 @@ async fn live_duplicate_inventories_fetch_one_event_for_all_matching_subscriptio
         .subscribe(vec![filter])
         .await
         .expect("second live subscription");
-    wait_for_peer_subscription_count(&client_b, 2).await;
-    wait_for_peer_subscription_count(&client_c, 2).await;
+    wait_for_peer_subscription_count(&client_b, 3).await;
+    wait_for_peer_subscription_count(&client_c, 3).await;
 
     let event = VerifiedEvent::try_from(
         EventBuilder::text_note("one live event from two mesh paths")
@@ -708,35 +708,49 @@ fn assert_peer_subscription_snapshot(
     subscription_id: &nostr_pubsub::SubscriptionId,
     filter: &Filter,
 ) {
-    let encoded_req_bytes = FipsPubsubWireCodec::new(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES)
-        .expect("FIPS codec")
+    let codec = FipsPubsubWireCodec::new(FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES).expect("FIPS codec");
+    let default_filter = Filter::new()
+        .kind(Kind::Custom(fips_core::discovery::nostr::ADVERT_KIND))
+        .identifier(fips_core::discovery::nostr::ADVERT_IDENTIFIER)
+        .limit(FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS);
+    let default_id = nostr_pubsub::SubscriptionId::new("fips-1");
+    let encoded_req_bytes = codec
         .encode_frame(&FipsPubsubWireMessage::req(
-            subscription_id.clone(),
-            vec![filter.clone()],
+            default_id,
+            vec![default_filter.clone()],
         ))
-        .expect("encode canonical REQ")
-        .len();
+        .expect("encode default advert REQ")
+        .len()
+        + codec
+            .encode_frame(&FipsPubsubWireMessage::req(
+                subscription_id.clone(),
+                vec![filter.clone()],
+            ))
+            .expect("encode canonical REQ")
+            .len();
     assert_eq!(
         client
             .peer_subscription_snapshot()
             .expect("retained peer subscriptions"),
         PubsubPeerSubscriptionSnapshot {
             peer_count: 1,
-            subscription_count: 1,
-            filter_count: 1,
-            encoded_filter_bytes: filter.as_json().len(),
+            subscription_count: 2,
+            filter_count: 2,
+            encoded_filter_bytes: filter.as_json().len() + default_filter.as_json().len(),
             encoded_req_bytes,
         }
     );
 }
 
-async fn wait_for_no_peer_subscriptions(client: &FipsPubsubClient) {
+async fn wait_for_default_peer_subscription(client: &FipsPubsubClient) {
     timeout(Duration::from_secs(2), async {
         loop {
-            if client
+            let snapshot = client
                 .peer_subscription_snapshot()
-                .expect("retained peer subscriptions")
-                == PubsubPeerSubscriptionSnapshot::default()
+                .expect("retained peer subscriptions");
+            if snapshot.peer_count == 1
+                && snapshot.subscription_count == 1
+                && snapshot.filter_count == 1
             {
                 break;
             }

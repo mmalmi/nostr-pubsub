@@ -7,6 +7,15 @@ as bounded records over `fips-tcp`, using FIPS service port `7368` and
 capability `nostr.pubsub/1`. There is no raw-FSP datagram fallback and this
 crate opens no Nostr relay socket.
 
+Every high-level client keeps one bounded default subscription for signed
+`fips-overlay-v1` kind `37195` endpoint adverts. It publishes its FIPS-generated
+local advert into replay, refreshes it at half its signed TTL (capped at 30
+minutes), ingests received adverts through FIPS's normal validator, and gossips
+them over matching FIPS subscriptions. This works with an empty Nostr relay
+list. Applications with a social-graph policy should use
+`FipsPubsubClient::start_with_policy`; admission runs before local delivery,
+replay retention, or forwarding.
+
 Live mesh delivery is inventory-first. For every new event, providers send a
 small `INV` containing every matching open `REQ` subscription ID for that peer.
 A receiver dedupes the event ID across all peers and all of its live

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.4 - 2026-07-20
+
+- Subscribe every high-level FIPS pubsub client to default `fips-overlay-v1`
+  kind `37195` endpoint adverts, publish the local signed advert into bounded
+  replay, refresh it at half its signed TTL (at most every 30 minutes), and
+  ingest received adverts through the transport-neutral FIPS validator without
+  opening Nostr relay sockets. Reserve this internal subscription in addition
+  to the configured application subscription limit.
+- Add optional shared social-graph event admission at the FIPS pubsub boundary,
+  before a received event enters local delivery, replay, or multi-hop gossip.
+
 ## 0.4.3 - 2026-07-19
 
 - Keep separate bounded accepted-event and observed-ID caches. Structurally

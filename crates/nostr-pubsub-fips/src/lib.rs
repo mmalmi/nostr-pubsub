@@ -8,13 +8,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use fips_core::{FipsEndpoint, PeerIdentity};
-use nostr::JsonUtil;
+use nostr::{JsonUtil, Kind};
 use nostr_pubsub::{
-    EventBus, EventId, EventSource, Filter, FipsPubsubWireCodec, FipsPubsubWireMessage,
-    NostrEventHandler, NostrEventSubscriber, NostrEventSubscription, PublishReport, PubsubError,
-    PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubProvider, PubsubProviderMode,
-    PubsubSubscriptionLimits, QueryEvent, QueryOptions, QueryReport, Result,
-    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, VerifiedEvent,
+    EventBus, EventId, EventPolicyContext, EventSource, Filter, FipsPubsubWireCodec,
+    FipsPubsubWireMessage, NostrEventHandler, NostrEventSubscriber, NostrEventSubscription,
+    PolicyDecision, PublishReport, PubsubError, PubsubPeerInterest, PubsubPeerSubscriptionStore,
+    PubsubPolicy, PubsubProvider, PubsubProviderMode, PubsubSubscriptionLimits, QueryEvent,
+    QueryOptions, QueryReport, Result, SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId,
+    VerifiedEvent,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -25,16 +26,18 @@ mod client_transport;
 mod peerfinding;
 mod pending_wants;
 mod provider_behavior;
+mod recent_events;
 mod reputation;
 mod seen_ids;
 mod stats;
 mod stream;
 mod stream_tcp;
 mod wire_tcp;
-use client_inner::{ClientInner, RecentEvents};
+use client_inner::ClientInner;
 use client_transport::transport_loop;
 pub use peerfinding::*;
 use pending_wants::PendingWants;
+use recent_events::RecentEvents;
 pub use reputation::*;
 pub use stats::*;
 pub use stream::*;
@@ -56,6 +59,7 @@ pub const FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS: usize = 16_384;
 pub const FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES: usize = u16::MAX as usize - 10;
 
 const TCP_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const FIPS_PEER_ADVERT_REFRESH_INTERVAL: Duration = Duration::from_mins(30);
 
 /// Resource limits and replay window for a FIPS pubsub client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +70,10 @@ pub struct FipsPubsubClientOptions {
     pub max_frame_bytes: usize,
     /// Maximum connected FIPS peers included in one fanout.
     pub max_connected_peers: usize,
-    /// Maximum simultaneous streaming or query subscriptions.
+    /// Maximum simultaneous application streaming or query subscriptions.
+    ///
+    /// The client's internal FIPS peer-advert subscription is reserved in
+    /// addition to this limit.
     pub max_active_subscriptions: usize,
     /// Maximum Nostr filters carried by one subscription.
     pub max_filters_per_subscription: usize,
@@ -128,6 +135,7 @@ impl FipsPubsubClientOptions {
 pub struct FipsPubsubClient {
     inner: Arc<ClientInner>,
     transport_task: Option<JoinHandle<()>>,
+    peerfinding_task: Option<JoinHandle<()>>,
 }
 
 enum TransportCommand {
@@ -135,12 +143,83 @@ enum TransportCommand {
     Cooldown { peer: PeerIdentity },
 }
 
+fn default_peerfinding_filter() -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(fips_core::discovery::nostr::ADVERT_KIND))
+        .identifier(fips_core::discovery::nostr::ADVERT_IDENTIFIER)
+}
+
+async fn run_default_peerfinding(
+    inner: Arc<ClientInner>,
+    mut subscription: FipsPubsubSubscription,
+) {
+    loop {
+        let refresh = tokio::time::sleep(publish_local_fips_advert(&inner).await);
+        tokio::pin!(refresh);
+        loop {
+            tokio::select! {
+                delivery = subscription.recv() => {
+                    let Some(delivery) = delivery else { return; };
+                    let _ = inner
+                        .endpoint
+                        .ingest_nostr_discovery_event(delivery.event.into_event())
+                        .await;
+                }
+                () = &mut refresh => break,
+            }
+        }
+    }
+}
+
+async fn publish_local_fips_advert(inner: &ClientInner) -> Duration {
+    let Ok(Some(event)) = inner.endpoint.local_nostr_discovery_advert_event().await else {
+        return FIPS_PEER_ADVERT_REFRESH_INTERVAL;
+    };
+    let refresh_after = fips_advert_refresh_delay(&event);
+    let Ok(event) = VerifiedEvent::try_from(event) else {
+        return refresh_after;
+    };
+    let _ = inner
+        .publish(
+            event,
+            EventSource::fips_endpoint(inner.endpoint.npub().to_string()),
+        )
+        .await;
+    refresh_after
+}
+
+fn fips_advert_refresh_delay(event: &nostr::Event) -> Duration {
+    event
+        .tags
+        .expiration()
+        .map(|expiration| {
+            expiration
+                .as_secs()
+                .saturating_sub(event.created_at.as_secs())
+        })
+        .filter(|ttl_secs| *ttl_secs > 0)
+        .map_or(FIPS_PEER_ADVERT_REFRESH_INTERVAL, |ttl_secs| {
+            Duration::from_secs((ttl_secs / 2).max(1))
+        })
+        .min(FIPS_PEER_ADVERT_REFRESH_INTERVAL)
+}
+
 impl FipsPubsubClient {
     pub async fn start(
         endpoint: Arc<FipsEndpoint>,
         options: FipsPubsubClientOptions,
     ) -> Result<Self> {
-        Self::start_for_peer_selection(endpoint, options, None, HashSet::new()).await
+        Self::start_for_peer_selection(endpoint, options, None, HashSet::new(), None).await
+    }
+
+    /// Start with event admission applied before received events enter the
+    /// replay cache, local delivery, or multi-hop forwarding.
+    pub async fn start_with_policy(
+        endpoint: Arc<FipsEndpoint>,
+        options: FipsPubsubClientOptions,
+        policy: Arc<dyn PubsubPolicy>,
+    ) -> Result<Self> {
+        Self::start_for_peer_selection(endpoint, options, None, HashSet::new(), Some(policy)).await
     }
 
     /// Start a client that never uses peers carried by the named FIPS
@@ -160,7 +239,8 @@ impl FipsPubsubClient {
             .into_iter()
             .map(Into::into)
             .collect();
-        Self::start_for_peer_selection(endpoint, options, None, excluded_peer_transports).await
+        Self::start_for_peer_selection(endpoint, options, None, excluded_peer_transports, None)
+            .await
     }
 
     #[cfg(test)]
@@ -169,8 +249,31 @@ impl FipsPubsubClient {
         options: FipsPubsubClientOptions,
         peer_transport: &'static str,
     ) -> Result<Self> {
-        Self::start_for_peer_selection(endpoint, options, Some(peer_transport), HashSet::new())
-            .await
+        Self::start_for_peer_selection(
+            endpoint,
+            options,
+            Some(peer_transport),
+            HashSet::new(),
+            None,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn start_for_transport_with_policy(
+        endpoint: Arc<FipsEndpoint>,
+        options: FipsPubsubClientOptions,
+        peer_transport: &'static str,
+        policy: Arc<dyn PubsubPolicy>,
+    ) -> Result<Self> {
+        Self::start_for_peer_selection(
+            endpoint,
+            options,
+            Some(peer_transport),
+            HashSet::new(),
+            Some(policy),
+        )
+        .await
     }
 
     async fn start_for_peer_selection(
@@ -178,22 +281,22 @@ impl FipsPubsubClient {
         options: FipsPubsubClientOptions,
         peer_transport: Option<&'static str>,
         excluded_peer_transports: HashSet<String>,
+        event_policy: Option<Arc<dyn PubsubPolicy>>,
     ) -> Result<Self> {
         options.validate()?;
         let codec = FipsPubsubWireCodec::new(options.max_frame_bytes)?;
+        let subscription_capacity = options.max_active_subscriptions.saturating_add(1);
         let subscription_limits = PubsubSubscriptionLimits {
             max_peers: options.max_connected_peers,
-            max_subscriptions_per_peer: options.max_active_subscriptions,
+            max_subscriptions_per_peer: subscription_capacity,
             max_filters_per_subscription: options.max_filters_per_subscription,
         };
         let max_replay_events = options.max_replay_events;
-        let max_pending_events = options
-            .max_active_subscriptions
+        let max_pending_events = subscription_capacity
             .saturating_mul(options.max_replay_events)
             .max(1);
         let max_pending_alternatives = options.max_connected_peers;
-        let max_queued_records_per_peer = options
-            .max_active_subscriptions
+        let max_queued_records_per_peer = subscription_capacity
             .saturating_add(options.max_replay_events)
             .saturating_add(1);
         let max_queued_bytes_per_peer = options
@@ -224,6 +327,7 @@ impl FipsPubsubClient {
             options,
             peer_transport,
             excluded_peer_transports,
+            event_policy,
             transport_tx,
             connected_transport_peers: AtomicUsize::new(0),
             req_frames_received: AtomicU64::new(0),
@@ -260,11 +364,17 @@ impl FipsPubsubClient {
                 max_pending_alternatives,
             )),
         });
+        let peerfinding_subscription = inner.subscribe(vec![default_peerfinding_filter()]).await?;
         let transport_task =
             tokio::spawn(transport_loop(Arc::downgrade(&inner), driver, transport_rx));
+        let peerfinding_task = Some(tokio::spawn(run_default_peerfinding(
+            Arc::clone(&inner),
+            peerfinding_subscription,
+        )));
         Ok(Self {
             inner,
             transport_task: Some(transport_task),
+            peerfinding_task,
         })
     }
 
@@ -295,6 +405,10 @@ impl FipsPubsubClient {
 
     pub async fn shutdown(mut self) {
         self.inner.close_all();
+        if let Some(task) = self.peerfinding_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.transport_task.take() {
             task.abort();
             let _ = task.await;
@@ -305,6 +419,9 @@ impl FipsPubsubClient {
 impl Drop for FipsPubsubClient {
     fn drop(&mut self) {
         self.inner.close_all();
+        if let Some(task) = self.peerfinding_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.transport_task.take() {
             task.abort();
         }
@@ -314,39 +431,7 @@ impl Drop for FipsPubsubClient {
 #[async_trait]
 impl EventBus for FipsPubsubClient {
     async fn publish(&self, event: VerifiedEvent, source: EventSource) -> Result<PublishReport> {
-        let peers = self.inner.connected_peers().await?;
-        if peers.is_empty() {
-            return Err(no_connected_peers(self.inner.peer_transport));
-        }
-
-        let is_new =
-            self.inner
-                .remember_event(event.clone(), source, self.inner.options.max_hops)?;
-        if !is_new {
-            return Ok(PublishReport {
-                accepted: true,
-                priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-                reason: Some("event was already published".to_string()),
-            });
-        }
-
-        let subscribed = self.inner.peer_delivery_targets(&event, None)?;
-        if !subscribed.is_empty() {
-            let peer_count = subscribed.len();
-            let sent = self
-                .inner
-                .send_inventories(subscribed, &event, self.inner.options.max_hops);
-            return publish_report(sent, peer_count, "subscribed FIPS peers");
-        }
-
-        Ok(PublishReport {
-            accepted: true,
-            priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-            reason: Some(format!(
-                "cached for live subscriptions from {} connected FIPS peers",
-                peers.len()
-            )),
-        })
+        self.inner.publish(event, source).await
     }
 
     async fn query(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport> {
@@ -531,5 +616,7 @@ fn poisoned(name: &str) -> PubsubError {
     PubsubError::Storage(format!("{name} poisoned"))
 }
 
+#[cfg(test)]
+mod peerfinding_runtime_tests;
 #[cfg(test)]
 mod tests;
