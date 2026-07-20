@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.5 - 2026-07-20
+
+- Bound live `INV` propagation to a deterministic per-event peer fanout. The
+  same signed event selects a stable peer set while fresh event IDs rotate the
+  load, preserving ordinary multi-hop gossip and late-peer replay without
+  multiplying every announcement across every connected adjacency.
+
 ## 0.4.4 - 2026-07-20
 
 - Subscribe every high-level FIPS pubsub client to default `fips-overlay-v1`
