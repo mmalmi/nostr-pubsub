@@ -113,6 +113,28 @@ fn stable_peer_link_does_not_require_transport_reconnect() {
     assert!(peer_link_needs_connect(&known, "peer-b", 1));
 }
 
+#[test]
+fn event_fanout_is_bounded_stable_and_rotates_across_events() {
+    let targets = (0..12)
+        .map(|index| {
+            (
+                format!("npub-{index:02}"),
+                vec![SubscriptionId::new(format!("sub-{index:02}"))],
+            )
+        })
+        .collect::<Vec<_>>();
+    let first_id = EventId::from_hex(&"01".repeat(32)).expect("first event ID");
+    let second_id = EventId::from_hex(&"02".repeat(32)).expect("second event ID");
+
+    let first = bounded_delivery_targets(targets.clone(), &first_id, 4);
+    let repeated = bounded_delivery_targets(targets.clone(), &first_id, 4);
+    let second = bounded_delivery_targets(targets, &second_id, 4);
+
+    assert_eq!(first.len(), 4);
+    assert_eq!(first, repeated, "one event must select a stable peer set");
+    assert_ne!(first, second, "fresh events should rotate delivery load");
+}
+
 #[tokio::test]
 async fn client_advertises_only_while_its_fsp_service_is_registered() {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("reserve local rendezvous address");
@@ -332,6 +354,17 @@ async fn peerfinder_rejects_embedded_relay_peerfinding_mode() {
 fn client_limits_reject_unbounded_fips_frames() {
     let options = FipsPubsubClientOptions {
         max_frame_bytes: FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES + 1,
+        ..FipsPubsubClientOptions::default()
+    };
+
+    assert!(options.validate().is_err());
+}
+
+#[test]
+fn client_limits_reject_fanout_above_peer_capacity() {
+    let options = FipsPubsubClientOptions {
+        max_connected_peers: 4,
+        fanout: 5,
         ..FipsPubsubClientOptions::default()
     };
 

@@ -10,12 +10,12 @@ use async_trait::async_trait;
 use fips_core::{FipsEndpoint, PeerIdentity};
 use nostr::{JsonUtil, Kind};
 use nostr_pubsub::{
-    EventBus, EventId, EventPolicyContext, EventSource, Filter, FipsPubsubWireCodec,
-    FipsPubsubWireMessage, NostrEventHandler, NostrEventSubscriber, NostrEventSubscription,
-    PolicyDecision, PublishReport, PubsubError, PubsubPeerInterest, PubsubPeerSubscriptionStore,
-    PubsubPolicy, PubsubProvider, PubsubProviderMode, PubsubSubscriptionLimits, QueryEvent,
-    QueryOptions, QueryReport, Result, SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId,
-    VerifiedEvent,
+    DEFAULT_INV_WANT_FANOUT, EventBus, EventId, EventPolicyContext, EventSource, Filter,
+    FipsPubsubWireCodec, FipsPubsubWireMessage, NostrEventHandler, NostrEventSubscriber,
+    NostrEventSubscription, PolicyDecision, PublishReport, PubsubError, PubsubPeerInterest,
+    PubsubPeerSubscriptionStore, PubsubPolicy, PubsubProvider, PubsubProviderMode,
+    PubsubSubscriptionLimits, QueryEvent, QueryOptions, QueryReport, Result,
+    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, VerifiedEvent,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -68,8 +68,10 @@ pub struct FipsPubsubClientOptions {
     pub query_timeout: Duration,
     /// Maximum encoded Nostr frame accepted from or sent to a peer.
     pub max_frame_bytes: usize,
-    /// Maximum connected FIPS peers included in one fanout.
+    /// Maximum connected FIPS peers retained by the client.
     pub max_connected_peers: usize,
+    /// Maximum subscribed peers selected for one live inventory fanout.
+    pub fanout: usize,
     /// Maximum simultaneous application streaming or query subscriptions.
     ///
     /// The client's internal FIPS peer-advert subscription is reserved in
@@ -91,6 +93,7 @@ impl Default for FipsPubsubClientOptions {
             query_timeout: Duration::from_millis(500),
             max_frame_bytes: FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES,
             max_connected_peers: 64,
+            fanout: DEFAULT_INV_WANT_FANOUT,
             max_active_subscriptions: 64,
             max_filters_per_subscription: 4,
             max_replay_events: FIPS_NOSTR_PUBSUB_MAX_REPLAY_EVENTS,
@@ -108,6 +111,7 @@ impl FipsPubsubClientOptions {
         for (name, value) in [
             ("max_frame_bytes", self.max_frame_bytes),
             ("max_connected_peers", self.max_connected_peers),
+            ("fanout", self.fanout),
             ("max_active_subscriptions", self.max_active_subscriptions),
             (
                 "max_filters_per_subscription",
@@ -124,6 +128,9 @@ impl FipsPubsubClientOptions {
             return Err(invalid_option(format!(
                 "max_frame_bytes cannot exceed TCP/FIPS record limit {FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES}"
             )));
+        }
+        if self.fanout > self.max_connected_peers {
+            return Err(invalid_option("fanout cannot exceed max_connected_peers"));
         }
         if self.max_hops == 0 {
             return Err(invalid_option("max_hops must be greater than zero"));
@@ -583,6 +590,33 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn bounded_delivery_targets(
+    targets: Vec<(String, Vec<SubscriptionId>)>,
+    event_id: &EventId,
+    fanout: usize,
+) -> Vec<(String, Vec<SubscriptionId>)> {
+    if targets.len() <= fanout {
+        return targets;
+    }
+    let mut ranked = targets
+        .into_iter()
+        .map(|target| {
+            let mut hasher = DefaultHasher::new();
+            event_id.hash(&mut hasher);
+            target.0.hash(&mut hasher);
+            (hasher.finish(), target)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(|left, right| {
+        left.0.cmp(&right.0).then_with(|| left.1.0.cmp(&right.1.0))
+    });
+    ranked
+        .into_iter()
+        .take(fanout)
+        .map(|(_, target)| target)
+        .collect()
 }
 
 fn tcp_isn_seed(local_npub: &str) -> u64 {

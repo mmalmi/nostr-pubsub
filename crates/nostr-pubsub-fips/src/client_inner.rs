@@ -4,8 +4,8 @@ use super::{
     HashMap, HashSet, Mutex, Ordering, PeerIdentity, PolicyDecision, PublishReport, PubsubError,
     PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy, QueryEvent, Result,
     SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, TransportCommand, VecDeque,
-    VerifiedEvent, event_payload_bytes, mpsc, no_connected_peers, now_ms, poisoned, publish_report,
-    storage_error,
+    VerifiedEvent, bounded_delivery_targets, event_payload_bytes, mpsc, no_connected_peers, now_ms,
+    poisoned, publish_report, storage_error,
 };
 use crate::FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS;
 use crate::pending_wants::{InventoryProvider, PendingInventory, PendingWants};
@@ -576,7 +576,11 @@ impl ClientInner {
                 ));
             }
         }
-        Ok(targets)
+        Ok(bounded_delivery_targets(
+            targets,
+            &event.as_event().id,
+            self.options.fanout,
+        ))
     }
 
     pub(super) fn send_inventories(
