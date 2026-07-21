@@ -1,8 +1,8 @@
 use std::sync::Weak;
 
 use super::{
-    ClientInner, HashMap, HashSet, Ordering, PeerIdentity, TCP_POLL_INTERVAL, TransportCommand,
-    WireTcpDriver, mpsc, now_ms,
+    ClientInner, ConnectedPeerLink, HashMap, HashSet, Ordering, PeerIdentity, TCP_POLL_INTERVAL,
+    TransportCommand, WireTcpDriver, mpsc, now_ms,
 };
 use crate::wire_tcp::WireTcpReport;
 
@@ -59,7 +59,7 @@ async fn sync_transport_peers(
     driver: &mut WireTcpDriver,
     known_links: &mut HashMap<String, u64>,
 ) {
-    let Ok(peers) = inner.connected_peers().await else {
+    let Ok(peers) = inner.connected_peer_links().await else {
         return;
     };
     let next_links = peers
@@ -79,12 +79,21 @@ async fn sync_transport_peers(
         if inner.peer_is_in_cooldown(&peer.npub, now_ms()) {
             continue;
         }
-        if !peer_link_needs_connect(known_links, &peer.npub, peer.link_id) {
+        let Some(identity) = peer_identity_for_connect(known_links, &peer) else {
             continue;
-        }
-        let _ = driver.connect_peer(peer.identity, now_ms()).await;
+        };
+        let _ = driver.connect_peer(identity, now_ms()).await;
     }
     *known_links = next_links;
+}
+
+pub(super) fn peer_identity_for_connect(
+    known_links: &HashMap<String, u64>,
+    peer: &ConnectedPeerLink,
+) -> Option<PeerIdentity> {
+    peer_link_needs_connect(known_links, &peer.npub, peer.link_id)
+        .then(|| PeerIdentity::from_npub(&peer.npub).ok())
+        .flatten()
 }
 
 pub(super) fn peer_link_needs_connect(

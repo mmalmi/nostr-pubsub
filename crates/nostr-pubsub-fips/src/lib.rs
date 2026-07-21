@@ -33,7 +33,7 @@ mod stats;
 mod stream;
 mod stream_tcp;
 mod wire_tcp;
-use client_inner::ClientInner;
+use client_inner::{ClientInner, ConnectedPeerLink};
 use client_transport::transport_loop;
 pub use peerfinding::*;
 use pending_wants::PendingWants;

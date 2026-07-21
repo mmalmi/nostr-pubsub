@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.6 - 2026-07-21
+
+- Keep stable authenticated FIPS peer identities out of the 200 ms TCP timer
+  path. Decode an npub only when its authenticated link changes, preserving
+  retransmission timing while reducing mobile idle CPU and allocation churn.
+- Raise the FIPS dependency floor to 0.4.34 for the roaming, reconnect,
+  liveness, and rekey repairs.
+
 ## 0.4.5 - 2026-07-20
 
 - Bound live `INV` propagation to a deterministic per-event peer fanout. The

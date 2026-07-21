@@ -46,7 +46,7 @@ pub(super) struct ClientInner {
 }
 
 impl ClientInner {
-    pub(super) async fn connected_peers(&self) -> Result<Vec<ConnectedPeer>> {
+    pub(super) async fn connected_peer_links(&self) -> Result<Vec<ConnectedPeerLink>> {
         let snapshot = self
             .endpoint
             .peers()
@@ -64,20 +64,11 @@ impl ClientInner {
                         .as_deref()
                         .is_none_or(|transport| !self.excluded_peer_transports.contains(transport))
             })
-            .map(|peer| {
-                let npub = peer.npub;
-                let identity = PeerIdentity::from_npub(&npub).map_err(|error| {
-                    PubsubError::Validation(format!(
-                        "invalid authenticated FIPS peer {npub}: {error}"
-                    ))
-                })?;
-                Ok(ConnectedPeer {
-                    npub,
-                    identity,
-                    link_id: peer.link_id,
-                })
+            .map(|peer| ConnectedPeerLink {
+                npub: peer.npub,
+                link_id: peer.link_id,
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
         peers.sort_unstable_by(|left, right| left.npub.cmp(&right.npub));
         peers.dedup_by(|left, right| left.npub == right.npub);
         if peers.len() > self.options.max_connected_peers {
@@ -89,6 +80,25 @@ impl ClientInner {
             )));
         }
         Ok(peers)
+    }
+
+    pub(super) async fn connected_peers(&self) -> Result<Vec<ConnectedPeer>> {
+        self.connected_peer_links()
+            .await?
+            .into_iter()
+            .map(|peer| {
+                let identity = PeerIdentity::from_npub(&peer.npub).map_err(|error| {
+                    PubsubError::Validation(format!(
+                        "invalid authenticated FIPS peer {}: {error}",
+                        peer.npub
+                    ))
+                })?;
+                Ok(ConnectedPeer {
+                    npub: peer.npub,
+                    identity,
+                })
+            })
+            .collect()
     }
 
     pub(super) async fn subscribe(
@@ -926,6 +936,10 @@ fn decision_report(decision: &PolicyDecision) -> (bool, i32, Option<String>) {
 pub(super) struct ConnectedPeer {
     pub(super) npub: String,
     pub(super) identity: PeerIdentity,
+}
+
+pub(super) struct ConnectedPeerLink {
+    pub(super) npub: String,
     pub(super) link_id: u64,
 }
 
