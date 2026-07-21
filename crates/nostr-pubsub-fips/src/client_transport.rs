@@ -44,14 +44,20 @@ pub(super) async fn transport_loop(
                 }
             }
             _ = poll_tick.tick() => {
-                inner.tcp_poll_turns.fetch_add(1, Ordering::Relaxed);
                 sync_transport_peers(&inner, &mut driver, &mut known_links).await;
-                if let Ok(report) = driver.poll(now_ms()).await {
-                    process_wire_report(&inner, &mut driver, report).await;
+                if tcp_driver_poll_needed(driver.connection_count()) {
+                    inner.tcp_poll_turns.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(report) = driver.poll(now_ms()).await {
+                        process_wire_report(&inner, &mut driver, report).await;
+                    }
                 }
             }
         }
     }
+}
+
+pub(super) const fn tcp_driver_poll_needed(connection_count: usize) -> bool {
+    connection_count != 0
 }
 
 async fn sync_transport_peers(

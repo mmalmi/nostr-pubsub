@@ -22,7 +22,9 @@ use nostr_social_memory::RatingEventExt;
 use tokio::time::timeout;
 
 use super::*;
-use crate::client_transport::{peer_identity_for_connect, peer_link_needs_connect};
+use crate::client_transport::{
+    peer_identity_for_connect, peer_link_needs_connect, tcp_driver_poll_needed,
+};
 use crate::pending_wants::{InventoryProvider, PendingInventory};
 use crate::recent_events::RecentEvents;
 
@@ -102,6 +104,12 @@ fn pending_want_retries_with_backoff_then_expires() {
 #[test]
 fn tcp_timer_poll_matches_the_minimum_retransmission_granularity() {
     assert_eq!(TCP_POLL_INTERVAL, Duration::from_millis(200));
+}
+
+#[test]
+fn idle_transport_does_not_poll_an_empty_tcp_stack() {
+    assert!(!tcp_driver_poll_needed(0));
+    assert!(tcp_driver_poll_needed(1));
 }
 
 #[test]

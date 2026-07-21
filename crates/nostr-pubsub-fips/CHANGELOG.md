@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.7 - 2026-07-21
+
+- Stop driving an empty TCP/FIPS state machine after the authenticated carrier
+  link disappears. Active, connecting, and closing streams retain the 200 ms
+  retransmission cadence while idle mobile clients avoid needless polls.
+
 ## 0.4.6 - 2026-07-21
 
 - Keep stable authenticated FIPS peer identities out of the 200 ms TCP timer

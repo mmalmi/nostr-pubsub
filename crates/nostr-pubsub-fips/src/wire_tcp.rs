@@ -181,6 +181,10 @@ impl WireTcpDriver {
         Ok(())
     }
 
+    pub(crate) fn connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
     async fn drive_ready(&mut self, now_ms: u64) -> Result<WireTcpReport> {
         self.accept_connections().await?;
         let newly_connected = self.refresh_active().await?;
