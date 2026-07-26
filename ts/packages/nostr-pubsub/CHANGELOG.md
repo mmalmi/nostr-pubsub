@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4 - 2026-07-26
+
+- Reuse private canonical verification admission across adjacent protocol
+  layers, avoiding duplicate Schnorr verification while rejecting spoofed
+  public verification markers.
+
 ## 0.5.3 - 2026-07-26
 
 - Add cancellable asynchronous batch verification admission for immutable

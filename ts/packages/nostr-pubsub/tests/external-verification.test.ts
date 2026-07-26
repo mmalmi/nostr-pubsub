@@ -129,6 +129,23 @@ describe('external Nostr event verification', () => {
     expect(Object.isFrozen(report.events[0].event)).toBe(true);
   });
 
+  it('reuses only private canonical admission across protocol layers', async () => {
+    const forged = forgedEvent('trusted protocol handoff');
+    const spoofed = {
+      ...forged,
+      [verifiedSymbol]: true,
+    } as NostrVerifiedEvent;
+    expect(() => verifyNostrEvent(spoofed)).toThrow('invalid Nostr event id or signature');
+
+    const [admitted] = await verifyNostrEventsWith([forged], async () => [true]);
+    const copied = verifyNostrEvent(admitted);
+
+    expect(copied).not.toBe(admitted);
+    expect(copied.content).toBe('trusted protocol handoff (forged)');
+    expect(copied[verifiedSymbol]).toBe(true);
+    expect(Object.isFrozen(copied)).toBe(true);
+  });
+
   it('cancels in-flight verification without admitting late results', async () => {
     const controller = new AbortController();
     const forged = forgedEvent('cancelled');

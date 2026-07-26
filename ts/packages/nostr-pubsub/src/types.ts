@@ -59,6 +59,12 @@ export class PubsubError extends Error {
 }
 
 export function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent {
+  // Adjacent protocol layers can receive a defensive object created by this
+  // module (for example FIPS wire decode followed by kind-policy admission).
+  // The private WeakSet cannot be spoofed through the public verified symbol.
+  if (verifiedEventCopies.has(event as NostrVerifiedEvent)) {
+    return copyVerifiedNostrEvent(event as NostrVerifiedEvent);
+  }
   const candidate = cloneNostrEvent(event);
   if (!verifyEvent(candidate)) {
     throw PubsubError.validation('invalid Nostr event id or signature');
