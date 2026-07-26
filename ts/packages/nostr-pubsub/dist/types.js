@@ -1,5 +1,7 @@
 import { verifiedSymbol, verifyEvent } from 'nostr-tools/pure';
 const verifiedEventCopies = new WeakSet();
+const NOSTR_HEX_32_BYTES = /^[0-9a-f]{64}$/;
+const NOSTR_HEX_64_BYTES = /^[0-9a-f]{128}$/;
 export function validateQueryOptions(options) {
     if (options.limit !== undefined &&
         (!Number.isSafeInteger(options.limit) || options.limit < 0)) {
@@ -30,6 +32,36 @@ export function verifyNostrEvent(event) {
     }
     return freezeVerifiedEvent(candidate);
 }
+/**
+ * Admit events checked by an asynchronous trust boundary such as a Web Worker.
+ *
+ * The verifier receives immutable defensive clones. No event is admitted unless
+ * the verifier returns one `true` boolean per event.
+ */
+export async function verifyNostrEventsWith(events, verifier, options = {}) {
+    if (!Array.isArray(events) || typeof verifier !== 'function') {
+        throw PubsubError.validation('invalid external Nostr event verifier input');
+    }
+    throwIfVerificationAborted(options.signal);
+    const candidates = Object.freeze(events.map((event) => freezeUnverifiedEvent(cloneNostrEvent(event))));
+    const verifierOptions = Object.freeze({ signal: options.signal });
+    const result = await awaitExternalVerification(Promise.resolve(verifier(candidates, verifierOptions)), options.signal);
+    throwIfVerificationAborted(options.signal);
+    if (!Array.isArray(result) ||
+        result.length !== candidates.length ||
+        result.some((valid) => typeof valid !== 'boolean')) {
+        throw PubsubError.validation('external Nostr event verifier returned malformed results');
+    }
+    const invalidIndex = result.findIndex((valid) => !valid);
+    if (invalidIndex !== -1) {
+        throw PubsubError.validation(`invalid Nostr event id or signature at batch index ${invalidIndex}`);
+    }
+    return candidates.map((event) => {
+        const candidate = cloneNostrEvent(event);
+        candidate[verifiedSymbol] = true;
+        return freezeVerifiedEvent(candidate);
+    });
+}
 /** Defensive immutable copy for an event already checked at a trust boundary. */
 export function copyVerifiedNostrEvent(event) {
     if (!verifiedEventCopies.has(event)) {
@@ -41,23 +73,50 @@ export function copyVerifiedNostrEvent(event) {
 }
 function cloneNostrEvent(event) {
     try {
-        if (!Array.isArray(event.tags) ||
-            event.tags.some((tag) => !Array.isArray(tag) || tag.some((item) => typeof item !== 'string'))) {
-            throw new TypeError('invalid tags');
+        if (typeof event !== 'object' || event === null)
+            throw new TypeError('invalid event');
+        const id = event.id;
+        const pubkey = event.pubkey;
+        const createdAt = event.created_at;
+        const kind = event.kind;
+        const tags = event.tags;
+        const content = event.content;
+        const sig = event.sig;
+        if (typeof id !== 'string' ||
+            !NOSTR_HEX_32_BYTES.test(id) ||
+            typeof pubkey !== 'string' ||
+            !NOSTR_HEX_32_BYTES.test(pubkey) ||
+            !Number.isSafeInteger(createdAt) ||
+            createdAt < 0 ||
+            !Number.isSafeInteger(kind) ||
+            kind < 0 ||
+            kind > 65_535 ||
+            !Array.isArray(tags) ||
+            tags.some((tag) => !Array.isArray(tag) || tag.some((item) => typeof item !== 'string')) ||
+            typeof content !== 'string' ||
+            typeof sig !== 'string' ||
+            !NOSTR_HEX_64_BYTES.test(sig)) {
+            throw new TypeError('invalid event');
         }
         return {
-            id: event.id,
-            pubkey: event.pubkey,
-            created_at: event.created_at,
-            kind: event.kind,
-            tags: event.tags.map((tag) => [...tag]),
-            content: event.content,
-            sig: event.sig,
+            id,
+            pubkey,
+            created_at: createdAt,
+            kind,
+            tags: tags.map((tag) => [...tag]),
+            content,
+            sig,
         };
     }
     catch {
         throw PubsubError.validation('invalid Nostr event structure');
     }
+}
+function freezeUnverifiedEvent(candidate) {
+    for (const tag of candidate.tags)
+        Object.freeze(tag);
+    Object.freeze(candidate.tags);
+    return Object.freeze(candidate);
 }
 function freezeVerifiedEvent(candidate) {
     if (!Number.isSafeInteger(candidate.created_at) ||
@@ -72,5 +131,32 @@ function freezeVerifiedEvent(candidate) {
     Object.freeze(candidate.tags);
     verifiedEventCopies.add(candidate);
     return Object.freeze(candidate);
+}
+function awaitExternalVerification(verification, signal) {
+    if (signal === undefined)
+        return verification;
+    return new Promise((resolve, reject) => {
+        const abort = () => reject(verificationAbortError(signal.reason));
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) {
+            signal.removeEventListener('abort', abort);
+            abort();
+            return;
+        }
+        verification.then((result) => {
+            signal.removeEventListener('abort', abort);
+            resolve(result);
+        }, (error) => {
+            signal.removeEventListener('abort', abort);
+            reject(error);
+        });
+    });
+}
+function throwIfVerificationAborted(signal) {
+    if (signal?.aborted)
+        throw verificationAbortError(signal.reason);
+}
+function verificationAbortError(reason) {
+    return new DOMException(typeof reason === 'string' ? reason : 'Nostr event verification cancelled', 'AbortError');
 }
 //# sourceMappingURL=types.js.map

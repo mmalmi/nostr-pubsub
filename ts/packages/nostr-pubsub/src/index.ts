@@ -1,11 +1,13 @@
 export type {
   NostrEvent,
+  NostrEventBatchVerificationOptions,
+  NostrEventBatchVerifier,
   NostrFilter,
   NostrVerifiedEvent,
   QueryOptions,
   SourceId,
 } from './types.js';
-export { PubsubError, verifyNostrEvent } from './types.js';
+export { PubsubError, verifyNostrEvent, verifyNostrEventsWith } from './types.js';
 
 export {
   CAP_HASHTREE_FETCH,

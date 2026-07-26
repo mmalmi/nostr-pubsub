@@ -60,6 +60,19 @@ event IDs across noisy mesh/index/relay subscriptions, and closes every source
 as one subscription. Reports retain route provenance and dataset completeness;
 there is no legacy `{ route, bus }` alias.
 
+CPU-heavy signature checks can run behind an asynchronous trust boundary such
+as a dedicated Web Worker. `verifyNostrEventsWith()` gives the verifier
+immutable defensive clones, requires one boolean result per event, and admits
+fresh canonical copies only when the whole batch is valid:
+
+```ts
+const verified = await verifyNostrEventsWith(events, workerVerifier, { signal });
+```
+
+The router recognizes those returned copies and does not repeat Schnorr
+verification. Keep the injected verifier private to the trusted worker
+request/response path; an all-true verifier is not a general-purpose shortcut.
+
 `NostrPubsubRouter` owns those explicit query, publish, and live route lists for
 long-running services. A Hashtree index can be query-only, while FIPS and relay
 adapters can independently participate in publication and live subscription;

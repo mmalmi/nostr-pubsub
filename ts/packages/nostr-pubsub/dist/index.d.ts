@@ -1,5 +1,5 @@
-export type { NostrEvent, NostrFilter, NostrVerifiedEvent, QueryOptions, SourceId, } from './types.js';
-export { PubsubError, verifyNostrEvent } from './types.js';
+export type { NostrEvent, NostrEventBatchVerificationOptions, NostrEventBatchVerifier, NostrFilter, NostrVerifiedEvent, QueryOptions, SourceId, } from './types.js';
+export { PubsubError, verifyNostrEvent, verifyNostrEventsWith } from './types.js';
 export { CAP_HASHTREE_FETCH, EventSourceKind, SOURCE_PRIORITY_FIPS_ENDPOINT, SOURCE_PRIORITY_LOCAL_INDEX, SOURCE_PRIORITY_PEER, SOURCE_PRIORITY_RELAY, fipsEndpointSource, localIndexSource, peerSource, relaySource, sourceKindDefaultPriority, type EventSource, type EventSourceKind as EventSourceKindType, } from './source.js';
 export { allowWithPriority, decisionPriority, drop, reportParts, throttle, type EventPolicyContext, type PolicyDecision, type PubsubPolicy, type SourceCandidate, type SourceHealth, type SourcePolicyContext, } from './policy.js';
 export { cloneFilter, createEventRetentionPolicy, filterLimit, filtersMatch, retentionAcceptsEvent, subscriptionFiltersMatch, type EventRetentionPolicy, } from './filter.js';

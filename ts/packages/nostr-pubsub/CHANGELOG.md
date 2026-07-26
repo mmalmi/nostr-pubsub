@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3 - 2026-07-26
+
+- Add cancellable asynchronous batch verification admission for immutable
+  events checked by an external or worker trust boundary, preserving the
+  canonical verified-event fast path without repeating Schnorr verification.
+
 ## 0.5.2 - 2026-07-18
 
 - Add the shared `SimplePoolNostrRelayTransport` browser relay carrier with
