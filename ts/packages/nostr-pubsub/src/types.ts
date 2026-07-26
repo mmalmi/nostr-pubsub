@@ -10,6 +10,7 @@ export type NostrEvent = Event;
 export type NostrFilter = Filter;
 export type NostrVerifiedEvent = VerifiedEvent;
 export type SourceId = string;
+export type NostrEventVerifier = (event: NostrEvent) => boolean;
 
 export interface NostrEventBatchVerificationOptions {
   signal?: AbortSignal;
@@ -58,7 +59,10 @@ export class PubsubError extends Error {
   }
 }
 
-export function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent {
+export function verifyNostrEvent(
+  event: NostrEvent,
+  verifier: NostrEventVerifier = verifyEvent,
+): NostrVerifiedEvent {
   // Adjacent protocol layers can receive a defensive object created by this
   // module (for example FIPS wire decode followed by kind-policy admission).
   // The private WeakSet cannot be spoofed through the public verified symbol.
@@ -66,10 +70,12 @@ export function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent {
     return copyVerifiedNostrEvent(event as NostrVerifiedEvent);
   }
   const candidate = cloneNostrEvent(event);
-  if (!verifyEvent(candidate)) {
+  if (!verifier(candidate)) {
     throw PubsubError.validation('invalid Nostr event id or signature');
   }
-  return freezeVerifiedEvent(candidate);
+  const verified = candidate as NostrVerifiedEvent;
+  verified[verifiedSymbol] = true;
+  return freezeVerifiedEvent(verified);
 }
 
 /**

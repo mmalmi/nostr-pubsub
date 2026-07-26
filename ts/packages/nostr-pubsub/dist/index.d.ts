@@ -1,4 +1,4 @@
-export type { NostrEvent, NostrEventBatchVerificationOptions, NostrEventBatchVerifier, NostrFilter, NostrVerifiedEvent, QueryOptions, SourceId, } from './types.js';
+export type { NostrEvent, NostrEventBatchVerificationOptions, NostrEventBatchVerifier, NostrEventVerifier, NostrFilter, NostrVerifiedEvent, QueryOptions, SourceId, } from './types.js';
 export { PubsubError, verifyNostrEvent, verifyNostrEventsWith } from './types.js';
 export { CAP_HASHTREE_FETCH, EventSourceKind, SOURCE_PRIORITY_FIPS_ENDPOINT, SOURCE_PRIORITY_LOCAL_INDEX, SOURCE_PRIORITY_PEER, SOURCE_PRIORITY_RELAY, fipsEndpointSource, localIndexSource, peerSource, relaySource, sourceKindDefaultPriority, type EventSource, type EventSourceKind as EventSourceKindType, } from './source.js';
 export { allowWithPriority, decisionPriority, drop, reportParts, throttle, type EventPolicyContext, type PolicyDecision, type PubsubPolicy, type SourceCandidate, type SourceHealth, type SourcePolicyContext, } from './policy.js';
@@ -16,7 +16,7 @@ export { allowAllLiveRoutes, subscribeRoutesWithPolicy, type LiveRouteSource, ty
 export { NostrPubsubRouter, type NostrPubsubRouterOptions, type RouterPublishSource, } from './router.js';
 export { DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES, FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsPubsubWireAdapter, FipsPubsubWireCodec, type FipsPubsubInbound, type FipsPubsubWireMessage, } from './wire.js';
 export { NostrRelayEventSource, type NostrRelaySubscription, type NostrRelayTransport, type NostrRelayTransportHandlers, type NostrRelayTransportSubscribeOptions, } from './relay-event-source.js';
-export { SimplePoolNostrRelayTransport, type SimplePoolNostrRelayTransportOptions, } from './simple-pool-relay-transport.js';
+export { createSimplePoolNostrRelayVerificationBoundary, SimplePoolNostrRelayTransport, type SimplePoolNostrRelayVerificationBoundary, type SimplePoolNostrRelayTransportOptions, } from './simple-pool-relay-transport.js';
 export { FIPS_NOSTR_PUBSUB_CAPABILITY, FipsNostrPubsubClient, } from './fips-pubsub-client.js';
 export { DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS, FipsNostrPubsubEventSource, } from './fips-pubsub-event-source.js';
 export { defaultFipsNostrPubsubClientLimits, type FipsNostrPubsubClientErrorContext, type FipsNostrPubsubClientLimits, type FipsNostrPubsubClientOptions, type FipsNostrPubsubEventHandler, type FipsNostrPubsubSubscription, type FipsPubsubClientNode, } from './fips-pubsub-client-types.js';

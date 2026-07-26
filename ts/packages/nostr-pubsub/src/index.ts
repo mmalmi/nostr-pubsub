@@ -2,6 +2,7 @@ export type {
   NostrEvent,
   NostrEventBatchVerificationOptions,
   NostrEventBatchVerifier,
+  NostrEventVerifier,
   NostrFilter,
   NostrVerifiedEvent,
   QueryOptions,
@@ -186,7 +187,9 @@ export {
   type NostrRelayTransportSubscribeOptions,
 } from './relay-event-source.js';
 export {
+  createSimplePoolNostrRelayVerificationBoundary,
   SimplePoolNostrRelayTransport,
+  type SimplePoolNostrRelayVerificationBoundary,
   type SimplePoolNostrRelayTransportOptions,
 } from './simple-pool-relay-transport.js';
 

@@ -4,6 +4,7 @@ export type NostrEvent = Event;
 export type NostrFilter = Filter;
 export type NostrVerifiedEvent = VerifiedEvent;
 export type SourceId = string;
+export type NostrEventVerifier = (event: NostrEvent) => boolean;
 export interface NostrEventBatchVerificationOptions {
     signal?: AbortSignal;
 }
@@ -22,7 +23,7 @@ export declare class PubsubError extends Error {
     static validation(message: string): PubsubError;
     static storage(message: string): PubsubError;
 }
-export declare function verifyNostrEvent(event: NostrEvent): NostrVerifiedEvent;
+export declare function verifyNostrEvent(event: NostrEvent, verifier?: NostrEventVerifier): NostrVerifiedEvent;
 /**
  * Admit events checked by an asynchronous trust boundary such as a Web Worker.
  *

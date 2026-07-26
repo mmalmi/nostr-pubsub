@@ -1,14 +1,52 @@
 import { SimplePool } from 'nostr-tools';
-import { verifyNostrEvent, } from './types.js';
+import { copyVerifiedNostrEvent, PubsubError, verifyNostrEvent, } from './types.js';
+const verificationBoundaries = new WeakSet();
+/**
+ * Couple SimplePool's synchronous verification with this adapter's canonical
+ * admission without a duplicate signature check or a spoofable public marker.
+ */
+export function createSimplePoolNostrRelayVerificationBoundary(verifier) {
+    const admitted = new WeakMap();
+    const boundary = Object.freeze({
+        verifyEvent(event) {
+            admitted.delete(event);
+            try {
+                admitted.set(event, verifyNostrEvent(event, verifier));
+                return true;
+            }
+            catch {
+                return false;
+            }
+        },
+        admitEvent(event) {
+            const verified = admitted.get(event);
+            if (!verified) {
+                throw PubsubError.validation('relay event was not admitted by the configured SimplePool boundary');
+            }
+            return copyVerifiedNostrEvent(verified);
+        },
+    });
+    verificationBoundaries.add(boundary);
+    return boundary;
+}
 /** Browser/WebSocket Nostr relay carrier backed by nostr-tools SimplePool. */
 export class SimplePoolNostrRelayTransport {
     getRelays;
     pool;
+    verificationBoundary;
     queryQuietWindowMs;
     publishTimeoutMs;
     constructor(options) {
+        if (options.verificationBoundary !== undefined
+            && !verificationBoundaries.has(options.verificationBoundary)) {
+            throw new TypeError('invalid SimplePool Nostr relay verification boundary');
+        }
+        if (options.verificationBoundary !== undefined && options.pool === undefined) {
+            throw new TypeError('SimplePool verification boundary requires its paired shared pool');
+        }
         this.getRelays = options.getRelays;
         this.pool = options.pool ?? new SimplePool();
+        this.verificationBoundary = options.verificationBoundary;
         this.queryQuietWindowMs = positiveMilliseconds(options.queryQuietWindowMs, 600);
         this.publishTimeoutMs = positiveMilliseconds(options.publishTimeoutMs, 4_500);
     }
@@ -53,7 +91,8 @@ export class SimplePoolNostrRelayTransport {
             onevent: (event) => {
                 let verified;
                 try {
-                    verified = verifyNostrEvent(event);
+                    verified = this.verificationBoundary?.admitEvent(event)
+                        ?? verifyNostrEvent(event);
                 }
                 catch {
                     return;

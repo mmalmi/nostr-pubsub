@@ -1,6 +1,10 @@
 import { SimplePool } from 'nostr-tools';
 import {
+  copyVerifiedNostrEvent,
+  PubsubError,
   verifyNostrEvent,
+  type NostrEvent,
+  type NostrEventVerifier,
   type NostrFilter,
   type NostrVerifiedEvent,
 } from './types.js';
@@ -13,12 +17,57 @@ import type {
 
 type RelayPool = Pick<SimplePool, 'publish' | 'subscribeMany'>;
 type RelayPoolSubscription = ReturnType<RelayPool['subscribeMany']>;
+const verificationBoundaries = new WeakSet<SimplePoolNostrRelayVerificationBoundary>();
+
+export interface SimplePoolNostrRelayVerificationBoundary {
+  /** Pass this exact function to the shared SimplePool constructor. */
+  readonly verifyEvent: NostrEventVerifier;
+  /** Canonically admits only the exact object accepted by that function. */
+  readonly admitEvent: (event: NostrEvent) => NostrVerifiedEvent;
+}
+
+/**
+ * Couple SimplePool's synchronous verification with this adapter's canonical
+ * admission without a duplicate signature check or a spoofable public marker.
+ */
+export function createSimplePoolNostrRelayVerificationBoundary(
+  verifier?: NostrEventVerifier,
+): SimplePoolNostrRelayVerificationBoundary {
+  const admitted = new WeakMap<NostrEvent, NostrVerifiedEvent>();
+  const boundary = Object.freeze({
+    verifyEvent(event: NostrEvent): boolean {
+      admitted.delete(event);
+      try {
+        admitted.set(event, verifyNostrEvent(event, verifier));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    admitEvent(event: NostrEvent): NostrVerifiedEvent {
+      const verified = admitted.get(event);
+      if (!verified) {
+        throw PubsubError.validation(
+          'relay event was not admitted by the configured SimplePool boundary',
+        );
+      }
+      return copyVerifiedNostrEvent(verified);
+    },
+  });
+  verificationBoundaries.add(boundary);
+  return boundary;
+}
 
 export interface SimplePoolNostrRelayTransportOptions {
   /** Read the application's configured relay URLs when each operation starts. */
   getRelays(): readonly string[];
   /** Supply a shared pool when the application already owns one. */
   pool?: RelayPool;
+  /**
+   * Opaque proof paired with `new SimplePool({ verifyEvent: boundary.verifyEvent })`.
+   * This prevents the adapter from repeating the pool's signature verification.
+   */
+  verificationBoundary?: SimplePoolNostrRelayVerificationBoundary;
   /** Inactivity bound for historical queries; live subscriptions do not use it. */
   queryQuietWindowMs?: number;
   /** Per-relay publication bound. */
@@ -29,12 +78,23 @@ export interface SimplePoolNostrRelayTransportOptions {
 export class SimplePoolNostrRelayTransport implements NostrRelayTransport {
   private readonly getRelays: () => readonly string[];
   private readonly pool: RelayPool;
+  private readonly verificationBoundary?: SimplePoolNostrRelayVerificationBoundary;
   private readonly queryQuietWindowMs: number;
   private readonly publishTimeoutMs: number;
 
   constructor(options: SimplePoolNostrRelayTransportOptions) {
+    if (
+      options.verificationBoundary !== undefined
+      && !verificationBoundaries.has(options.verificationBoundary)
+    ) {
+      throw new TypeError('invalid SimplePool Nostr relay verification boundary');
+    }
+    if (options.verificationBoundary !== undefined && options.pool === undefined) {
+      throw new TypeError('SimplePool verification boundary requires its paired shared pool');
+    }
     this.getRelays = options.getRelays;
     this.pool = options.pool ?? new SimplePool();
+    this.verificationBoundary = options.verificationBoundary;
     this.queryQuietWindowMs = positiveMilliseconds(options.queryQuietWindowMs, 600);
     this.publishTimeoutMs = positiveMilliseconds(options.publishTimeoutMs, 4_500);
   }
@@ -81,7 +141,8 @@ export class SimplePoolNostrRelayTransport implements NostrRelayTransport {
       onevent: (event) => {
         let verified: NostrVerifiedEvent;
         try {
-          verified = verifyNostrEvent(event);
+          verified = this.verificationBoundary?.admitEvent(event)
+            ?? verifyNostrEvent(event);
         } catch {
           return;
         }

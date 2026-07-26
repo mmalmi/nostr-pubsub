@@ -25,7 +25,7 @@ export class PubsubError extends Error {
         return new PubsubError('storage', message);
     }
 }
-export function verifyNostrEvent(event) {
+export function verifyNostrEvent(event, verifier = verifyEvent) {
     // Adjacent protocol layers can receive a defensive object created by this
     // module (for example FIPS wire decode followed by kind-policy admission).
     // The private WeakSet cannot be spoofed through the public verified symbol.
@@ -33,10 +33,12 @@ export function verifyNostrEvent(event) {
         return copyVerifiedNostrEvent(event);
     }
     const candidate = cloneNostrEvent(event);
-    if (!verifyEvent(candidate)) {
+    if (!verifier(candidate)) {
         throw PubsubError.validation('invalid Nostr event id or signature');
     }
-    return freezeVerifiedEvent(candidate);
+    const verified = candidate;
+    verified[verifiedSymbol] = true;
+    return freezeVerifiedEvent(verified);
 }
 /**
  * Admit events checked by an asynchronous trust boundary such as a Web Worker.

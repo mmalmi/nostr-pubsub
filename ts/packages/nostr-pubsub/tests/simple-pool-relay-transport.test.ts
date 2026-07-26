@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import {
+  finalizeEvent,
+  generateSecretKey,
+  verifiedSymbol,
+  verifyEvent,
+} from 'nostr-tools/pure';
+import {
+  createSimplePoolNostrRelayVerificationBoundary,
   SimplePoolNostrRelayTransport,
   type NostrEvent,
   type NostrFilter,
@@ -58,6 +64,80 @@ describe('SimplePool Nostr relay transport', () => {
     ]);
     expect(handlers.onEvent).toHaveBeenCalledTimes(1);
     expect(handlers.onEvent).toHaveBeenCalledWith(expect.objectContaining({ id: event.id }));
+  });
+
+  it('reuses an exact SimplePool WASM-style admission without duplicate verification', () => {
+    const verifier = vi.fn((event: NostrEvent) => verifyEvent(event));
+    const boundary = createSimplePoolNostrRelayVerificationBoundary(verifier);
+    const pool = new MemorySimplePool();
+    const transport = new SimplePoolNostrRelayTransport({
+      getRelays: () => ['wss://one.example'],
+      pool,
+      verificationBoundary: boundary,
+    });
+    const handlers: NostrRelayTransportHandlers = { onEvent: vi.fn() };
+    transport.subscribe([{ kinds: [1] }], handlers);
+    const signed = note('boundary', 4);
+    const event = Object.freeze({
+      ...signed,
+      tags: Object.freeze(signed.tags.map((tag) => Object.freeze([...tag]))),
+    }) as NostrEvent;
+
+    expect(boundary.verifyEvent(event)).toBe(true);
+    pool.subscriptions[0]?.params.onevent(event);
+
+    expect(verifier).toHaveBeenCalledTimes(1);
+    expect(handlers.onEvent).toHaveBeenCalledTimes(1);
+    expect(handlers.onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      id: event.id,
+      content: 'boundary',
+    }));
+    expect(vi.mocked(handlers.onEvent).mock.calls[0]?.[0]).not.toBe(event);
+  });
+
+  it('requires an exact boundary proof and rejects spoofed or stale verification markers', () => {
+    const boundary = createSimplePoolNostrRelayVerificationBoundary();
+    const pool = new MemorySimplePool();
+    const transport = new SimplePoolNostrRelayTransport({
+      getRelays: () => ['wss://one.example'],
+      pool,
+      verificationBoundary: boundary,
+    });
+    const handlers: NostrRelayTransportHandlers = { onEvent: vi.fn() };
+    transport.subscribe([{ kinds: [1] }], handlers);
+
+    const unproved = note('unproved', 5);
+    pool.subscriptions[0]?.params.onevent(unproved);
+
+    const signed = note('signed', 6);
+    const spoofed = {
+      ...signed,
+      content: 'forged',
+      [verifiedSymbol]: true,
+    };
+    expect(boundary.verifyEvent(spoofed)).toBe(false);
+    pool.subscriptions[0]?.params.onevent(spoofed);
+
+    const mutable = {
+      ...note('before', 7),
+      tags: [] as string[][],
+    };
+    expect(boundary.verifyEvent(mutable)).toBe(true);
+    mutable.content = 'after';
+    pool.subscriptions[0]?.params.onevent(mutable);
+    expect(handlers.onEvent).toHaveBeenCalledWith(expect.objectContaining({ content: 'before' }));
+
+    expect(boundary.verifyEvent(mutable)).toBe(false);
+    pool.subscriptions[0]?.params.onevent(mutable);
+    expect(handlers.onEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not accept an opaque boundary without its paired shared pool', () => {
+    const boundary = createSimplePoolNostrRelayVerificationBoundary();
+    expect(() => new SimplePoolNostrRelayTransport({
+      getRelays: () => ['wss://one.example'],
+      verificationBoundary: boundary,
+    })).toThrow('requires its paired shared pool');
   });
 
   it('bounds historical queries by a quiet window without closing live subscriptions', () => {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5 - 2026-07-26
+
+- Add an opaque exact-object verification boundary for shared
+  `SimplePool` transports, allowing one injected synchronous verifier such as
+  `nostr-wasm` to provide canonical admission without a duplicate Schnorr pass
+  or trust in a spoofable public verification marker.
+
 ## 0.5.4 - 2026-07-26
 
 - Reuse private canonical verification admission across adjacent protocol
