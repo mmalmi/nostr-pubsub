@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.6 - 2026-08-19
+
+- Treat an authenticated TCP/FIPS stream that closes between a cleanup state
+  check and its queued abort as already released, while preserving abort
+  failures for connections that remain retained. This removes spurious
+  `unknown connection` errors during simultaneous pubsub stream convergence.
+
 ## 0.5.5 - 2026-07-26
 
 - Add an opaque exact-object verification boundary for shared

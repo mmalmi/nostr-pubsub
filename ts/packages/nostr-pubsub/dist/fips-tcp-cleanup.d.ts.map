@@ -1,0 +1,1 @@
+{"version":3,"file":"fips-tcp-cleanup.d.ts","sourceRoot":"","sources":["../src/fips-tcp-cleanup.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,YAAY,EAAE,eAAe,EAAE,MAAM,WAAW,CAAC;AAE/D,KAAK,oBAAoB,GAAG,IAAI,CAAC,eAAe,EAAE,OAAO,GAAG,OAAO,CAAC,CAAC;AAErE;;;;GAIG;AACH,wBAAsB,2BAA2B,CAC/C,GAAG,EAAE,oBAAoB,EACzB,EAAE,EAAE,YAAY,GACf,OAAO,CAAC,IAAI,CAAC,CAQf"}

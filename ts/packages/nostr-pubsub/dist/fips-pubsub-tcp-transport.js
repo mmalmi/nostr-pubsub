@@ -2,6 +2,7 @@ import { FipsTcpEndpoint, State, } from '@fips/tcp';
 import { encodeInvWantRecord, InvWantRecordDecoder } from './fips-invwant-record.js';
 import { InvWantRecordQueues } from './fips-invwant-tcp-queue.js';
 import { fipsInvWantTcpPeerOrderKey } from './fips-invwant-tcp-types.js';
+import { abortTcpConnectionIfPresent } from './fips-tcp-cleanup.js';
 import { PubsubError } from './types.js';
 const STREAM_IO_CHUNK_BYTES = 16 * 1024;
 const TCP_POLL_INTERVAL_MS = 50;
@@ -79,9 +80,7 @@ export class FipsPubsubTcpTransport {
             .filter(([, connection]) => connection.peer === peer)
             .map(([id]) => id);
         for (const id of ids) {
-            if (await this.tcp.state(id) !== undefined) {
-                await transport('abort TCP/FIPS Nostr pubsub peer', this.tcp.abort(id));
-            }
+            await transport('abort TCP/FIPS Nostr pubsub peer', abortTcpConnectionIfPresent(this.tcp, id));
             this.connections.delete(id);
         }
         if (this.active.delete(peer))
