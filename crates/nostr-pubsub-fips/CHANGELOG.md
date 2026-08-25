@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.8 - 2026-08-25
+
+- Use the Nostr VPN-maintained `nvpn-fips-core` 0.4.65, `nvpn-fips-tcp` 0.2.1,
+  and `nvpn-fips-tcp-endpoint` 0.2.1 packages while preserving the existing
+  Rust API names and FIPS wire behavior.
+
 ## 0.4.7 - 2026-07-21
 
 - Stop driving an empty TCP/FIPS state machine after the authenticated carrier
