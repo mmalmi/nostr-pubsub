@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.9 - 2026-08-28
+
+- Update to `nvpn-fips-core` 0.4.66 and `nvpn-fips-tcp-endpoint` 0.2.2 so
+  repeated underlay outages and live source-address changes re-arm an
+  exhausted direct-path handshake without changing the pub/sub API or FIPS
+  wire behavior.
+
 ## 0.4.8 - 2026-08-25
 
 - Use the Nostr VPN-maintained `nvpn-fips-core` 0.4.65, `nvpn-fips-tcp` 0.2.1,
