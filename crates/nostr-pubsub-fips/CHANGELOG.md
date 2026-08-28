@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.10 - 2026-08-28
+
+- Update to `nvpn-fips-core` 0.4.67 and `nvpn-fips-tcp-endpoint` 0.2.3 so
+  direct-path payload validation survives in-flight fallback traffic during a
+  live network rebind. The pub/sub API and FIPS/TCP wire behavior are
+  unchanged.
+
 ## 0.4.9 - 2026-08-28
 
 - Update to `nvpn-fips-core` 0.4.66 and `nvpn-fips-tcp-endpoint` 0.2.2 so
