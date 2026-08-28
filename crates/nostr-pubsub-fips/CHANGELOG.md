@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.11 - 2026-08-28
+
+- Update to `nvpn-fips-core` 0.4.68 and `nvpn-fips-tcp-endpoint` 0.2.4 so
+  pubsub streams share repeated roaming, rekey, and live-rebind recovery fixes.
+- Pubsub and TCP/FIPS wire formats are unchanged.
+
 ## 0.4.10 - 2026-08-28
 
 - Update to `nvpn-fips-core` 0.4.67 and `nvpn-fips-tcp-endpoint` 0.2.3 so
