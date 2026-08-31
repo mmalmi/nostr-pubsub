@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.15 - 2026-08-31
+
+- Update to `nvpn-fips-core` 0.4.72 and `nvpn-fips-tcp-endpoint` 0.2.8 so
+  release verification uses the corrected configured-peer cache fixtures.
+- Pubsub, FIPS, and TCP/FIPS runtime and wire behavior are unchanged.
+
 ## 0.4.14 - 2026-08-31
 
 - Update to `nvpn-fips-core` 0.4.71 and `nvpn-fips-tcp-endpoint` 0.2.7 so
