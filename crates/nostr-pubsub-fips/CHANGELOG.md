@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.13 - 2026-08-31
+
+- Update to `nvpn-fips-core` 0.4.70 and `nvpn-fips-tcp-endpoint` 0.2.6 so
+  authenticated pubsub carriers retry recovered direct paths promptly across
+  repeated outages.
+- Pubsub and FIPS wire formats are unchanged.
+
 ## 0.4.12 - 2026-08-31
 
 - Update to `nvpn-fips-core` 0.4.69 and `nvpn-fips-tcp-endpoint` 0.2.5 so
