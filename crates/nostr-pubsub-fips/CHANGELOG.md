@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.12 - 2026-08-31
+
+- Update to `nvpn-fips-core` 0.4.69 and `nvpn-fips-tcp-endpoint` 0.2.5 so
+  authenticated pubsub carriers recover across consecutive outages without
+  stale loss feedback immediately degrading the restored direct route.
+- Pubsub and FIPS wire formats are unchanged.
+
 ## 0.4.11 - 2026-08-28
 
 - Update to `nvpn-fips-core` 0.4.68 and `nvpn-fips-tcp-endpoint` 0.2.4 so
