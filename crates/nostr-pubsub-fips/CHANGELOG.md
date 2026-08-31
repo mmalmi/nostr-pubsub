@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.14 - 2026-08-31
+
+- Update to `nvpn-fips-core` 0.4.71 and `nvpn-fips-tcp-endpoint` 0.2.7 so
+  authenticated pubsub carriers reuse validated configured-peer identities
+  during liveness recovery.
+- Pubsub and FIPS wire formats and retry timing are unchanged.
+
 ## 0.4.13 - 2026-08-31
 
 - Update to `nvpn-fips-core` 0.4.70 and `nvpn-fips-tcp-endpoint` 0.2.6 so
