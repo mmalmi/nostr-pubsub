@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.16 - 2026-09-04
+
+- Update to `nvpn-fips-core` 0.4.73 and `nvpn-fips-tcp-endpoint` 0.2.9 so
+  authenticated pubsub carriers inherit the routing, transport cleanup, and
+  BLE identity hardening.
+- Pubsub, FIPS, and TCP/FIPS runtime and wire behavior are unchanged.
+
 ## 0.4.15 - 2026-08-31
 
 - Update to `nvpn-fips-core` 0.4.72 and `nvpn-fips-tcp-endpoint` 0.2.8 so
