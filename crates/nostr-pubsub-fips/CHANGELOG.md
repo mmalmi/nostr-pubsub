@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.17 - 2026-09-05
+
+- Update to `nvpn-fips-core` 0.4.74 and `nvpn-fips-tcp-endpoint` 0.2.10 for
+  bounded replay bookkeeping, authenticated direct-path updates, and correct
+  delivery-feedback timing when a quiet path becomes active.
+- Inherit corrected simultaneous-handshake ownership and bounded retries for
+  the first queued payload while mesh reachability is still arriving.
+- Pubsub, FIPS, and TCP/FIPS wire formats are unchanged.
+
 ## 0.4.16 - 2026-09-04
 
 - Update to `nvpn-fips-core` 0.4.73 and `nvpn-fips-tcp-endpoint` 0.2.9 so
