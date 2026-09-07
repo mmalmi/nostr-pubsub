@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.18 - 2026-09-07
+
+- Update to `nvpn-fips-core` 0.4.75 and `nvpn-fips-tcp-endpoint` 0.2.11 so
+  authenticated pubsub carriers recover automatically after a same-identity
+  recipient restarts and loses its previous encrypted session.
+- Pubsub, FIPS, and TCP/FIPS wire formats are unchanged.
+
 ## 0.4.17 - 2026-09-05
 
 - Update to `nvpn-fips-core` 0.4.74 and `nvpn-fips-tcp-endpoint` 0.2.10 for
