@@ -433,7 +433,11 @@ impl ClientInner {
         }
 
         let peers = self.connected_peers().await?;
-        let is_new = self.remember_event(event.clone(), source, self.options.max_hops)?;
+        let is_new = self
+            .recent_events
+            .lock()
+            .map_err(|_| poisoned("FIPS recent event cache"))?
+            .insert_for_publish(event.clone(), source, self.options.max_hops);
         if !is_new {
             return Ok(PublishReport {
                 accepted: true,

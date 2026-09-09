@@ -61,6 +61,22 @@ impl RecentEvents {
         true
     }
 
+    /// An application's durable outbox may retry an event whose payload has
+    /// left the live window. Refresh that payload and its bounded seen-ID age;
+    /// inbound gossip still uses `insert` and cannot undo deduplication.
+    pub(super) fn insert_for_publish(
+        &mut self,
+        event: VerifiedEvent,
+        source: EventSource,
+        hop_limit: u8,
+    ) -> bool {
+        let id = event.as_event().id.to_string();
+        if self.event(&id).is_none() && self.event_ids.remove(&id) {
+            self.event_id_order.retain(|seen| seen != &id);
+        }
+        self.insert(event, source, hop_limit)
+    }
+
     pub(super) fn contains(&self, event_id: &str) -> bool {
         self.event_ids.contains(event_id)
     }

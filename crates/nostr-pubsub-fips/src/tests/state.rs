@@ -27,6 +27,29 @@ fn accepted_event_ids_outlive_full_payload_replay() {
 }
 
 #[test]
+fn only_explicit_local_retry_restores_payload_without_weakening_gossip_dedup() {
+    let mut recent = RecentEvents::new(1, 3);
+    let events = (0..4)
+        .map(|i| super::routed::signed_note(&format!("retry {i}")))
+        .collect::<Vec<_>>();
+    let source = EventSource::local_index("outbox");
+    for event in &events[..3] {
+        assert!(recent.insert(event.clone(), source.clone(), 1));
+    }
+    assert!(!recent.insert(events[0].clone(), source.clone(), 1));
+    assert!(recent.event(&events[0].as_event().id.to_string()).is_none());
+    assert!(recent.insert_for_publish(events[0].clone(), source.clone(), 1));
+    assert!(!recent.insert(events[0].clone(), source.clone(), 1));
+    assert!(!recent.insert_for_publish(events[0].clone(), source.clone(), 1));
+    assert!(recent.insert(events[3].clone(), source, 1));
+    assert!(recent.contains(&events[0].as_event().id.to_string()));
+    assert!(!recent.contains(&events[1].as_event().id.to_string()));
+    assert_eq!(recent.entries.len(), 1);
+    assert_eq!(recent.event_ids.len(), 3);
+    assert_eq!(recent.event_id_order.len(), 3);
+}
+
+#[test]
 fn pending_want_retries_with_backoff_then_expires() {
     let provider = InventoryProvider {
         peer_npub: Keys::generate()

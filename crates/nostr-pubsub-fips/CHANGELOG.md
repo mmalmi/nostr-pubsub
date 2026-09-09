@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 - 2026-09-09
+
+- Restore and announce an evicted payload when a local application explicitly
+  retries the original signed event. A durable outbox can now recover messages
+  beyond the live replay window after a peer arrives.
+- Keep inbound gossip deduplication and payload/seen-ID bounds unchanged.
+  Applications should pace retry batches within their configured replay window.
+
 ## 0.5.0 - 2026-09-09
 
 - Reach known application service identities through ordinary FIPS routing,

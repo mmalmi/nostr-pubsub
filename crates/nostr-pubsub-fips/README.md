@@ -47,6 +47,11 @@ also works for historical events. For a large stored set, a reconciliation
 layer such as NIP-77 Negentropy can identify the missing IDs first and then use
 the same event transfer path more efficiently.
 
+An explicit local publish retries a payload that has left this replay window,
+while duplicate incoming gossip stays suppressed. Durable application outboxes
+should pace retry batches within `max_replay_events` so payloads remain
+available while peers request them; the client itself is not a durable store.
+
 The package also exports the lower-level `FipsInvWantTcpDriver` for non-Nostr
 mesh protocols, plus transport-neutral FIPS peerfinding and reputation
 adapters. It targets the FIPS `0.4.x` endpoint API.

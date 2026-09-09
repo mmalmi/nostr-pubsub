@@ -48,7 +48,7 @@ async fn known_service_peers_exchange_events_over_real_udp_without_discovery() {
     check_routed_exchange(a, b, c).await;
 }
 
-async fn udp_endpoint(secret: [u8; 32], peers: Vec<PeerConfig>) -> Arc<FipsEndpoint> {
+pub(super) async fn udp_endpoint(secret: [u8; 32], peers: Vec<PeerConfig>) -> Arc<FipsEndpoint> {
     let mut config = Config::new();
     config.node.identity = IdentityConfig {
         nsec: Some(hex::encode(secret)),
@@ -162,7 +162,7 @@ async fn check_routed_exchange(a: Arc<FipsEndpoint>, b: Arc<FipsEndpoint>, c: Ar
     }
 }
 
-fn signed_note(content: &str) -> VerifiedEvent {
+pub(super) fn signed_note(content: &str) -> VerifiedEvent {
     VerifiedEvent::try_from(
         EventBuilder::text_note(content)
             .sign_with_keys(&Keys::generate())
