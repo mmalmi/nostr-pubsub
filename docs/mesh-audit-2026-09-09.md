@@ -8,18 +8,20 @@ not demonstrate that every product can discover a fresh peer or recover a
 real network partition.
 
 This audit inspected nostr-pubsub, FIPS, fips-tcp, Hashtree, Iris Chat Rust,
-Iris Drive, Nostr VPN, and the mesh-facing nostr-social-graph adapters. Work is
-local source integration; it is not a release or downstream dependency rollout.
+Iris Drive, Nostr VPN, and the mesh-facing nostr-social-graph adapters. Coverage
+below describes tested source. Publishing and downstream adoption are separate
+acceptance steps; a passing library test does not identify an installed product's
+dependency version.
 
 ## Current product coverage
 
 | Component | Working path | Remaining boundary |
 | --- | --- | --- |
-| nostr-pubsub | Rust/TypeScript bounded inventory/want state machines; real Rust FIPS/TCP subscriptions, replay, reconnect recovery, and default multihop endpoint adverts with no relay sockets | The high-level FIPS client and the scale simulator use different integration paths. Ordinary events require matching subscriptions at intermediate pubsub peers; endpoint adverts subscribe by default. |
+| nostr-pubsub | Rust/TypeScript bounded inventory/want state machines; real Rust FIPS/TCP subscriptions, replay, reconnect recovery, and routed service identities across intermediates with no pubsub service | Known service identities need an available physical route. The high-level FIPS client and scale simulator use different integration paths. Default physical-peer selection is bounded but not quality-ranked. |
 | FIPS | Authenticated multihop routing; native UDP/TCP and platform-specific link transports; LAN discovery and optional same-host rendezvous | Some configured bootstrap paths still use public infrastructure. Native routing tests do not establish browser or hardware-radio readiness. |
 | Hashtree | Real FIPS blob transport, central hash verification, explicit mesh forwarding, exact hop decrement and exhaustion | Forwarding must actually be configured. The TypeScript worker preserves hop budgets but has no equivalent of Rust's generic MeshForwardingRoute. The old hashtree-sim mesh model is retired. |
-| Iris Chat Rust | Known sibling sync over FIPS/TCP; recent-peer hints; optional Nearby BLE/LAN; opt-in same-host discovered Hashtree blobs and Blossom | Standard pubsub starts with device sync, not as a universal app event bus. Nearby messages use a separate bounded packet/receipt path. Empty relay lists incorrectly gated sibling sync before this audit's fix. First contact still needs an available relay/Nearby path; static WSS seeds remain a bootstrap dependency. The graph ranks profile search, not mesh peers. |
-| Iris Drive | FIPS UDP, pubsub and same-host rendezvous enabled by default; shared BlobRouter with FIPS forwarding and roster authorization | Default WSS seeds remain a bootstrap dependency. Platform restrictions disable some LAN/WebRTC paths. Pubsub has no social-graph admission policy. |
+| Iris Chat Rust | Known-contact signed events use standard pubsub and the existing decryption/receipt handlers, independently of the sibling listener; durable retry beyond the replay cache; authenticated receipts stop mesh retries; Hashtree attachment routes | Fresh identities still need discovery and a physical path. Static WSS seeds remain a default bootstrap dependency. Nearby BLE/LAN remains a separate bounded packet/receipt path. The graph ranks profile search, not mesh peers. |
+| Iris Drive | FIPS UDP, pubsub and same-host rendezvous enabled by default; live routed roster of authorized clients; shared BlobRouter with FIPS forwarding and roster authorization | Default WSS seeds remain a bootstrap dependency. Platform restrictions disable some LAN/WebRTC paths. Pubsub has no social-graph admission policy. |
 | Nostr VPN | Relayless client mode; persistent pubsub subscriptions; FipsPubsubPolicy evaluates verified events before caching/gossip; roster ownership protects tunnel traffic separately from transit | Default relay bridge mode differs from explicit relayless mode. LAN participation is configurable. Native product tests exist, but a new cross-product/browser end-to-end matrix was not run here. |
 
 Relevant product ownership: Chat `core/src/core/device_sync/runtime.rs`,
@@ -264,7 +266,7 @@ handled; the earlier one-sided harness could produce false convergence
 timeouts. This proves known-sibling delivery, not universal relayless first
 contact or adoption of the standard pubsub bus for all chat traffic.
 
-## Reproduction and validation
+## Initial audit reproduction and validation
 
 From the nostr-pubsub repository:
 
@@ -293,15 +295,16 @@ cargo run --release -p nostr-pubsub-sim -- \
   --action-budget 10000000
 ```
 
-No CPU-throughput, browser firewall/NAT, wireless hardware, or complete
-cross-product relay-removal benchmark is claimed by these results.
+These initial simulation results do not measure process CPU throughput, browser
+firewall/NAT traversal, or wireless hardware. Native process and idle-resource
+checks added subsequently are described below.
 
 ## Highest-value remaining acceptance work
 
-1. Run actual Chat, Drive/Hashtree and VPN processes through bootstrap, removal
-   of all relay connectivity, anchor death, partition/rejoin, and fresh versus
-   cached discovery. Assert delivered messages and verified blobs, not just
-   connected-peer counts.
+1. Extend the native known-identity partition/rejoin tests below to fresh
+   discovery, browser connectivity and hardware links. Keep VPN adoption with
+   its product release lane. Assert delivered messages and verified blobs,
+   not just connected-peer counts.
 2. Apply a consistent transport-peer selection contract across high-level
    clients, retaining unknown-peer exploration. Keep application message
    authorization and the authority to rate other machines explicit; successful
@@ -312,13 +315,20 @@ cross-product relay-removal benchmark is claimed by these results.
 4. Exercise real browser-to-native forwarding, relay removal, and restrictive
    connectivity. Native Rust routing and TypeScript codec parity do not by
    themselves establish an operational browser ad hoc mesh.
+5. Define and test cancellation of the lower-level `FipsInvWantStream` and
+   `FipsInvWantTcpDriver` when a custom asynchronous event policy suspends.
+   Code inspection shows records are removed from decoder storage before that
+   await; cancelling the enclosing call could discard the local record/action
+   buffer. This is an inferred API hazard, not reproduced product loss, and
+   was not the cause of the Chat outage. No affected production Hashtree caller
+   was found in this audit.
 
 Products pin published dependencies. Local fixes in capability repositories
 require a separate tested dependency rollout before installed products benefit.
 
 ## Native routed-service slice
 
-The next bounded acceptance target is signed control events and hash-verified
+The bounded acceptance target is signed control events and hash-verified
 blobs between known native application identities through an uninterested FIPS
 router, including automatic recovery after that router restarts. It does not
 assume that every physical neighbour subscribes to the same application topics.
@@ -341,3 +351,74 @@ reputation remains explicit: FIPS accepts ratings from self or configured
 trusted authors. Good service alone must not silently grant that authority.
 The poisoning tests show why that boundary matters even if connection selection
 uses one score. No new transport/blob/rater score dimensions are introduced.
+
+## Outage recovery and resource regressions
+
+Testing actual applications exposed failures that the initial simulations did
+not cover:
+
+- A retained FIPS session could keep retrying an empty published route after
+  its intermediate peer restarted. Refreshing that session's route before
+  pumping queued data restored a persistent 350-KiB TCP transfer in about
+  6.3 seconds; the previous implementation delivered no data within 60 seconds.
+- Losing many small TCP writes in one flight recovered only the oldest segment
+  per timeout. The timeout kept backing off for each subsequent missing segment,
+  even while acknowledgements advanced. A deterministic regression drops
+  44 separately written 101-byte segments, including sequence-number wraparound.
+  Recovery now repairs at most one old-flight segment per advancing ACK,
+  retaining timeout backoff and per-segment retry limits. Duplicate/invalid ACKs,
+  a closed receive window and later normal traffic do not trigger that repair.
+- A durable outbox retry could find an event's ID in the seen cache after its
+  payload had been evicted, preventing retransmission. An explicit local retry
+  now restores that payload within the existing bounds. Incoming gossip still
+  deduplicates normally.
+- An oversized record prefix could occupy a decoder without becoming ready for
+  rejection. Four prefix bytes now suffice to reject it and close that stream;
+  already decoded frames from healthy peers survive the same driver turn.
+- Chat generated Nearby traffic when the actual Nearby service was disabled.
+  Gating publication on the running service eliminated those unused datagrams.
+  This removed about 2.7 MB from the failing 70-message diagnostic scenario;
+  it was separate from the TCP delivery failure.
+
+The real WebSocket regression warms a connection, stops the sole intermediate
+router, queues 70 signed events against a 64-event replay window, and restarts
+the router. The old TCP delivered 0/70 within the 40-second recovery deadline;
+the repaired implementation passes. Neither endpoint nor its subscription is
+restarted. Separate cases cover a single publication without application retry,
+tree routing with one pubsub slot, and reply-learned routing with the normal
+64-peer budget and an uninterested transit peer.
+
+The actual Chat integration test also recovers all 70 encrypted messages,
+decrypts their original plaintexts and processes authenticated Seen receipts.
+It then observes 15 seconds with no new EVENT, INV, WANT or REQ frames, no
+unresolved mesh outbox work and at most one liveness wake. Optional relay outbox
+records remain available. The first successful debug run measured 35,372 bytes
+across both transit links during that quiet interval (about 2,358 B/s), and
+1.90% of one CPU core for both Chat cores plus the router over a 10-second sample.
+These are local debug-process measurements, not mobile battery measurements.
+
+The native iris-stack product fixture carries signed events and hash-verified
+192-KiB blobs between Chat and Drive through a Hashtree router that has no
+pubsub service and is outside the Drive application ACL. It checks partition
+recovery, a blob created during the partition, provider replacement and hop
+exhaustion. Its resource gate samples both before the outage and after recovery:
+
+| Resource gate | Default bound | What it catches |
+| --- | ---: | --- |
+| Idle process CPU, each fixture | 5% of one core over 15 seconds | Busy loops, repeated polling or background work that does not settle |
+| Idle transit TX + RX, both links combined | 4 KiB/s over 15 seconds | Retry floods or repeated control/publication traffic |
+| Chat after authenticated receipts | Zero new EVENT/INV/WANT/REQ in 15 seconds | Durable outbox retries that fail to stop |
+| Pubsub tenfold spam scenario | At most 10% quiescent retained-state growth | Unbounded retained protocol state under hostile input |
+
+CPU sampling uses process CPU time, with Linux clock ticks or macOS subsecond
+accounting. Missing or corrupt measurements are reported explicitly, never as
+zero usage. The idle budgets are generous regression limits, not performance
+targets. They do not replace the simulator's active-load work/byte counters or
+an eventual hardware energy test.
+
+A controlled comparison using identical fixture binaries found no material
+idle saving from reducing the pubsub peer budget from 64 to 1: roughly
+2.6–2.8 KB/s at the intermediate node and 0.47–1.13% CPU per process in both
+configurations. The production peer budget remains unchanged. A special retry
+or transit-exclusion mechanism would add complexity without a demonstrated
+benefit in this measurement.

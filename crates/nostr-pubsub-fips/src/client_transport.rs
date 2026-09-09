@@ -32,8 +32,11 @@ pub(super) async fn transport_loop(
                         if inner.peer_is_in_cooldown(&peer.npub(), now_ms()) {
                             continue;
                         }
-                        let _ = driver.queue_frame(peer, &frame);
-                        let _ = driver.connect_peer(peer, now_ms()).await;
+                        if driver.queue_frame(peer, &frame).is_err()
+                            || driver.connect_peer(peer, now_ms()).await.is_err()
+                        {
+                            inner.transport_errors.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     TransportCommand::Cooldown { peer } => {
                         known_links.remove(&peer.npub());
@@ -46,6 +49,8 @@ pub(super) async fn transport_loop(
                 if let Ok(report) = report {
                     inner.tcp_receive_batches.fetch_add(1, Ordering::Relaxed);
                     process_wire_report(&inner, &mut driver, report).await;
+                } else {
+                    inner.transport_errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
             _ = poll_tick.tick() => {
@@ -54,6 +59,8 @@ pub(super) async fn transport_loop(
                     inner.tcp_poll_turns.fetch_add(1, Ordering::Relaxed);
                     if let Ok(report) = driver.poll(now_ms()).await {
                         process_wire_report(&inner, &mut driver, report).await;
+                    } else {
+                        inner.transport_errors.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -102,7 +109,9 @@ async fn sync_transport_peers(
         let Some(identity) = identity else {
             continue;
         };
-        let _ = driver.connect_peer(identity, now_ms()).await;
+        if driver.connect_peer(identity, now_ms()).await.is_err() {
+            inner.transport_errors.fetch_add(1, Ordering::Relaxed);
+        }
     }
     *known_links = next_links;
 }
@@ -142,6 +151,9 @@ async fn process_wire_report(
     driver: &mut WireTcpDriver,
     report: WireTcpReport,
 ) {
+    inner
+        .transport_errors
+        .fetch_add(report.rejected_frames as u64, Ordering::Relaxed);
     inner
         .tcp_datagrams_received
         .fetch_add(report.tcp_datagrams as u64, Ordering::Relaxed);

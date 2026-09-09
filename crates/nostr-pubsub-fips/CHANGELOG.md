@@ -7,6 +7,13 @@
   beyond the live replay window after a peer arrives.
 - Keep inbound gossip deduplication and payload/seen-ID bounds unchanged.
   Applications should pace retry batches within their configured replay window.
+- Reject oversized record prefixes immediately and close only the offending
+  stream, preserving healthy peers' frames. Expose framing and transport
+  failures through `transport_error_count()`.
+- Update to FIPS 0.4.78, TCP 0.2.2 and TCP endpoint 0.2.14 for retained-route
+  recovery and bounded repair of a flight of packets lost during an outage.
+  Real WebSocket regressions recover through an uninterested restarted router,
+  including 70 signed events against a 64-event replay window.
 
 ## 0.5.0 - 2026-09-09
 

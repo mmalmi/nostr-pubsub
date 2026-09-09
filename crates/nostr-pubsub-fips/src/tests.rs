@@ -31,6 +31,7 @@ mod reputation;
 mod routed;
 mod state;
 mod turnover;
+mod websocket_restart;
 
 #[test]
 fn tcp_timer_poll_matches_the_minimum_retransmission_granularity() {

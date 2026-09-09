@@ -12,6 +12,8 @@ use crate::{FIPS_NOSTR_PUBSUB_CAPABILITY, FIPS_NOSTR_PUBSUB_SERVICE_PORT};
 const IO_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_READY_INPUT_TURNS: usize = 16;
 
+type ReceivedFrames = Vec<(PeerIdentity, Vec<u8>)>;
+
 pub(crate) struct WireTcpOptions {
     pub frame_capacity: usize,
     pub peer_capacity: usize,
@@ -27,6 +29,7 @@ pub(crate) struct WireTcpReport {
     pub connected_peers: usize,
     pub tcp_datagrams: usize,
     pub rejected_tcp_datagrams: usize,
+    pub rejected_frames: usize,
 }
 
 pub(crate) struct WireTcpDriver {
@@ -216,7 +219,7 @@ impl WireTcpDriver {
     async fn drive_ready(&mut self, now_ms: u64) -> Result<WireTcpReport> {
         self.accept_connections().await?;
         let newly_connected = self.refresh_active().await?;
-        let frames = self.read_active(now_ms).await?;
+        let (frames, rejected_frames) = self.read_active(now_ms).await?;
         self.flush_queues(now_ms).await?;
         self.finish_remote_closes(now_ms).await?;
         let more_connected = self.refresh_active().await?;
@@ -230,6 +233,7 @@ impl WireTcpDriver {
             connected_peers: self.active.len(),
             tcp_datagrams: 0,
             rejected_tcp_datagrams: 0,
+            rejected_frames,
         })
     }
 
@@ -313,7 +317,7 @@ impl WireTcpDriver {
         Ok(newly_connected)
     }
 
-    async fn read_active(&mut self, now_ms: u64) -> Result<Vec<(PeerIdentity, Vec<u8>)>> {
+    async fn read_active(&mut self, now_ms: u64) -> Result<(ReceivedFrames, usize)> {
         let streams = self
             .active
             .iter()
@@ -321,7 +325,8 @@ impl WireTcpDriver {
             .collect::<Vec<_>>();
         let mut budget = self.options.drive_io_bytes;
         let mut frames = Vec::new();
-        for (peer, id) in streams {
+        let mut rejected = 0;
+        'streams: for (peer, id) in streams {
             let mut turns = 0;
             while turns < MAX_READY_INPUT_TURNS && frames.len() < self.options.drive_frames {
                 if self
@@ -333,9 +338,14 @@ impl WireTcpDriver {
                         .inputs
                         .get_mut(&peer)
                         .expect("decoder exists")
-                        .take(self.options.drive_frames - frames.len())?;
+                        .take(self.options.drive_frames - frames.len());
                     let identity = PeerIdentity::from_npub(&peer)
                         .map_err(|error| storage_error("decode authenticated peer", error))?;
+                    let Ok(decoded) = decoded else {
+                        self.abort_peer(identity).await?;
+                        rejected += 1;
+                        continue 'streams;
+                    };
                     frames.extend(decoded.into_iter().map(|frame| (identity, frame)));
                     turns += 1;
                     continue;
@@ -364,7 +374,7 @@ impl WireTcpDriver {
                 turns += 1;
             }
         }
-        Ok(frames)
+        Ok((frames, rejected))
     }
 
     async fn flush_queues(&mut self, now_ms: u64) -> Result<()> {
@@ -549,7 +559,9 @@ impl RecordDecoder {
                 .try_into()
                 .expect("record prefix is complete"),
         ) as usize;
-        declared <= self.max_frame_bytes && self.buffer.len() >= 4 + declared
+        // An invalid prefix is also ready: take() must reject it immediately
+        // instead of waiting for a payload that cannot fit in this decoder.
+        declared > self.max_frame_bytes || self.buffer.len() >= 4 + declared
     }
 
     fn remaining_capacity(&self) -> usize {
@@ -580,6 +592,97 @@ mod tests {
     use super::*;
     use fips_core::config::{IdentityConfig, SimTransportConfig, TransportInstances};
     use fips_core::{Config, Identity, SimNetwork, register_sim_network, unregister_sim_network};
+
+    #[test]
+    fn oversized_record_prefix_is_ready_for_rejection_without_filling_the_buffer() {
+        for declared in [1025_u32, u32::MAX] {
+            let mut decoder = RecordDecoder::new(1024);
+            let prefix = declared.to_be_bytes();
+            decoder.push(&prefix[..3]).unwrap();
+            assert!(!decoder.has_complete_record());
+            decoder.push(&prefix[3..]).unwrap();
+            // This is the driver's readiness predicate: it must let take()
+            // reject the prefix before more peer bytes fill the bounded input.
+            assert!(decoder.has_complete_record());
+            assert!(decoder.take(1).is_err());
+            assert_eq!(decoder.remaining_capacity(), 1028);
+            assert!(!decoder.has_complete_record());
+            decoder.push(&encode_record(b"valid").unwrap()).unwrap();
+            assert_eq!(decoder.take(1).unwrap(), vec![b"valid".to_vec()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_record_aborts_only_its_stream_and_preserves_other_frames() {
+        let mut config = Config::new();
+        config.node.discovery.nostr.enabled = false;
+        config.node.discovery.local.enabled = false;
+        config.node.discovery.lan.enabled = false;
+        let endpoint = Arc::new(
+            Box::pin(
+                FipsEndpoint::builder()
+                    .config(config)
+                    .without_system_tun()
+                    .bind(),
+            )
+            .await
+            .unwrap(),
+        );
+        let mut peers = [74, 75].map(|value| {
+            PeerIdentity::from_npub(&Identity::from_secret_bytes(&[value; 32]).unwrap().npub())
+                .unwrap()
+        });
+        peers.sort_by_key(PeerIdentity::npub);
+        let [healthy, malformed] = peers;
+        let mut driver = WireTcpDriver::bind(
+            endpoint.clone(),
+            WireTcpOptions {
+                frame_capacity: 1024,
+                peer_capacity: 2,
+                queue_records_per_peer: 4,
+                queue_bytes_per_peer: 4096,
+                drive_io_bytes: 4096,
+                drive_frames: 4,
+            },
+            99,
+        )
+        .await
+        .unwrap();
+        driver
+            .select_peers(peers.map(|peer| peer.npub()).into())
+            .await;
+        for peer in peers {
+            driver.connect_peer(peer, 0).await.unwrap();
+            let id = driver
+                .connections
+                .iter()
+                .find(|(_, connection)| connection.peer == peer.npub())
+                .unwrap()
+                .0;
+            driver.active.insert(peer.npub(), *id);
+            let mut decoder = RecordDecoder::new(1024);
+            decoder
+                .push(&if peer == healthy {
+                    encode_record(b"valid").unwrap()
+                } else {
+                    u32::MAX.to_be_bytes().to_vec()
+                })
+                .unwrap();
+            driver.inputs.insert(peer.npub(), decoder);
+        }
+        let malformed_id = driver.active[&malformed.npub()];
+        assert_eq!(
+            driver.read_active(1).await.unwrap(),
+            (vec![(healthy, b"valid".to_vec())], 1)
+        );
+        assert!(!driver.inputs.contains_key(&malformed.npub()));
+        assert!(!driver.active.contains_key(&malformed.npub()));
+        assert_eq!(driver.connection_count(), 1);
+        assert!(driver.tcp.state(malformed_id).is_none());
+        assert_eq!(driver.read_active(2).await.unwrap(), (Vec::new(), 0));
+        drop(driver);
+        endpoint.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn deselection_releases_queued_records_while_link_refresh_rewinds_them() {

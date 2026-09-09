@@ -22,6 +22,14 @@ pub struct FipsPubsubDeliverySnapshot {
 }
 
 impl FipsPubsubClient {
+    /// Count failed transport operations and rejected record framing.
+    ///
+    /// Malformed TCP datagrams are counted separately in the delivery snapshot.
+    #[must_use]
+    pub fn transport_error_count(&self) -> u64 {
+        self.inner.transport_errors.load(Ordering::Relaxed)
+    }
+
     #[must_use]
     pub fn delivery_snapshot(&self) -> FipsPubsubDeliverySnapshot {
         FipsPubsubDeliverySnapshot {

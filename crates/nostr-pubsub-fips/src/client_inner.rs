@@ -36,6 +36,7 @@ pub(super) struct ClientInner {
     pub(super) tcp_datagrams_received: AtomicU64,
     pub(super) tcp_datagrams_rejected: AtomicU64,
     pub(super) tcp_poll_turns: AtomicU64,
+    pub(super) transport_errors: AtomicU64,
     pub(super) next_subscription_id: AtomicU64,
     pub(super) subscriptions: Mutex<HashMap<String, ActiveSubscription>>,
     pub(super) peer_subscriptions: Mutex<PubsubPeerSubscriptionStore>,

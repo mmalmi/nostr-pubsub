@@ -370,6 +370,7 @@ impl FipsPubsubClient {
             tcp_datagrams_received: AtomicU64::new(0),
             tcp_datagrams_rejected: AtomicU64::new(0),
             tcp_poll_turns: AtomicU64::new(0),
+            transport_errors: AtomicU64::new(0),
             next_subscription_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
             peer_subscriptions: Mutex::new(PubsubPeerSubscriptionStore::new(subscription_limits)),
