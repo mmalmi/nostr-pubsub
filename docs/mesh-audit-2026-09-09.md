@@ -13,6 +13,34 @@ below describes tested source. Publishing and downstream adoption are separate
 acceptance steps; a passing library test does not identify an installed product's
 dependency version.
 
+## Published versions and adoption
+
+| Component | Published version | Scope |
+| --- | --- | --- |
+| FIPS core and endpoint | 0.4.78 | Registry libraries with scoped source tags; no separate FIPS application release implied |
+| FIPS TCP | Rust 0.2.2, endpoint 0.2.14, TypeScript 0.2.2 | The TypeScript package is an immutable GitHub release archive, not an npm publication |
+| nostr-pubsub-fips | 0.5.1 | Registry adapter with routed peers, bounded turnover and durable retry recovery |
+| Hashtree | CLI 0.2.146, embedded 0.2.89, FIPS transport 0.4.17 | Published native artifacts and downstream package adoption |
+| Iris Chat Rust | v2026.9.9 | Native artifacts published; TestFlight delivery succeeded and App Store submission is awaiting review |
+| Iris Drive | 0.1.36 | Native packages published; internal TestFlight 0.1.36 (1037) delivered |
+| Nostr VPN | Existing release lane | Adoption of the final FIPS dependency tuple is owned and verified by that lane |
+
+Hashtree's five platform builds and artifact startup checks passed. Its published
+installer checks passed on Windows and both Linux architectures. Hosted macOS
+verification stopped at an anonymous GitHub API rate limit before product
+commands; the same verifier passed locally against the immutable macOS archive,
+checking the installed binary bytes and storage/helper behavior. These distinct
+outcomes are retained rather than treating the hosted failure as a passing job.
+
+Drive's release source is `77f0c624`, with an annotated `v0.1.36` tag on its
+canonical Hashtree repository. A fresh anonymous clone verified every retained
+reference and all 18,658 reachable objects. The native artifacts have recorded
+build origins and verified input equivalence through the final release source;
+later harness-only commits do not imply that every binary was rebuilt. Its
+standard publisher completed Hashtree distribution and Zapstore publication.
+Independent public downloads matched all nine verified artifacts, totaling
+582,605,729 bytes; versioned and latest manifests match the release source.
+
 ## Current product coverage
 
 | Component | Working path | Remaining boundary |
@@ -106,6 +134,14 @@ identity; it does not establish the truth of an authorized rating. Positive
 service history and authority to judge unrelated peers need distinct policy
 consideration. Fresh Sybil identities and broad paid-offer filters remain open
 admission problems.
+
+A simple integration contract is one general trustworthiness prior for initial
+peer preference, adjusted by local observations of latency, failures and invalid
+data. Preserve unknown-peer exploration and hard resource bounds. Keep authority
+to submit ratings about other identities explicit: the poisoning tests show why
+a history of useful service cannot establish that authority by itself. This
+needs a permission decision, without introducing three separate reputation
+scores. Applying that uniform contract across products remains follow-up work.
 
 Integration is uneven. VPN applies the shared graph-backed event policy. Chat
 uses the graph for profile search; Drive does not currently use it for meshing.
@@ -322,6 +358,11 @@ checks added subsequently are described below.
    buffer. This is an inferred API hazard, not reproduced product loss, and
    was not the cause of the Chat outage. No affected production Hashtree caller
    was found in this audit.
+6. Automate the native CPU and bandwidth gate across upstream releases, then
+   extend it with browser background/resume workloads and longer reconnect/churn
+   runs. Compare Windows sampled CPU against cumulative process time. Measure
+   mobile data and screen-off energy on hardware before setting battery claims;
+   current simulator and short native idle checks do not cover that cost.
 
 Products pin published dependencies. Local fixes in capability repositories
 require a separate tested dependency rollout before installed products benefit.
@@ -388,14 +429,20 @@ restarted. Separate cases cover a single publication without application retry,
 tree routing with one pubsub slot, and reply-learned routing with the normal
 64-peer budget and an uninterested transit peer.
 
-The actual Chat integration test also recovers all 70 encrypted messages,
-decrypts their original plaintexts and processes authenticated Seen receipts.
-It then observes 15 seconds with no new EVENT, INV, WANT or REQ frames, no
-unresolved mesh outbox work and at most one liveness wake. Optional relay outbox
-records remain available. The first successful debug run measured 35,372 bytes
-across both transit links during that quiet interval (about 2,358 B/s), and
-1.90% of one CPU core for both Chat cores plus the router over a 10-second sample.
-These are local debug-process measurements, not mobile battery measurements.
+At Chat source `a4cafb1bb382593c9886d0a4314cf80292ef7850` (`v2026.9.9`),
+the integration test recovers all 70 encrypted messages in 11.127 seconds after
+the intermediate router restarts, decrypts their original plaintexts and
+processes authenticated Seen receipts. The test uses published registry
+dependencies without local patches or temporary diagnostics. It then requires
+at least 15 seconds with no new EVENT, INV, WANT or REQ frames, no unresolved
+mesh outbox work and at most one liveness wake. Optional relay outbox records
+remain available. Across the actual 19.486-second quiet observation, the two
+transit links carried 36,406 bytes combined (1,868 B/s).
+
+A separate earlier debug candidate, with temporary diagnostics still present,
+measured 1.90% of one CPU core for both Chat cores plus the router over a
+10-second sample. That CPU sample is not a measurement of the released native
+app or mobile battery use.
 
 The native iris-stack product fixture carries signed events and hash-verified
 192-KiB blobs between Chat and Drive through a Hashtree router that has no
@@ -410,11 +457,185 @@ exhaustion. Its resource gate samples both before the outage and after recovery:
 | Chat after authenticated receipts | Zero new EVENT/INV/WANT/REQ in 15 seconds | Durable outbox retries that fail to stop |
 | Pubsub tenfold spam scenario | At most 10% quiescent retained-state growth | Unbounded retained protocol state under hostile input |
 
+Three final runs using immutable Chat `a4cafb1b`, Drive `05751a82` and Hashtree
+`70519509` fixtures all passed. Median initial signed-event delivery was 92 ms,
+initial blob retrieval 227 ms, recovery after the intermediate restarted
+13.587 seconds, and fresh post-recovery blob retrieval 134 ms. Combined transit
+traffic was 2,564.5–2,652.6 B/s before the outage and 2,927.7–3,107.7 B/s after
+recovery. All 18 per-process CPU observations were available and measured
+1.00–1.53% of one core. Every checkpoint retained the required 1/2/1 direct-peer
+topology and zero relays. These short local fixture measurements establish the
+bounded known-identity slice, not browser discovery or day-long mobile use.
+
+The [hosted released-product lab](https://github.com/irislib/iris-stack/actions/runs/34403954478)
+also passed at Iris Stack `c706147`, installing the same public source pins with
+the standard release-profile builders. All three external-product tests passed.
+The optimized relayless fixture delivered four signed events and two verified
+blobs with the required 1/2/1 peers and zero public relays. Initial event delivery
+took 77 ms, the first blob 139 ms, router-restart recovery 13.155 seconds and the
+fresh blob 49 ms. Idle CPU was 0.33–0.40% per process; combined transit traffic
+was 2,660.5 B/s before the partition and 2,920.8 B/s after recovery. Each idle
+window lasted 15 seconds. These optimized Ubuntu results complement the local
+fixture runs; they do not measure a mobile application or hardware energy use.
+
 CPU sampling uses process CPU time, with Linux clock ticks or macOS subsecond
 accounting. Missing or corrupt measurements are reported explicitly, never as
-zero usage. The idle budgets are generous regression limits, not performance
-targets. They do not replace the simulator's active-load work/byte counters or
-an eventual hardware energy test.
+zero usage. CPU budgets are enforced when cumulative readings are available;
+unsupported sampling or missing tools is reported as unavailable. Other
+invocation, read or parse failures fail the gate. Both traffic samples require
+two live transit peers, so a disconnected router cannot pass by reporting zero
+traffic. The idle budgets are generous
+regression limits, not performance targets. They do not replace the simulator's
+active-load work/byte counters or an eventual hardware energy test.
+
+The standard `iris-stack/scripts/product-lab.sh` command runs these resource
+checks with the external product fixtures. Its relevant-path push/PR workflow
+and reusable workflow run that command. Ordinary `cargo test --all-targets`
+skips the ignored external-product tests, and upstream Chat, Drive and Hashtree
+releases do not automatically invoke the cross-product workflow. This release
+coordinates the final pinned matrix explicitly; continuous enforcement across
+every upstream release remains a separate integration step.
+
+Reviewing Drive's existing desktop CPU gates found measurement false passes:
+a required process could disappear or restart after an early observation;
+POSIX could clamp a reset CPU counter to zero; Windows could count absent or
+null performance data as zero. Commit `5c87c75a` requires the original required
+process set throughout the sample and rejects missing readings. Cumulative
+POSIX counters also reject resets; Windows uses formatted percentage readings.
+Controlled inputs through the actual script entry points reproduced six POSIX
+false passes across Linux/macOS and four under Windows PowerShell 5.1. The fixed
+scripts reject all those cases, still accept stable idle and still reject excess
+CPU. The original CPU thresholds, sampling windows and optional-role semantics
+remain unchanged. These are sampler regressions, separate from running native
+applications through their idle windows.
+
+The same review found duplicated iOS host and Android samplers could also
+accept a vanished or replaced app, reset CPU counters, and (on Android) missing
+or nonadvancing device uptime. Drive commit `9f42889d` reuses the hardened POSIX
+sampler for the iOS host path and checks Android process/counter continuity.
+Actual script entry points reproduce 11 former false passes; all 26 focused
+POSIX/mobile scenarios now pass their expected assertions. Reuse removes 99
+production lines, with the original budgets and windows preserved.
+
+An Android native run with optimized Rust code and the UI-test shell then
+passed the corrected gate after 90 seconds
+of settling and 60 seconds of sampling: 2.03% mean CPU, 2.78% peak, against the
+5% mean limit. The initialized, authorized profile had freshly active FIPS before
+the sample and two connected peers afterward. All nine Android UI tests and
+actual linking/file synchronization passed beforehand. This uses an emulator;
+it is not a physical-device energy measurement. An earlier iOS zero-CPU sample
+is excluded from active-mesh evidence because its app remained on setup and did
+not establish fresh FIPS activity. A stale simulator test override selected an
+old app-group path after reinstall. Clearing that override made the unchanged
+optimized app open the authorized profile and start FIPS in 1.174 seconds.
+The launch harness now clears an inherited override unless the caller explicitly
+sets one. The corrected optimized iOS simulator run then measured 2.28% average
+app CPU and 4.73% peak across 12 intervals, under the 5% mean limit, with the
+authorized profile and fresh FIPS activity checked throughout. This is host
+process CPU for a simulator, not a physical-device battery result.
+
+Linux's whole-second `ps` CPU accounting also proved too coarse near small
+budgets: 3.54 CPU seconds in a 60-second window (5.9%) could be reported as
+3 seconds (5%) and pass. Commit `8f31e717` reads the kernel's per-process user
+and system CPU ticks instead, rejects unreadable or corrupt counters, and
+preserves process selection and all budgets. Causal checks verify 0.2% usage,
+reject the former 5.9% false pass, and exercise malformed counters. All 36
+executed sampler/harness cases pass; the Windows-only class is separately
+covered by the earlier PowerShell 5.1 proof. The earlier optimized Linux GUI
+sample reported no CPU-time increase at whole-second resolution; it must not
+be read as proof of exactly zero CPU. The same optimized Linux binaries then
+passed a fresh 30-second settle/60-second sample with kernel counters: the GUI
+averaged 0.10% (0.20% peak) and its daemon 0.18% (0.40% peak), below the
+unchanged 5% and 10% limits. This was an authorized single-device profile with
+public discovery disabled; connected-mesh measurements remain separate.
+
+The optimized Windows app and daemon also passed the stock 30-second settle
+and 60-second sample with 12 intervals. Its formatted Windows performance
+counter reported 0% for both processes. That integer reading is not proof of
+exactly zero or subpercent CPU usage, and the sampler does not yet compare
+against cumulative kernel/user CPU time. UI Automation navigation and an
+isolated Cloud Files registration passed with both processes running as the
+same ordinary user. Visible-control bounds and foreground identity were checked,
+but the screenshots retained blank content and a stale desktop clock; visual
+verification is unavailable from those captures.
+
+Two further Drive harness regressions make the native checks trustworthy on
+shared machines. Windows GUI selection and cleanup now match the test's exact
+executable, preserving another running copy of the app. Cross-machine daemon
+checks transfer the invoking checkout's sampler, filter by the test's isolated
+configuration, and sample hosts sequentially. They previously loaded whatever
+sampler happened to be in the remote default checkout; the Windows filter could
+also include an unrelated daemon. Causal mocked-process and emitted-command
+tests cover these fixes. No CPU budget or sampling window was relaxed.
+
+A real Windows–Linux run then exposed another false-pass path in the remote
+runner: PowerShell processed the input as separate statements, skipped compound
+setup, and could continue after an error or silently accept incomplete syntax.
+Drive commit `77f0c624` sends one ASCII invocation that decodes and parses the
+entire UTF-8 script before executing it. The payload remains on stdin, avoiding
+command-line size limits. Ten actual PowerShell 5.1 cases pass, including
+128-KiB input, Unicode, malformed syntax and stopping before a later statement
+after a terminating error. The production encoder emits the exact tested bytes;
+portable helper/store checks pass ten tests with the native PowerShell method
+skipped there because it was exercised separately on Windows.
+
+The Windows–Linux functional run reports roughly 13–20 seconds for ordinary
+file-change checks. These are full test completion times: three-second polling,
+two stable matching snapshots, remote status/list calls and projection checks.
+They are not isolated transfer latency. Updates are event-driven rather than
+waiting on a corresponding periodic reconciliation timer. Root metadata can
+arrive before its asynchronous block download, so a local-only list may briefly
+report a missing chunk. The harness retries and requires complete matching
+snapshots before accepting convergence. Attributing latency needs mutation,
+root-receipt, block-completion and projection timestamps; no additional failure
+was established from those transient reads.
+
+Explicit Drive profiles also needed application isolation. Windows now scopes
+single-instance coordination, its local pipe and Cloud Files identity to the
+selected configuration while preserving the default profile's names. macOS maps
+each custom domain to its own configuration and storage instance; it no longer
+removes unrelated domains. Focused native-language regressions cover concurrent
+profiles and the mapping contract. The signed Mac VM run passed device linking
+and subsequent file-byte handoff, then an optional Finder-folder assertion hit
+the system's older-provider version guard. Backup was not reached in that run.
+No candidate domain was created or existing provider ownership replaced. Finder
+behavior remains unverified by this run; the standard signed/notarized artifact
+gate is separate and does not enable that optional assertion.
+
+The optimized Mac app subsequently passed its stock 60-second settle and
+60-second idle sample: app mean 0.20%/peak 0.59% against the 5% mean limit,
+daemon mean 0.56%/peak 0.79% against 10%. All 12 intervals retained the original
+process sets and an authorized profile with fresh FIPS. This uses the supported
+development configuration on a task-only copy: its file-backed executable
+sections match the signed originals, while signing metadata differs and sandbox
+restrictions are inactive. The notarized artifacts remain untouched. Earlier
+signed temporary-profile attempts failed sandbox access; the development
+fixture also needed its existing external-provider-runtime setting to avoid
+probing protected group storage before daemon startup. Those attempts are
+excluded from idle evidence.
+
+The standard Windows–Linux daemon matrix passed all functional phases, including
+restarts, concurrent edits, many small files and a large file, then sampled each
+host sequentially after 180 seconds of settling. Across 12 five-second intervals,
+Linux averaged 1.61% CPU (2.0% peak) and Windows 1.92% (6% peak), below the 10%
+mean limit. Linux uses cumulative kernel ticks; Windows uses integer formatted
+percentages. This matrix uses normal discovery/relay settings, separate from the
+zero-public-relay fixture proof. Its child exited successfully, but the outer
+supervisor caught and reaped a remaining local runner process group. Independent
+readback confirmed no owned remote processes, mounts or folders and unchanged
+existing Windows process identities. Focused watchdog tests, an actual Windows
+SSH start/stop and the complete orchestration with mocked endpoints all passed
+with no surviving process groups. They did not reproduce the original cleanup
+failure or identify its cause. The original supervisor exit 125 remains
+recorded separately from the successful product and CPU checks; no speculative
+cleanup change was made.
+
+Drive's live authorized-peer roster had a separate growth failure: initial
+binding truncated it to the pubsub capacity, but later refreshes did not.
+A shared helper now deduplicates, orders and bounds both paths consistently.
+The production capacity remains 64 with at most 63 routed identities. An actual
+endpoint/client regression with 70 authorized identities fails before the fix
+and passes afterward; smaller explicitly configured budgets remain respected.
 
 A controlled comparison using identical fixture binaries found no material
 idle saving from reducing the pubsub peer budget from 64 to 1: roughly
@@ -422,3 +643,30 @@ idle saving from reducing the pubsub peer budget from 64 to 1: roughly
 configurations. The production peer budget remains unchanged. A special retry
 or transit-exclusion mechanism would add complexity without a demonstrated
 benefit in this measurement.
+
+The remaining idle rate deserves further profiling: sustained continuously,
+2.6–2.8 KB/s would total roughly 225–242 MB/day of combined transit traffic.
+That is an extrapolation from short local samples, not a day-long measurement
+or a claim about mobile data use. Lowering this settled traffic
+while preserving the outage-recovery gates is a useful next performance target.
+The measurements do not yet attribute those bytes to individual FIPS control
+messages.
+
+Testing the real Drive CLI exposed an additional relayless startup failure:
+an explicitly empty relay list still entered the raw relay subscription path
+and terminated the daemon. Embedded browser storage also appended default
+resolver relays to an empty application relay list. Drive commit `9522c87b`
+honors the empty list in both paths, keeps direct FIPS processing active and
+skips a relay-only pending-approval retry worker when no relays are configured.
+The disabled relay receiver remains pending, avoiding an immediate-ready idle
+loop. Startup diagnostics now preserve the full error chain.
+
+A new production-daemon regression creates two independently keyed profiles
+and admits the second through signed offline roster operations. With relay,
+Blossom, WSS seed, LAN and rendezvous discovery all disabled, static loopback
+UDP peers start successfully and exchange signed roots and verified file bytes
+in both directions. The test passes in 45.77 seconds. Sequential 15-second
+idle samples measure 1.05% and 1.04% of one CPU core, with peaks of 1.84% and
+1.82%; the existing daemon limit is 10%. These are native debug CLI processes,
+not mobile application or battery measurements. Native package rebuilds and
+platform gates remain separate acceptance steps.
