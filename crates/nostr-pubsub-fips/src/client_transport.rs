@@ -1,8 +1,8 @@
 use std::sync::Weak;
 
 use super::{
-    ClientInner, ConnectedPeerLink, HashMap, HashSet, Ordering, PeerIdentity, TCP_POLL_INTERVAL,
-    TransportCommand, WireTcpDriver, mpsc, now_ms,
+    ClientInner, ConnectedPeerLink, HashMap, HashSet, Ordering, PeerIdentity, SourceId,
+    TCP_POLL_INTERVAL, TransportCommand, WireTcpDriver, mpsc, now_ms,
 };
 use crate::wire_tcp::WireTcpReport;
 
@@ -14,6 +14,10 @@ pub(super) async fn transport_loop(
     let mut poll_tick = tokio::time::interval(TCP_POLL_INTERVAL);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut known_links = HashMap::new();
+    // Startup subscriptions enqueue their REQs before the transport task starts.
+    if let Some(inner) = inner.upgrade() {
+        sync_transport_peers(&inner, &mut driver, &mut known_links).await;
+    }
     loop {
         let Some(inner) = inner.upgrade() else {
             break;
@@ -33,7 +37,8 @@ pub(super) async fn transport_loop(
                     }
                     TransportCommand::Cooldown { peer } => {
                         known_links.remove(&peer.npub());
-                        let _ = driver.abort_peer(peer).await;
+                        forget_peer_state(&inner, &peer.npub());
+                        let _ = driver.forget_peer(peer).await;
                     }
                 }
             }
@@ -78,14 +83,23 @@ async fn sync_transport_peers(
         .filter(|(npub, link_id)| next_links.get(*npub) != Some(*link_id))
         .filter_map(|(npub, _)| PeerIdentity::from_npub(npub).ok())
         .collect::<Vec<_>>();
+    driver
+        .select_peers(next_links.keys().cloned().collect())
+        .await;
     for peer in changed {
-        let _ = driver.abort_peer(peer).await;
+        if next_links.contains_key(&peer.npub()) {
+            let _ = driver.abort_peer(peer).await;
+        } else {
+            forget_peer_state(inner, &peer.npub());
+        }
     }
     for peer in peers {
         if inner.peer_is_in_cooldown(&peer.npub, now_ms()) {
             continue;
         }
-        let Some(identity) = peer_identity_for_connect(known_links, &peer) else {
+        let identity =
+            peer_identity_for_connect(known_links, &peer, driver.has_peer_connection(&peer.npub));
+        let Some(identity) = identity else {
             continue;
         };
         let _ = driver.connect_peer(identity, now_ms()).await;
@@ -93,11 +107,24 @@ async fn sync_transport_peers(
     *known_links = next_links;
 }
 
+fn forget_peer_state(inner: &ClientInner, peer_npub: &str) {
+    inner.reset_peer_epoch(peer_npub);
+    if let Ok(mut subscriptions) = inner.peer_subscriptions.lock() {
+        subscriptions.remove_peer(&SourceId::new(peer_npub));
+    }
+    if let Ok(mut subscriptions) = inner.lock_subscriptions() {
+        for subscription in subscriptions.values_mut() {
+            subscription.peers.remove(peer_npub);
+        }
+    }
+}
+
 pub(super) fn peer_identity_for_connect(
     known_links: &HashMap<String, u64>,
     peer: &ConnectedPeerLink,
+    has_connection: bool,
 ) -> Option<PeerIdentity> {
-    peer_link_needs_connect(known_links, &peer.npub, peer.link_id)
+    (!has_connection || peer_link_needs_connect(known_links, &peer.npub, peer.link_id))
         .then(|| PeerIdentity::from_npub(&peer.npub).ok())
         .flatten()
 }
@@ -128,7 +155,8 @@ async fn process_wire_report(
     for peer in report.newly_connected {
         if inner.peer_is_in_cooldown(&peer.npub(), now_ms()) {
             cooled_peers.insert(peer.npub());
-            let _ = driver.abort_peer(peer).await;
+            forget_peer_state(inner, &peer.npub());
+            let _ = driver.forget_peer(peer).await;
             continue;
         }
         inner.reset_peer_epoch(&peer.npub());
@@ -140,7 +168,8 @@ async fn process_wire_report(
         if cooled_peers.contains(&peer.npub()) || inner.peer_is_in_cooldown(&peer.npub(), now_ms())
         {
             if cooled_peers.insert(peer.npub()) {
-                let _ = driver.abort_peer(peer).await;
+                forget_peer_state(inner, &peer.npub());
+                let _ = driver.forget_peer(peer).await;
             }
             continue;
         }

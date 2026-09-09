@@ -28,6 +28,7 @@ use crate::client_transport::{
 
 mod reputation;
 mod state;
+mod turnover;
 
 #[test]
 fn tcp_timer_poll_matches_the_minimum_retransmission_granularity() {
@@ -57,7 +58,7 @@ fn stable_peer_link_does_not_decode_its_identity_again() {
     };
     let known = HashMap::from([(stable_peer.npub.clone(), stable_peer.link_id)]);
 
-    assert!(peer_identity_for_connect(&known, &stable_peer).is_none());
+    assert!(peer_identity_for_connect(&known, &stable_peer, true).is_none());
 
     let new_identity = Keys::generate()
         .public_key()
@@ -68,8 +69,16 @@ fn stable_peer_link_does_not_decode_its_identity_again() {
         link_id: 8,
     };
     assert_eq!(
-        peer_identity_for_connect(&known, &changed_peer)
+        peer_identity_for_connect(&known, &changed_peer, true)
             .expect("changed link identity")
+            .npub(),
+        new_identity
+    );
+    let known = HashMap::from([(changed_peer.npub.clone(), changed_peer.link_id)]);
+    assert!(peer_identity_for_connect(&known, &changed_peer, true).is_none());
+    assert_eq!(
+        peer_identity_for_connect(&known, &changed_peer, false)
+            .expect("failed or closed TCP stream must retry without a new FIPS link")
             .npub(),
         new_identity
     );

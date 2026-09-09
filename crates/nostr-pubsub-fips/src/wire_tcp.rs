@@ -31,6 +31,7 @@ pub(crate) struct WireTcpReport {
 
 pub(crate) struct WireTcpDriver {
     local_npub: String,
+    selected_peers: BTreeSet<String>,
     tcp: FipsTcpEndpoint,
     options: WireTcpOptions,
     connections: HashMap<ConnectionId, TrackedConnection>,
@@ -66,6 +67,7 @@ impl WireTcpDriver {
             .map_err(|error| storage_error("bind TCP/FIPS Nostr pubsub service", error))?;
         Ok(Self {
             local_npub,
+            selected_peers: BTreeSet::new(),
             tcp,
             options,
             connections: HashMap::new(),
@@ -75,9 +77,8 @@ impl WireTcpDriver {
         })
     }
 
-    pub async fn connect_peer(&mut self, peer: PeerIdentity, now_ms: u64) -> Result<()> {
-        let peer_npub = peer.npub();
-        if self.connections.iter().any(|(id, connection)| {
+    pub fn has_peer_connection(&self, peer_npub: &str) -> bool {
+        self.connections.iter().any(|(id, connection)| {
             connection.peer == peer_npub
                 && matches!(
                     self.tcp.state(*id),
@@ -85,7 +86,27 @@ impl WireTcpDriver {
                         State::SynSent | State::SynReceived | State::Established | State::CloseWait
                     )
                 )
-        }) {
+        })
+    }
+
+    pub async fn select_peers(&mut self, peers: BTreeSet<String>) {
+        let removed = self
+            .selected_peers
+            .difference(&peers)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.selected_peers = peers;
+        for peer in removed {
+            if let Ok(peer) = PeerIdentity::from_npub(&peer) {
+                let _ = self.forget_peer(peer).await;
+            }
+        }
+    }
+
+    pub async fn connect_peer(&mut self, peer: PeerIdentity, now_ms: u64) -> Result<()> {
+        let peer_npub = peer.npub();
+        self.ensure_peer_selected(&peer_npub)?;
+        if self.has_peer_connection(&peer_npub) {
             return Ok(());
         }
         self.ensure_peer_capacity(&peer_npub)?;
@@ -105,6 +126,7 @@ impl WireTcpDriver {
     }
 
     pub fn queue_frame(&mut self, peer: PeerIdentity, frame: &[u8]) -> Result<()> {
+        self.ensure_peer_selected(&peer.npub())?;
         if frame.len() > self.options.frame_capacity {
             return Err(storage(format!(
                 "Nostr pubsub frame is {} bytes, maximum is {}",
@@ -164,12 +186,12 @@ impl WireTcpDriver {
             .iter()
             .filter_map(|(id, connection)| (connection.peer == peer_npub).then_some(*id))
             .collect::<Vec<_>>();
+        let mut last_error = None;
         for id in ids {
-            if self.tcp.state(id).is_some() {
-                self.tcp
-                    .abort(id)
-                    .await
-                    .map_err(|error| storage_error("abort TCP/FIPS Nostr pubsub peer", error))?;
+            if self.tcp.state(id).is_some()
+                && let Err(error) = self.tcp.abort(id).await
+            {
+                last_error = Some(storage_error("abort TCP/FIPS Nostr pubsub peer", error));
             }
             self.connections.remove(&id);
         }
@@ -178,7 +200,13 @@ impl WireTcpDriver {
         if let Some(queue) = self.queues.get_mut(&peer_npub) {
             queue.restart();
         }
-        Ok(())
+        last_error.map_or(Ok(()), Err)
+    }
+
+    pub async fn forget_peer(&mut self, peer: PeerIdentity) -> Result<()> {
+        self.selected_peers.remove(&peer.npub());
+        self.queues.remove(&peer.npub());
+        self.abort_peer(peer).await
     }
 
     pub(crate) fn connection_count(&self) -> usize {
@@ -408,6 +436,7 @@ impl WireTcpDriver {
     }
 
     fn ensure_peer_capacity(&self, peer: &str) -> Result<()> {
+        self.ensure_peer_selected(peer)?;
         let peers = self
             .connections
             .values()
@@ -418,6 +447,13 @@ impl WireTcpDriver {
                 "TCP/FIPS pubsub peer limit is {}",
                 self.options.peer_capacity
             )));
+        }
+        Ok(())
+    }
+
+    fn ensure_peer_selected(&self, peer: &str) -> Result<()> {
+        if !self.selected_peers.contains(peer) {
+            return Err(storage("TCP/FIPS Nostr pubsub peer is no longer selected"));
         }
         Ok(())
     }
@@ -537,4 +573,79 @@ fn storage(message: impl Into<String>) -> PubsubError {
 
 fn storage_error(context: &str, error: impl std::fmt::Display) -> PubsubError {
     storage(format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fips_core::config::{IdentityConfig, SimTransportConfig, TransportInstances};
+    use fips_core::{Config, Identity, SimNetwork, register_sim_network, unregister_sim_network};
+
+    #[tokio::test]
+    async fn deselection_releases_queued_records_while_link_refresh_rewinds_them() {
+        let network = format!("pubsub-wire-queue-{}", std::process::id());
+        register_sim_network(&network, SimNetwork::new(7375));
+        let mut config = Config::new();
+        config.node.identity = IdentityConfig {
+            nsec: Some(hex::encode([71; 32])),
+            persistent: false,
+        };
+        config.node.discovery.nostr.enabled = false;
+        config.transports.sim = TransportInstances::Single(SimTransportConfig {
+            network: Some(network.clone()),
+            addr: Some("queue-local".to_string()),
+            auto_connect: Some(false),
+            ..Default::default()
+        });
+        let endpoint = Arc::new(
+            Box::pin(
+                FipsEndpoint::builder()
+                    .config(config)
+                    .without_system_tun()
+                    .bind(),
+            )
+            .await
+            .unwrap(),
+        );
+        let mut driver = WireTcpDriver::bind(
+            endpoint.clone(),
+            WireTcpOptions {
+                frame_capacity: 1024,
+                peer_capacity: 1,
+                queue_records_per_peer: 4,
+                queue_bytes_per_peer: 4096,
+                drive_io_bytes: 4096,
+                drive_frames: 4,
+            },
+            73,
+        )
+        .await
+        .unwrap();
+        let early =
+            PeerIdentity::from_npub(&Identity::from_secret_bytes(&[72; 32]).unwrap().npub())
+                .unwrap();
+        let late = PeerIdentity::from_npub(&Identity::from_secret_bytes(&[73; 32]).unwrap().npub())
+            .unwrap();
+        driver.select_peers(BTreeSet::from([early.npub()])).await;
+        driver.queue_frame(early, b"partly-written").unwrap();
+        let queued = driver.queues.get_mut(&early.npub()).unwrap();
+        queued.records.front_mut().unwrap().offset = 3;
+        queued.bytes -= 3;
+
+        driver.abort_peer(early).await.unwrap();
+        let queued = driver.queues.get(&early.npub()).unwrap();
+        assert_eq!(queued.records.front().unwrap().offset, 0);
+        assert_eq!(queued.bytes, b"partly-written".len() + 4);
+
+        driver.select_peers(BTreeSet::from([late.npub()])).await;
+        assert!(!driver.queues.contains_key(&early.npub()));
+        assert!(driver.queue_frame(early, b"delayed old command").is_err());
+        assert!(driver.connect_peer(early, 0).await.is_err());
+        driver.queue_frame(late, b"replacement request").unwrap();
+        assert_eq!(driver.queues.len(), 1);
+        assert!(driver.queues.contains_key(&late.npub()));
+        drop(driver);
+        endpoint.shutdown().await.unwrap();
+        unregister_sim_network(&network);
+    }
 }
