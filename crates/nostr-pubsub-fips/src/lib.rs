@@ -68,7 +68,8 @@ pub struct FipsPubsubClientOptions {
     pub query_timeout: Duration,
     /// Maximum encoded Nostr frame accepted from or sent to a peer.
     pub max_frame_bytes: usize,
-    /// Maximum connected FIPS peers retained by the client.
+    /// Maximum connected FIPS peers retained by the client. A larger endpoint
+    /// mesh uses a stable bounded subset without disconnecting its other links.
     pub max_connected_peers: usize,
     /// Maximum subscribed peers selected for one live inventory fanout.
     pub fanout: usize,

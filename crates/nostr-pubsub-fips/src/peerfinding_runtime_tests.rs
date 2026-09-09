@@ -159,6 +159,84 @@ async fn public_fips_adverts_are_default_relayless_multihop_subscriptions() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_capacity_keeps_a_bounded_working_subset_of_a_larger_mesh() {
+    let network_id = format!("nostr-pubsub-fips-peer-capacity-{}", std::process::id());
+    let (endpoint_a, endpoint_b, endpoint_c) = policy_advert_mesh(&network_id).await;
+    let client_b = FipsPubsubClient::start_for_transport(
+        Arc::clone(&endpoint_b),
+        FipsPubsubClientOptions {
+            max_connected_peers: 1,
+            fanout: 1,
+            ..Default::default()
+        },
+        "sim",
+    )
+    .await
+    .expect("extra authenticated mesh peers must not disable pubsub");
+    let selected = client_b
+        .inner
+        .connected_peer_links()
+        .await
+        .expect("bounded peers");
+    assert_eq!(selected.len(), 1);
+    let selected_endpoint = if selected[0].npub == endpoint_a.npub() {
+        &endpoint_a
+    } else {
+        assert_eq!(selected[0].npub, endpoint_c.npub());
+        &endpoint_c
+    };
+    let provider = start_client(selected_endpoint).await;
+    wait_for_pubsub_connections(&client_b, 1).await;
+    wait_for_peer_subscriptions(&provider, 1).await;
+
+    let mut subscription = client_b
+        .subscribe(vec![Filter::new().kind(Kind::TextNote)])
+        .await
+        .expect("subscribe while endpoint degree exceeds client capacity");
+    wait_for_peer_subscriptions(&provider, 2).await;
+    let event = VerifiedEvent::try_from(
+        EventBuilder::text_note("delivery at peer capacity")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event"),
+    )
+    .expect("verify event");
+    provider
+        .publish(event.clone(), EventSource::local_index("capacity-test"))
+        .await
+        .expect("publish over the retained peer");
+    let delivered = timeout(Duration::from_secs(5), subscription.recv())
+        .await
+        .expect("delivery over bounded peer subset")
+        .expect("live subscription");
+    assert_eq!(delivered.event, event);
+    assert_eq!(
+        client_b
+            .connected_peer_count()
+            .expect("bounded stream count"),
+        1
+    );
+    assert_eq!(
+        endpoint_b
+            .peers()
+            .await
+            .expect("FIPS peers")
+            .iter()
+            .filter(|peer| peer.connected && peer.transport_type.as_deref() == Some("sim"))
+            .count(),
+        2,
+        "pubsub capacity must not disconnect application-owned FIPS links"
+    );
+
+    subscription.close();
+    client_b.shutdown().await;
+    provider.shutdown().await;
+    for endpoint in [&endpoint_a, &endpoint_b, &endpoint_c] {
+        endpoint.shutdown().await.expect("shutdown endpoint");
+    }
+    unregister_sim_network(&network_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn social_graph_rejected_advert_is_not_cached_or_forwarded() {
     let network_id = format!("nostr-pubsub-fips-advert-policy-{}", std::process::id());
     let (endpoint_a, endpoint_b, endpoint_c) = policy_advert_mesh(&network_id).await;

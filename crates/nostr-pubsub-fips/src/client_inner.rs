@@ -71,14 +71,9 @@ impl ClientInner {
             .collect::<Vec<_>>();
         peers.sort_unstable_by(|left, right| left.npub.cmp(&right.npub));
         peers.dedup_by(|left, right| left.npub == right.npub);
-        if peers.len() > self.options.max_connected_peers {
-            return Err(PubsubError::Storage(format!(
-                "connected local {} peer count {} exceeds limit {}",
-                self.peer_transport.unwrap_or("FIPS"),
-                peers.len(),
-                self.options.max_connected_peers
-            )));
-        }
+        // Endpoint connectivity belongs to the application. Keep pubsub bounded
+        // without disabling every existing stream when the wider mesh grows.
+        peers.truncate(self.options.max_connected_peers);
         Ok(peers)
     }
 
