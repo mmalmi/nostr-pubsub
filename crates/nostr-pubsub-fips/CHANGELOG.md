@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0 - 2026-09-09
+
+- Reach known application service identities through ordinary FIPS routing,
+  including intermediates that run no pubsub client. Replace the bounded routed
+  roster without rebuilding application subscriptions.
+- Add `routed_peers` to `FipsPubsubClientOptions`. Existing explicit struct
+  literals must add this field or use `..Default::default()`; this source change
+  is why the release advances to 0.5. The wire protocol is unchanged.
+- Preserve a stable bounded subset when the endpoint has more physical peers
+  than pubsub capacity. Release all old peer state and queue capacity on
+  selection turnover; retain/replay subscriptions across recovered streams.
+- Update to `nvpn-fips-core` 0.4.77 and `nvpn-fips-tcp-endpoint` 0.2.13,
+  including bounded future timestamp skew for signed routing ratings.
+
+## 0.4.19 - 2026-09-08
+
+- Update to `nvpn-fips-core` 0.4.76 and `nvpn-fips-tcp-endpoint` 0.2.12
+  for UDP receive error backoff. Wire formats are unchanged.
+
 ## 0.4.18 - 2026-09-07
 
 - Update to `nvpn-fips-core` 0.4.75 and `nvpn-fips-tcp-endpoint` 0.2.11 so

@@ -330,7 +330,8 @@ end-to-end authenticated TCP stream; intermediate nodes need no pubsub service.
 A three-node regression verifies bidirectional signed events, a one-stream
 capacity, no direct endpoint shortcut, invalid roster updates leaving the
 current roster intact, and subscription recovery after roster removal/rejoin.
-The adapter suite passes 45 tests; the unchanged simulator's production-scale
+The adapter suite passes 46 tests, including the same three-node exchange over
+real loopback UDP with Nostr, LAN, and local discovery disabled. The unchanged simulator's production-scale
 release matrix and retained-state gates pass again.
 
 A single general reputation prior is enough for the current scope. Measured

@@ -35,6 +35,48 @@ async fn known_service_peers_exchange_events_through_an_uninterested_router() {
     let c = live_endpoint(&network_id, "c", [73; 32], [(b_identity.npub(), "b")]).await;
     wait_for_connected_peer(&a, b.npub()).await;
     wait_for_connected_peer(&c, b.npub()).await;
+    check_routed_exchange(a, b, c).await;
+    unregister_sim_network(&network_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn known_service_peers_exchange_events_over_real_udp_without_discovery() {
+    let b = udp_endpoint([82; 32], Vec::new()).await;
+    let address = b.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+    let a = udp_endpoint([81; 32], vec![PeerConfig::new(b.npub(), "udp", &address)]).await;
+    let c = udp_endpoint([83; 32], vec![PeerConfig::new(b.npub(), "udp", &address)]).await;
+    check_routed_exchange(a, b, c).await;
+}
+
+async fn udp_endpoint(secret: [u8; 32], peers: Vec<PeerConfig>) -> Arc<FipsEndpoint> {
+    let mut config = Config::new();
+    config.node.identity = IdentityConfig {
+        nsec: Some(hex::encode(secret)),
+        persistent: false,
+    };
+    config.node.discovery.nostr.enabled = false;
+    config.node.discovery.local.enabled = false;
+    config.node.discovery.lan.enabled = false;
+    config.transports.udp = TransportInstances::Single(fips_core::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".into()),
+        advertise_on_nostr: Some(false),
+        accept_connections: Some(true),
+        ..Default::default()
+    });
+    config.peers = peers;
+    Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(config)
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .unwrap(),
+    )
+}
+
+async fn check_routed_exchange(a: Arc<FipsEndpoint>, b: Arc<FipsEndpoint>, c: Arc<FipsEndpoint>) {
     let options = |npub: &str| FipsPubsubClientOptions {
         routed_peers: vec![npub.to_owned()],
         max_connected_peers: 1,
@@ -118,7 +160,6 @@ async fn known_service_peers_exchange_events_through_an_uninterested_router() {
     for endpoint in [a, b, c] {
         endpoint.shutdown().await.unwrap();
     }
-    unregister_sim_network(&network_id);
 }
 
 fn signed_note(content: &str) -> VerifiedEvent {
