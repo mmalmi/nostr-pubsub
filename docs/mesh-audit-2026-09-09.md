@@ -315,3 +315,28 @@ cross-product relay-removal benchmark is claimed by these results.
 
 Products pin published dependencies. Local fixes in capability repositories
 require a separate tested dependency rollout before installed products benefit.
+
+## Native routed-service slice
+
+The next bounded acceptance target is signed control events and hash-verified
+blobs between known native application identities through an uninterested FIPS
+router, including automatic recovery after that router restarts. It does not
+assume that every physical neighbour subscribes to the same application topics.
+
+The high-level pubsub client previously selected only authenticated direct
+neighbours. An application can now supply a bounded `routed_peers` roster and
+replace it while subscriptions remain alive. Ordinary FIPS routing carries the
+end-to-end authenticated TCP stream; intermediate nodes need no pubsub service.
+A three-node regression verifies bidirectional signed events, a one-stream
+capacity, no direct endpoint shortcut, invalid roster updates leaving the
+current roster intact, and subscription recovery after roster removal/rejoin.
+The adapter suite passes 45 tests; the unchanged simulator's production-scale
+release matrix and retained-state gates pass again.
+
+A single general reputation prior is enough for the current scope. Measured
+latency, failed requests, and invalid payloads are local operational evidence,
+not additional global character scores. Authority to influence another peer's
+reputation remains explicit: FIPS accepts ratings from self or configured
+trusted authors. Good service alone must not silently grant that authority.
+The poisoning tests show why that boundary matters even if connection selection
+uses one score. No new transport/blob/rater score dimensions are introduced.

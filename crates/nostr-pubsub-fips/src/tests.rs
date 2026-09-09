@@ -27,6 +27,7 @@ use crate::client_transport::{
 };
 
 mod reputation;
+mod routed;
 mod state;
 mod turnover;
 

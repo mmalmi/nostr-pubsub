@@ -20,6 +20,18 @@ list. Applications with a social-graph policy should use
 `FipsPubsubClient::start_with_policy`; admission runs before local delivery,
 replay retention, or forwarding.
 
+Applications can supply known service identities in
+`FipsPubsubClientOptions::routed_peers`, then replace that bounded roster using
+`set_routed_peers` as authorized devices join or leave. These destinations take
+priority within the connection limit and use ordinary authenticated FIPS
+routing. Intermediate nodes need no pubsub service or matching subscription.
+The roster provides identities, not physical addresses or a separate routing
+protocol; the endpoint still needs a working route. Restricting peer transports
+and routed identities cannot be combined because the endpoint API does not
+expose every transport along an indirect path.
+The supplied roster must fit `max_connected_peers`; temporarily unreachable
+configured identities retain their slots until the application removes them.
+
 Live mesh delivery is inventory-first. For every new event, providers send a
 small `INV` containing every matching open `REQ` subscription ID for that peer.
 A receiver dedupes the event ID across all peers and all of its live

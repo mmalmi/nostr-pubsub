@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 mod client_inner;
+mod client_peers;
 mod client_transport;
 mod peerfinding;
 mod pending_wants;
@@ -71,6 +72,11 @@ pub struct FipsPubsubClientOptions {
     /// Maximum connected FIPS peers retained by the client. A larger endpoint
     /// mesh uses a stable bounded subset without disconnecting its other links.
     pub max_connected_peers: usize,
+    /// Known pubsub service identities reachable through FIPS routing, even
+    /// without a direct link. These take priority within `max_connected_peers`.
+    /// Transport-restricted clients cannot use routed peers because a routed
+    /// path's underlying transports are not exposed by the endpoint API.
+    pub routed_peers: Vec<String>,
     /// Maximum subscribed peers selected for one live inventory fanout.
     pub fanout: usize,
     /// Maximum simultaneous application streaming or query subscriptions.
@@ -94,6 +100,7 @@ impl Default for FipsPubsubClientOptions {
             query_timeout: Duration::from_millis(500),
             max_frame_bytes: FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES,
             max_connected_peers: 64,
+            routed_peers: Vec::new(),
             fanout: DEFAULT_INV_WANT_FANOUT,
             max_active_subscriptions: 64,
             max_filters_per_subscription: 4,
@@ -105,6 +112,25 @@ impl Default for FipsPubsubClientOptions {
 }
 
 impl FipsPubsubClientOptions {
+    fn wire_tcp_options(&self) -> WireTcpOptions {
+        let records = self
+            .max_active_subscriptions
+            .saturating_add(1)
+            .saturating_add(self.max_replay_events)
+            .saturating_add(1);
+        WireTcpOptions {
+            frame_capacity: self.max_frame_bytes,
+            peer_capacity: self.max_connected_peers,
+            queue_records_per_peer: records,
+            queue_bytes_per_peer: self
+                .max_frame_bytes
+                .saturating_add(4)
+                .saturating_mul(records),
+            drive_io_bytes: 512 * 1_024,
+            drive_frames: self.receive_batch_size,
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if self.query_timeout.is_zero() {
             return Err(invalid_option("query_timeout must be greater than zero"));
@@ -292,6 +318,12 @@ impl FipsPubsubClient {
         event_policy: Option<Arc<dyn PubsubPolicy>>,
     ) -> Result<Self> {
         options.validate()?;
+        let routed_peers = client_peers::validate_routed_peers(
+            options.routed_peers.clone(),
+            options.max_connected_peers,
+            endpoint.npub(),
+            peer_transport.is_some() || !excluded_peer_transports.is_empty(),
+        )?;
         let codec = FipsPubsubWireCodec::new(options.max_frame_bytes)?;
         let subscription_capacity = options.max_active_subscriptions.saturating_add(1);
         let subscription_limits = PubsubSubscriptionLimits {
@@ -304,23 +336,9 @@ impl FipsPubsubClient {
             .saturating_mul(options.max_replay_events)
             .max(1);
         let max_pending_alternatives = options.max_connected_peers;
-        let max_queued_records_per_peer = subscription_capacity
-            .saturating_add(options.max_replay_events)
-            .saturating_add(1);
-        let max_queued_bytes_per_peer = options
-            .max_frame_bytes
-            .saturating_add(4)
-            .saturating_mul(max_queued_records_per_peer);
         let driver = WireTcpDriver::bind(
             Arc::clone(&endpoint),
-            WireTcpOptions {
-                frame_capacity: options.max_frame_bytes,
-                peer_capacity: options.max_connected_peers,
-                queue_records_per_peer: max_queued_records_per_peer,
-                queue_bytes_per_peer: max_queued_bytes_per_peer,
-                drive_io_bytes: 512 * 1_024,
-                drive_frames: options.receive_batch_size,
-            },
+            options.wire_tcp_options(),
             tcp_isn_seed(endpoint.npub()),
         )
         .await?;
@@ -333,6 +351,7 @@ impl FipsPubsubClient {
             endpoint: Arc::clone(&endpoint),
             codec,
             options,
+            routed_peers: Mutex::new(routed_peers),
             peer_transport,
             excluded_peer_transports,
             event_policy,
@@ -389,6 +408,25 @@ impl FipsPubsubClient {
     #[must_use]
     pub fn options(&self) -> &FipsPubsubClientOptions {
         &self.inner.options
+    }
+
+    /// Replace application-known service identities without rebuilding live
+    /// subscriptions. The transport applies the bounded roster on its next
+    /// poll. Invalid input leaves the previous roster unchanged.
+    /// [`Self::options`] continues to describe the initial configuration.
+    pub fn set_routed_peers(&self, peers: Vec<String>) -> Result<()> {
+        let peers = client_peers::validate_routed_peers(
+            peers,
+            self.inner.options.max_connected_peers,
+            self.inner.endpoint.npub(),
+            self.inner.peer_transport.is_some() || !self.inner.excluded_peer_transports.is_empty(),
+        )?;
+        *self
+            .inner
+            .routed_peers
+            .lock()
+            .map_err(|_| poisoned("FIPS routed peers"))? = peers;
+        Ok(())
     }
 
     pub fn connected_peer_count(&self) -> Result<usize> {

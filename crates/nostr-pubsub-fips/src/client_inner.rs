@@ -17,6 +17,7 @@ pub(super) struct ClientInner {
     pub(super) endpoint: Arc<FipsEndpoint>,
     pub(super) codec: FipsPubsubWireCodec,
     pub(super) options: FipsPubsubClientOptions,
+    pub(super) routed_peers: Mutex<Vec<String>>,
     pub(super) peer_transport: Option<&'static str>,
     pub(super) excluded_peer_transports: HashSet<String>,
     pub(super) event_policy: Option<Arc<dyn PubsubPolicy>>,
@@ -46,37 +47,6 @@ pub(super) struct ClientInner {
 }
 
 impl ClientInner {
-    pub(super) async fn connected_peer_links(&self) -> Result<Vec<ConnectedPeerLink>> {
-        let snapshot = self
-            .endpoint
-            .peers()
-            .await
-            .map_err(|error| storage_error("snapshot FIPS peers", error))?;
-        let mut peers = snapshot
-            .into_iter()
-            .filter(|peer| {
-                peer.connected
-                    && self
-                        .peer_transport
-                        .is_none_or(|transport| peer.transport_type.as_deref() == Some(transport))
-                    && peer
-                        .transport_type
-                        .as_deref()
-                        .is_none_or(|transport| !self.excluded_peer_transports.contains(transport))
-            })
-            .map(|peer| ConnectedPeerLink {
-                npub: peer.npub,
-                link_id: peer.link_id,
-            })
-            .collect::<Vec<_>>();
-        peers.sort_unstable_by(|left, right| left.npub.cmp(&right.npub));
-        peers.dedup_by(|left, right| left.npub == right.npub);
-        // Endpoint connectivity belongs to the application. Keep pubsub bounded
-        // without disabling every existing stream when the wider mesh grows.
-        peers.truncate(self.options.max_connected_peers);
-        Ok(peers)
-    }
-
     pub(super) async fn connected_peers(&self) -> Result<Vec<ConnectedPeer>> {
         self.connected_peer_links()
             .await?
