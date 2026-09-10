@@ -12,7 +12,7 @@ use crate::{FIPS_NOSTR_PUBSUB_CAPABILITY, FIPS_NOSTR_PUBSUB_SERVICE_PORT};
 
 const IO_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_READY_INPUT_TURNS: usize = 16;
-const SERVICE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const SERVICE_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
 type ReceivedFrames = Vec<(PeerIdentity, Vec<u8>)>;
 

@@ -35,7 +35,7 @@ async fn rejected_service_recovers(accept_close: bool) {
     })
     .await
     .expect("the actual client sent its initial SYN");
-    let until = Instant::now() + Duration::from_millis(1_300);
+    let until = Instant::now() + Duration::from_millis(3_300);
     while Instant::now() < until {
         if accept_close {
             // Public API actions reach TransportCommand::Send independently of
@@ -101,8 +101,8 @@ async fn rejected_service_recovers(accept_close: bool) {
         matches!(&delivered, Ok(Some(delivery)) if delivery.event == event),
     );
     assert!(
-        gaps.iter().all(|gap| *gap >= Duration::from_millis(950)),
-        "service retries must be at least one second apart (50 ms receive scheduling allowance): {gaps:?}"
+        gaps.iter().all(|gap| *gap >= Duration::from_millis(2_950)),
+        "service retries must be at least three seconds apart (50 ms receive scheduling allowance): {gaps:?}"
     );
     if accept_close {
         assert!(
