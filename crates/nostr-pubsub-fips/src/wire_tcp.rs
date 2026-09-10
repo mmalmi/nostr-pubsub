@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use fips_core::discovery::local::LocalInstanceCapability;
 use fips_core::{FipsEndpoint, PeerIdentity};
@@ -11,6 +12,7 @@ use crate::{FIPS_NOSTR_PUBSUB_CAPABILITY, FIPS_NOSTR_PUBSUB_SERVICE_PORT};
 
 const IO_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_READY_INPUT_TURNS: usize = 16;
+const SERVICE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 type ReceivedFrames = Vec<(PeerIdentity, Vec<u8>)>;
 
@@ -34,7 +36,9 @@ pub(crate) struct WireTcpReport {
 
 pub(crate) struct WireTcpDriver {
     local_npub: String,
-    selected_peers: BTreeSet<String>,
+    // Next outbound attempt per selected peer; failed/short-lived services must
+    // not turn the polling timer or application sends into a handshake loop.
+    selected_peers: BTreeMap<String, Option<Instant>>,
     tcp: FipsTcpEndpoint,
     options: WireTcpOptions,
     connections: HashMap<ConnectionId, TrackedConnection>,
@@ -70,7 +74,7 @@ impl WireTcpDriver {
             .map_err(|error| storage_error("bind TCP/FIPS Nostr pubsub service", error))?;
         Ok(Self {
             local_npub,
-            selected_peers: BTreeSet::new(),
+            selected_peers: BTreeMap::new(),
             tcp,
             options,
             connections: HashMap::new(),
@@ -95,10 +99,14 @@ impl WireTcpDriver {
     pub async fn select_peers(&mut self, peers: BTreeSet<String>) {
         let removed = self
             .selected_peers
-            .difference(&peers)
+            .keys()
+            .filter(|peer| !peers.contains(*peer))
             .cloned()
             .collect::<Vec<_>>();
-        self.selected_peers = peers;
+        self.selected_peers.retain(|peer, _| peers.contains(peer));
+        for peer in peers {
+            self.selected_peers.entry(peer).or_default();
+        }
         for peer in removed {
             if let Ok(peer) = PeerIdentity::from_npub(&peer) {
                 let _ = self.forget_peer(peer).await;
@@ -112,7 +120,17 @@ impl WireTcpDriver {
         if self.has_peer_connection(&peer_npub) {
             return Ok(());
         }
+        if self.selected_peers[&peer_npub].is_some_and(|retry_at| Instant::now() < retry_at) {
+            return Ok(());
+        }
         self.ensure_peer_capacity(&peer_npub)?;
+        // Keep this deadline through connect errors, stream closes and link
+        // refreshes. Only deselection releases it along with the peer's queue.
+        // Wall-clock adjustments must not bypass or prolong this retry delay.
+        self.selected_peers.insert(
+            peer_npub.clone(),
+            Some(Instant::now() + SERVICE_RETRY_INTERVAL),
+        );
         let id = self
             .tcp
             .connect(peer, now_ms)
@@ -462,7 +480,7 @@ impl WireTcpDriver {
     }
 
     fn ensure_peer_selected(&self, peer: &str) -> Result<()> {
-        if !self.selected_peers.contains(peer) {
+        if !self.selected_peers.contains_key(peer) {
             return Err(storage("TCP/FIPS Nostr pubsub peer is no longer selected"));
         }
         Ok(())
@@ -730,6 +748,7 @@ mod tests {
         let late = PeerIdentity::from_npub(&Identity::from_secret_bytes(&[73; 32]).unwrap().npub())
             .unwrap();
         driver.select_peers(BTreeSet::from([early.npub()])).await;
+        driver.connect_peer(early, 100).await.unwrap();
         driver.queue_frame(early, b"partly-written").unwrap();
         let queued = driver.queues.get_mut(&early.npub()).unwrap();
         queued.records.front_mut().unwrap().offset = 3;
@@ -740,6 +759,16 @@ mod tests {
         assert_eq!(queued.records.front().unwrap().offset, 0);
         assert_eq!(queued.bytes, b"partly-written".len() + 4);
 
+        // A link refresh keeps queued data and the remaining retry deadline.
+        driver.select_peers(BTreeSet::from([early.npub()])).await;
+        driver.connect_peer(early, u64::MAX).await.unwrap();
+        assert_eq!(driver.connection_count(), 0);
+        driver.connect_peer(early, 0).await.unwrap();
+        assert_eq!(driver.connection_count(), 0);
+        tokio::time::sleep(SERVICE_RETRY_INTERVAL).await;
+        driver.connect_peer(early, 0).await.unwrap();
+        assert_eq!(driver.connection_count(), 1);
+
         driver.select_peers(BTreeSet::from([late.npub()])).await;
         assert!(!driver.queues.contains_key(&early.npub()));
         assert!(driver.queue_frame(early, b"delayed old command").is_err());
@@ -747,6 +776,9 @@ mod tests {
         driver.queue_frame(late, b"replacement request").unwrap();
         assert_eq!(driver.queues.len(), 1);
         assert!(driver.queues.contains_key(&late.npub()));
+        assert_eq!(driver.selected_peers.len(), 1);
+        driver.connect_peer(late, 1_100).await.unwrap();
+        assert_eq!(driver.connection_count(), 1);
         drop(driver);
         endpoint.shutdown().await.unwrap();
         unregister_sim_network(&network);

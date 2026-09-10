@@ -31,6 +31,7 @@ mod peer_policy;
 mod replay;
 mod reputation;
 mod routed;
+mod service_retry;
 mod shutdown;
 mod state;
 mod turnover;
