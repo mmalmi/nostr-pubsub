@@ -39,6 +39,14 @@ bounded. `reputation_error_count()` exposes failed updates or publications.
 Ratings are retained in memory and recover through available peer replay; use
 the policy facade directly when the application needs durable rating storage.
 
+Applications sharing a client through `Arc` must call
+`client.shutdown_shared().await` before stopping its FIPS endpoint. It closes
+subscriptions, rejects new publication/query/subscription work, and joins every
+owned task even while providers retain the client. Concurrent shutdown callers
+wait for completion; a cancelled caller leaves unfinished joins available to
+the next caller. The consuming `shutdown().await` remains available. Client
+shutdown leaves the application-owned endpoint running.
+
 The high-level client uses the same bounded quality selector as the lower-level
 mesh. With a peer policy, direct connections and inventory fanout prefer higher
 scores while retaining `unknown_peer_reserve` exploration slots (one by default).

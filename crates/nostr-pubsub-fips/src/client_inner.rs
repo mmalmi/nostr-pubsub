@@ -14,6 +14,7 @@ use crate::recent_events::{CachedEvent, RecentEvents, deliver_local};
 use crate::seen_ids::ScopedSeenIds;
 
 pub(super) struct ClientInner {
+    pub(super) admission: Mutex<bool>,
     pub(super) endpoint: Arc<FipsEndpoint>,
     pub(super) codec: FipsPubsubWireCodec,
     pub(super) options: FipsPubsubClientOptions,
@@ -51,6 +52,19 @@ pub(super) struct ClientInner {
 }
 
 impl ClientInner {
+    pub(super) fn admit(&self) -> Result<std::sync::MutexGuard<'_, bool>> {
+        let open = self
+            .admission
+            .lock()
+            .map_err(|_| poisoned("FIPS admission"))?;
+        if !*open {
+            return Err(PubsubError::Storage(
+                "FIPS pubsub client is shut down".into(),
+            ));
+        }
+        Ok(open)
+    }
+
     pub(super) async fn connected_peers(&self) -> Result<Vec<ConnectedPeer>> {
         self.connected_peer_links()
             .await?
@@ -74,6 +88,7 @@ impl ClientInner {
         self: &Arc<Self>,
         mut filters: Vec<Filter>,
     ) -> Result<FipsPubsubSubscription> {
+        drop(self.admit()?);
         if filters.is_empty() {
             filters.push(Filter::new());
         }
@@ -94,6 +109,7 @@ impl ClientInner {
         }
 
         let peers = self.connected_peers().await?;
+        let _admission = self.admit()?;
         let had_peers = !peers.is_empty();
         let sequence = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
         let subscription_id = SubscriptionId::new(format!("fips-{sequence}"));
@@ -426,7 +442,9 @@ impl ClientInner {
         event: VerifiedEvent,
         source: EventSource,
     ) -> Result<PublishReport> {
+        drop(self.admit()?);
         let decision = self.event_decision(&event, &source).await?;
+        drop(self.admit()?);
         let (accepted, priority, reason) = decision_report(&decision);
         if !accepted {
             return Ok(PublishReport {
@@ -437,6 +455,8 @@ impl ClientInner {
         }
 
         let peers = self.connected_peers().await?;
+        let subscribed = self.peer_delivery_targets(&event, None)?;
+        let _admission = self.admit()?;
         let is_new = self
             .recent_events
             .lock()
@@ -450,7 +470,6 @@ impl ClientInner {
             });
         }
 
-        let subscribed = self.peer_delivery_targets(&event, None)?;
         if !subscribed.is_empty() {
             let peer_count = subscribed.len();
             let sent = self.send_inventories(subscribed, &event, self.options.max_hops);
@@ -823,6 +842,9 @@ impl ClientInner {
     }
 
     pub(super) fn close_all(&self) {
+        if let Ok(mut open) = self.admission.lock() {
+            *open = false;
+        }
         let active = self
             .subscriptions
             .lock()

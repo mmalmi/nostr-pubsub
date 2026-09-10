@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 mod client_inner;
+mod client_lifecycle;
 mod client_peers;
 mod client_reputation;
 mod client_transport;
@@ -36,6 +37,7 @@ mod stream;
 mod stream_tcp;
 mod wire_tcp;
 use client_inner::{ClientInner, ConnectedPeerLink};
+use client_lifecycle::ClientTasks;
 use client_transport::transport_loop;
 pub use peerfinding::*;
 use pending_wants::PendingWants;
@@ -169,9 +171,7 @@ impl FipsPubsubClientOptions {
 
 pub struct FipsPubsubClient {
     inner: Arc<ClientInner>,
-    transport_task: Option<JoinHandle<()>>,
-    peerfinding_task: Option<JoinHandle<()>>,
-    reputation_task: Option<JoinHandle<()>>,
+    tasks: tokio::sync::Mutex<ClientTasks>,
 }
 
 enum TransportCommand {
@@ -399,6 +399,7 @@ impl FipsPubsubClient {
             .max(1);
         let (transport_tx, transport_rx) = mpsc::channel(command_capacity);
         let inner = Arc::new(ClientInner {
+            admission: Mutex::new(true),
             endpoint: Arc::clone(&endpoint),
             codec,
             options,
@@ -455,9 +456,11 @@ impl FipsPubsubClient {
         )));
         Ok(Self {
             inner,
-            transport_task: Some(transport_task),
-            peerfinding_task,
-            reputation_task: None,
+            tasks: tokio::sync::Mutex::new(ClientTasks {
+                transport: Some(transport_task),
+                peerfinding: peerfinding_task,
+                reputation: None,
+            }),
         })
     }
 
@@ -504,37 +507,6 @@ impl FipsPubsubClient {
     pub async fn subscribe(&self, filters: Vec<Filter>) -> Result<FipsPubsubSubscription> {
         self.inner.subscribe(filters).await
     }
-
-    pub async fn shutdown(mut self) {
-        self.inner.close_all();
-        for task in [
-            self.reputation_task.take(),
-            self.peerfinding_task.take(),
-            self.transport_task.take(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            task.abort();
-            let _ = task.await;
-        }
-    }
-}
-
-impl Drop for FipsPubsubClient {
-    fn drop(&mut self) {
-        self.inner.close_all();
-        for task in [
-            self.reputation_task.take(),
-            self.peerfinding_task.take(),
-            self.transport_task.take(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            task.abort();
-        }
-    }
 }
 
 #[async_trait]
@@ -544,6 +516,7 @@ impl EventBus for FipsPubsubClient {
     }
 
     async fn query(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport> {
+        drop(self.inner.admit()?);
         let limit = options
             .limit
             .or_else(|| filters.iter().filter_map(|filter| filter.limit).min())

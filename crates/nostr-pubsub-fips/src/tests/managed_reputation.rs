@@ -102,7 +102,7 @@ async fn failed_publications_must_not_starve_local_observations(
 ) {
     let sink = remote.subscribe(vec![Filter::new()]).await.unwrap();
     wait_for_peer_subscription_count(client, 2).await;
-    let transport = client.transport_task.take().unwrap();
+    let transport = client.tasks.get_mut().transport.take().unwrap();
     transport.abort();
     let _ = transport.await;
     let mut observations = FipsPubsubPolicy::new(

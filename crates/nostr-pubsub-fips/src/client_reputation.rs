@@ -23,7 +23,7 @@ impl FipsPubsubClient {
         let mut client =
             Self::start_with_policies(endpoint, options, policy.client_policies()).await?;
         let subscription = client.subscribe(vec![filter]).await?;
-        client.reputation_task = Some(tokio::spawn(run_reputation(
+        client.tasks.get_mut().reputation = Some(tokio::spawn(run_reputation(
             client.inner.clone(),
             subscription,
             policy,
