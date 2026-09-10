@@ -56,6 +56,16 @@ peers release their pubsub state while application-owned FIPS links stay intact.
 Without a peer policy, the original identity-ordered connection selection and
 event-dependent fanout remain unchanged.
 
+Repeated pubsub service connection attempts are spaced at least three seconds
+apart per selected peer, including attempts triggered by new outgoing frames.
+The first attempt remains immediate. This monotonic retry bound avoids busy
+reconnect loops when a reachable FIPS peer has no pubsub service or repeatedly
+closes its stream. It does not penalize the peer's transport reputation.
+Retained subscriptions replay when the service returns. A one-shot query can
+still reach its configured timeout during recovery: the default 500 ms query
+window is shorter than the retry interval, so applications needing that
+recovery window should configure `query_timeout` accordingly.
+
 Applications can supply known service identities in
 `FipsPubsubClientOptions::routed_peers`, then replace that bounded roster using
 `set_routed_peers` as authorized devices join or leave. These destinations take

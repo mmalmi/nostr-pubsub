@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.4 - 2026-09-10
+
+- Bound repeated service connection attempts to one per three seconds per
+  selected peer, including subscription-triggered sends. First attempts remain
+  immediate; retained subscriptions recover when a late service becomes ready.
+  The default 500 ms one-shot query timeout can expire during this retry window.
+- Validate peer identities after admission checks and borrow temporary selection
+  keys to remove repeated decoding and copies without caching trust decisions.
+- Update to FIPS core 0.4.80 and TCP endpoint 0.2.16. FIPS sizes initial crypto
+  work allocations to admitted batches while retaining full-batch capacity,
+  continuation growth, packet ordering and the existing wire protocols.
+
+## 0.5.3 - 2026-09-10
+
+- Add `shutdown_shared()` so applications can close subscriptions and join owned
+  tasks while providers still retain the client. Reject new work after shutdown
+  starts and preserve unfinished joins across cancellation.
+
+## 0.5.2 - 2026-09-10
+
+- Apply the shared bounded peer selector and optional trusted-rater policy in
+  high-level clients. Trust entrypoints default to empty; service quality alone
+  does not grant authority to rate peers or access application data.
+- Manage the bounded rating subscription and paced publication with the client.
+- Update to FIPS core 0.4.79 and TCP endpoint 0.2.15 for quieter idle feedback.
+
 ## 0.5.1 - 2026-09-09
 
 - Restore and announce an evicted payload when a local application explicitly
