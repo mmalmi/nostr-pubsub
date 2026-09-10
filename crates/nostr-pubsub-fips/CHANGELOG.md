@@ -8,9 +8,12 @@
   The default 500 ms one-shot query timeout can expire during this retry window.
 - Validate peer identities after admission checks and borrow temporary selection
   keys to remove repeated decoding and copies without caching trust decisions.
-- Update to FIPS core 0.4.80 and TCP endpoint 0.2.16. FIPS sizes initial crypto
+- Update to FIPS core 0.4.81 and TCP endpoint 0.2.16. FIPS sizes initial crypto
   work allocations to admitted batches while retaining full-batch capacity,
   continuation growth, packet ordering and the existing wire protocols.
+- Request missing route coordinates through existing bounded lookup when a
+  session needs to rekey. Key rotation can recover after coordinate cache
+  eviction while an existing data route remains active.
 
 ## 0.5.3 - 2026-09-10
 
