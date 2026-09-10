@@ -24,7 +24,7 @@ pub(super) fn select_policy_peers(
     )
 }
 
-fn select_links(
+pub(super) fn select_links(
     policy: Option<&dyn MeshPeerPolicy>,
     links: Vec<ConnectedPeerLink>,
     capacity: usize,
@@ -39,13 +39,16 @@ fn select_links(
         capacity,
         unknown_reserve,
     )?;
-    let mut by_identity = links
-        .into_iter()
-        .map(|link| (link.npub.clone(), link))
+    let by_identity = links
+        .iter()
+        .map(|link| (link.npub.as_str(), link.link_id))
         .collect::<std::collections::HashMap<_, _>>();
     Ok(selected
         .into_iter()
-        .filter_map(|id| by_identity.remove(&id))
+        .filter_map(|npub| {
+            let link_id = *by_identity.get(npub.as_str())?;
+            Some(ConnectedPeerLink { npub, link_id })
+        })
         .collect())
 }
 

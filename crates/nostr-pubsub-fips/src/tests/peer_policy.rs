@@ -59,6 +59,49 @@ fn high_level_peer_selection_cannot_substitute_an_authenticated_identity() {
     );
 }
 
+#[test]
+fn link_selection_preserves_rank_metadata_and_fresh_policy() {
+    let policy = MutablePeerPolicy(RwLock::new(HashMap::from([
+        ("best".into(), Some(100)),
+        ("second".into(), Some(90)),
+        ("blocked".into(), None),
+    ])));
+    let select = |links: &[(&str, u64)]| {
+        crate::client_peers::select_links(
+            Some(&policy),
+            links
+                .iter()
+                .map(|(npub, link_id)| ConnectedPeerLink {
+                    npub: (*npub).to_owned(),
+                    link_id: *link_id,
+                })
+                .collect(),
+            2,
+            1,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|link| (link.npub, link.link_id))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        select(&[
+            ("second", 2),
+            ("best", 1),
+            ("blocked", 4),
+            ("unknown", 3),
+            ("best", 5),
+        ]),
+        [("best".to_owned(), 5), ("unknown".to_owned(), 3)]
+    );
+
+    policy.0.write().unwrap().insert("best".into(), None);
+    assert_eq!(
+        select(&[("best", 15), ("unknown", 13), ("second", 12)]),
+        [("second".to_owned(), 12), ("unknown".to_owned(), 13)]
+    );
+}
+
 async fn policy_endpoints(network_id: &str) -> [Arc<FipsEndpoint>; 3] {
     let mut provider_secrets = [[82; 32], [83; 32]];
     provider_secrets.sort_by_key(|secret| Identity::from_secret_bytes(secret).unwrap().npub());
