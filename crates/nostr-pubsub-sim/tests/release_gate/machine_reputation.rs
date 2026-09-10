@@ -7,9 +7,17 @@ pub(super) fn assert_machine_reputation_used_real_transport(report: &SimulationR
     assert!(report.machine_ratings_published > 0, "{context}");
     assert!(report.machine_ratings_received > 0, "{context}");
     assert!(report.machine_ratings_ingested > 0, "{context}");
+    let configured_honest_roots = report
+        .config
+        .trusted_raters
+        .iter()
+        .filter(|rater| **rater >= report.attacker_count)
+        .count();
     assert_eq!(
-        report.machine_reputation_trusted_roots, report.honest_node_count,
-        "only each node's local root may be configured: {context}",
+        report.machine_reputation_trusted_roots,
+        report.honest_node_count * (report.config.trusted_raters.len() + 1)
+            - configured_honest_roots,
+        "configured authorities and each node's distinct local root: {context}",
     );
     assert!(report.poisoned_machine_ratings_published > 0, "{context}");
     assert!(report.poisoned_machine_ratings_received > 0, "{context}");
@@ -56,11 +64,12 @@ pub(super) fn assert_machine_reputation_used_real_transport(report: &SimulationR
     );
     assert_eq!(report.admitted_rater_poison_target_received, 2, "{context}");
     assert_eq!(report.admitted_rater_poison_target_ingested, 2, "{context}");
-    assert_eq!(report.admitted_rater_poison_target_removals, 2, "{context}");
+    assert_eq!(report.admitted_rater_poison_target_removals, 0, "{context}");
+    assert_eq!(report.admitted_rater_poison_removals, 0, "{context}");
     assert_eq!(report.admitted_rater_misbehavior_frames, 5, "{context}");
     assert_eq!(report.admitted_rater_revocations, 1, "{context}");
     assert_eq!(
-        report.admitted_rater_poison_target_recoveries, 2,
+        report.admitted_rater_poison_target_recoveries, 0,
         "{context}"
     );
     assert_eq!(report.post_revocation_rating_published, 1, "{context}");

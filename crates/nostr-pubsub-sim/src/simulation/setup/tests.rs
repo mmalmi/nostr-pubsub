@@ -20,6 +20,58 @@ fn adversarial_config(topology: TopologyStrategy) -> SimulationConfig {
 }
 
 #[test]
+fn explicit_rating_authorities_are_validated_and_not_selected_by_role() {
+    let config = SimulationConfig {
+        node_count: 48,
+        attacker_count: 8,
+        trusted_raters: [0, 17].into_iter().collect(),
+        ..SimulationConfig::default()
+    };
+    let simulation = Simulation::new(config.clone(), PeerSelectionMode::SharedReputation).unwrap();
+    assert_eq!(
+        simulation.report.config.trusted_raters,
+        config.trusted_raters
+    );
+    for receiver in 8..48 {
+        let policies = simulation.nodes[receiver]
+            .machine_policies
+            .as_ref()
+            .unwrap();
+        for rater in [0, 17] {
+            assert!(
+                policies
+                    .select_mesh_peer(&simulation.peer_ids[rater])
+                    .unwrap()
+                    .unwrap()
+                    .quality_score
+                    .is_some_and(|score| score > 0)
+            );
+        }
+    }
+    assert!(
+        Simulation::new(
+            SimulationConfig {
+                trusted_raters: [48].into_iter().collect(),
+                ..config
+            },
+            PeerSelectionMode::SharedReputation,
+        )
+        .is_err()
+    );
+    assert!(
+        Simulation::new(
+            SimulationConfig {
+                node_count: 2_048,
+                trusted_raters: (0..1_025).collect(),
+                ..SimulationConfig::default()
+            },
+            PeerSelectionMode::SharedReputation,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn scoped_spam_alternates_between_organic_interest_and_near_misses() {
     for topology in [
         TopologyStrategy::PeerMesh,

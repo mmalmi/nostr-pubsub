@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nostr::{Event, Kind};
+use nostr::{Alphabet, Event, Filter, Kind, SingleLetterTag};
 use nostr_pubsub::{
     EventPolicyContext, EventSource, MeshPeerPolicy, PolicyDecision, PublicKey, PubsubError,
     PubsubPolicy, Result, VerifiedEvent,
@@ -25,6 +25,7 @@ pub struct PeerReputationConfig {
     pub scope: String,
     pub policy: SocialGraphPolicyConfig,
     /// Explicit local trust roots whose signed ratings may affect the graph.
+    /// Positive peer ratings do not delegate this authority to their subjects.
     pub trusted_raters: BTreeSet<String>,
 }
 
@@ -55,7 +56,7 @@ struct StoredPeerRating {
 ///
 /// The retained counts describe the state held at the instant of the snapshot.
 /// Work counters are cumulative and saturating. `graph_rebuild_rating_entries`
-/// counts every retained rating supplied to a graph rebuild, so callers can
+/// counts every retained rating visited during a graph rebuild, so callers can
 /// apply platform-specific CPU weights without baking them into this crate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PeerReputationSnapshot {
@@ -80,9 +81,9 @@ struct PeerReputationWork {
 /// A local, replayable trust projection for authenticated pubsub peers.
 ///
 /// Unknown peers remain eligible under the default policy. Ratings affect the
-/// projection only when the signed event author is also its declared rater, so
-/// an unknown crawler or Sybil cannot bootstrap itself by asserting a trusted
-/// identity in the rating payload.
+/// projection only when the signed event author is also its declared rater and
+/// is the local root or an explicitly configured trusted rater. Positive peer
+/// ratings improve selection without authorizing the peer to rate others.
 pub struct PeerReputation {
     root: String,
     scope: String,
@@ -190,6 +191,22 @@ impl PeerReputation {
         &self.scope
     }
 
+    /// Subscribes only to this scope's local and explicitly authorized raters.
+    /// The nonempty author set contains at most 1,025 normalized public keys.
+    pub fn rating_filter(&self) -> Result<Filter> {
+        let authors = std::iter::once(&self.root)
+            .chain(self.trusted_raters.iter())
+            .map(|rater| {
+                PublicKey::from_hex(rater)
+                    .map_err(|error| validation(format!("invalid rating authority: {error}")))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        Ok(Filter::new()
+            .kind(Kind::Custom(RATING_KIND))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::I), self.scope.clone())
+            .authors(authors))
+    }
+
     /// Returns retained-state gauges and cumulative deterministic work counts.
     #[must_use]
     pub fn snapshot(&self) -> PeerReputationSnapshot {
@@ -287,7 +304,7 @@ impl PeerReputation {
         };
         rating.rater = rater.to_hex();
         rating.subject = subject.to_hex();
-        let projection_may_change = self.rater_is_reachable(&rating.rater);
+        let projection_may_change = self.rater_is_authorized(&rating.rater);
         let key = PeerRatingKey {
             rater: rating.rater.clone(),
             subject: rating.subject.clone(),
@@ -375,10 +392,8 @@ impl PeerReputation {
         }
     }
 
-    fn rater_is_reachable(&self, rater: &str) -> bool {
-        self.graph.read().map_or(true, |graph| {
-            graph.get_follow_distance(rater) <= self.rating_graph_config.max_rater_distance
-        })
+    fn rater_is_authorized(&self, rater: &str) -> bool {
+        rater == self.root || self.trusted_raters.contains(rater)
     }
 
     fn enforce_entry_limits_with(&mut self, max_entries: usize, max_entries_per_rater: usize) {
@@ -404,8 +419,8 @@ impl PeerReputation {
         if excess == 0 {
             return;
         }
-        // Untrusted ratings may inform transitive trust while capacity exists,
-        // but cannot displace the local root's explicit trust anchors.
+        // Retained ratings from unconfigured raters remain inert and cannot
+        // displace ratings from the local root or its explicit trust anchors.
         let mut oldest = self
             .latest
             .iter()
@@ -434,6 +449,7 @@ impl PeerReputation {
         let ratings = self
             .latest
             .values()
+            .filter(|stored| self.rater_is_authorized(&stored.rating.rater))
             .map(|stored| stored.rating.clone())
             .collect::<Vec<_>>();
         graph

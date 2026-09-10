@@ -558,8 +558,11 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use nostr::Keys;
     use nostr_pubsub::{PubsubPeerInterest, SourceId, VerifiedEvent};
+    use nostr_pubsub_social_graph::{PeerReputation, PeerReputationConfig};
 
     use super::{
         PeerProjection, PeerSelectionMode, ReputationEventOrigin, SIM_UNIX_BASE, Simulation,
@@ -673,22 +676,7 @@ mod tests {
         simulation.drain_scheduler().unwrap();
         let (publisher, receiver, subject) =
             trusted_transport_triangle(&simulation).expect("connected rating transport triangle");
-        let trust = peer_rating_event(
-            &simulation.keys[receiver],
-            &simulation.peer_ids[receiver],
-            &simulation.peer_ids[publisher],
-            100,
-            SIM_UNIX_BASE,
-        )
-        .unwrap();
-        assert!(
-            simulation.nodes[receiver]
-                .machine_reputation
-                .as_mut()
-                .unwrap()
-                .ingest_event_at(&trust, SIM_UNIX_BASE)
-                .unwrap()
-        );
+        configure_rater(&mut simulation, receiver, publisher);
         let negative = peer_rating_event(
             &simulation.keys[publisher],
             &simulation.peer_ids[publisher],
@@ -749,6 +737,7 @@ mod tests {
         let (publisher, receiver, subject) = simulation
             .poisoned_probe_plan()
             .expect("a service-admitted machine rater can be compromised");
+        configure_rater(&mut simulation, receiver, publisher);
         assert_poison_plan_is_routable(&mut simulation, publisher, receiver, subject);
 
         let inventory_before = simulation.report.inventory_messages;
@@ -773,7 +762,63 @@ mod tests {
         assert!(simulation.report.want_messages > want_before);
         assert!(simulation.report.frame_messages > frame_before);
         assert_eq!(simulation.report.machine_false_positive_removals, 0);
-        assert_poison_recipients(&simulation, publisher, subject);
+        assert_poison_recipients(&simulation, publisher, receiver, subject);
+
+        let now_ms = simulation.scheduler.now_ms();
+        let revoke = peer_rating_event(
+            &simulation.keys[receiver],
+            &simulation.peer_ids[receiver],
+            &simulation.peer_ids[publisher],
+            0,
+            virtual_unix_secs(now_ms).saturating_add(2),
+        )
+        .unwrap();
+        simulation
+            .publish_reputation_event(
+                receiver,
+                publisher,
+                now_ms,
+                &revoke,
+                ReputationEventOrigin::MachineLifecycle(
+                    crate::simulation::MachineLifecyclePhase::Remove,
+                ),
+            )
+            .unwrap();
+        simulation.flush_rediscovery_subscriptions().unwrap();
+        simulation.drain_scheduler().unwrap();
+        assert_eq!(
+            peer_projection(
+                simulation.nodes[receiver]
+                    .machine_policies
+                    .as_ref()
+                    .unwrap(),
+                &simulation.peer_ids[subject],
+            )
+            .unwrap(),
+            PeerProjection::Unknown
+        );
+    }
+
+    fn configure_rater(simulation: &mut Simulation, receiver: usize, publisher: usize) {
+        let (mut reputation, policies) = PeerReputation::new(
+            &simulation.peer_ids[receiver],
+            PeerReputationConfig {
+                trusted_raters: BTreeSet::from([simulation.peer_ids[publisher].clone()]),
+                ..PeerReputationConfig::default()
+            },
+        )
+        .expect("explicit fixture rater configuration");
+        reputation
+            .replay_at(
+                simulation.nodes[receiver]
+                    .local_events
+                    .values()
+                    .map(VerifiedEvent::as_event),
+                virtual_unix_secs(simulation.scheduler.now_ms()),
+            )
+            .expect("preserve locally retained ratings");
+        simulation.nodes[receiver].machine_reputation = Some(reputation);
+        simulation.nodes[receiver].machine_policies = Some(policies);
     }
 
     fn admit_poison_rater_after_verified_service(simulation: &mut Simulation) {
@@ -861,7 +906,12 @@ mod tests {
         );
     }
 
-    fn assert_poison_recipients(simulation: &Simulation, publisher: usize, subject: usize) {
+    fn assert_poison_recipients(
+        simulation: &Simulation,
+        publisher: usize,
+        configured_receiver: usize,
+        subject: usize,
+    ) {
         let poisoned_event_id = simulation
             .reputation_events
             .iter()
@@ -879,11 +929,13 @@ mod tests {
         let mut untrusted_recipients = 0usize;
         let mut removals = 0usize;
         for node in &recipients {
-            let trusted = simulation.nodes[*node]
+            let subscribed_to_author = simulation.nodes[*node]
                 .service_admitted_raters
                 .contains(&simulation.peer_ids[publisher]);
-            trusted_recipients = trusted_recipients.saturating_add(usize::from(trusted));
-            untrusted_recipients = untrusted_recipients.saturating_add(usize::from(!trusted));
+            trusted_recipients =
+                trusted_recipients.saturating_add(usize::from(subscribed_to_author));
+            untrusted_recipients =
+                untrusted_recipients.saturating_add(usize::from(!subscribed_to_author));
             let removed = simulation.nodes[*node]
                 .machine_policies
                 .as_ref()
@@ -891,7 +943,11 @@ mod tests {
                 .select_mesh_peer(&simulation.peer_ids[subject])
                 .unwrap()
                 .is_none();
-            assert!(!removed || trusted, "untrusted poison changed projection");
+            assert_eq!(
+                removed,
+                *node == configured_receiver,
+                "only explicit authority can affect projection"
+            );
             removals = removals.saturating_add(usize::from(removed));
         }
         assert!(trusted_recipients > 0);

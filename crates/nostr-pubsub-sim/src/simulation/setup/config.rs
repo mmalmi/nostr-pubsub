@@ -3,6 +3,17 @@ use super::super::{
 };
 
 pub(super) fn validate_config(config: &SimulationConfig) -> Result<()> {
+    if config.trusted_raters.len() > nostr_pubsub_social_graph::PEER_REPUTATION_MAX_TRUSTED_RATERS
+        || config
+            .trusted_raters
+            .iter()
+            .any(|rater| *rater >= config.node_count)
+    {
+        return Err(SimulationError::InvalidConfig(
+            "trusted_raters must contain existing node indices within the reputation limit"
+                .to_string(),
+        ));
+    }
     if config.node_count < SubscriptionClass::ALL.len() + config.attacker_count {
         return Err(SimulationError::InvalidConfig(format!(
             "at least {} honest nodes are required for the subscription cohorts",

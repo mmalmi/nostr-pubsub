@@ -3,6 +3,9 @@ use nostr_social_memory::RatingEventExt;
 
 use super::*;
 
+#[path = "reputation_tests/authority.rs"]
+mod authority;
+
 #[test]
 fn default_policy_explores_unknown_prioritizes_good_and_drops_bad() {
     let root = Keys::generate();
@@ -84,47 +87,6 @@ fn explicitly_trusted_remote_rater_changes_the_projection() {
         policy
             .select_mesh_peer(&subject_hex)
             .expect("trusted remote decision"),
-        None
-    );
-}
-
-#[test]
-fn retained_untrusted_rating_activates_when_its_rater_becomes_reachable() {
-    let root = Keys::generate();
-    let rater = Keys::generate();
-    let subject = Keys::generate();
-    let root_hex = root.public_key().to_hex();
-    let rater_hex = rater.public_key().to_hex();
-    let subject_hex = subject.public_key().to_hex();
-    let now = 2_000_000_000;
-    let (mut reputation, policy) =
-        PeerReputation::new(&root_hex, PeerReputationConfig::default()).expect("reputation");
-
-    assert!(
-        reputation
-            .ingest_event_at(&rating_event(&rater, &rater_hex, &subject_hex, 0, now), now,)
-            .expect("retain untrusted rating")
-    );
-    assert!(
-        policy
-            .select_mesh_peer(&subject_hex)
-            .expect("unknown subject")
-            .expect("untrusted rating is initially inert")
-            .is_unknown()
-    );
-
-    assert!(
-        reputation
-            .ingest_event_at(
-                &rating_event(&root, &root_hex, &rater_hex, 100, now + 1),
-                now + 1,
-            )
-            .expect("trust rater")
-    );
-    assert_eq!(
-        policy
-            .select_mesh_peer(&subject_hex)
-            .expect("activated negative rating"),
         None
     );
 }

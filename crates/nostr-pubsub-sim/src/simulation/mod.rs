@@ -87,6 +87,8 @@ pub struct DirectedServiceLink {
 pub struct SimulationConfig {
     pub node_count: usize,
     pub attacker_count: usize,
+    /// Explicit rating authorities by node index; never inferred from node roles or service.
+    pub trusted_raters: BTreeSet<usize>,
     pub fanout: usize,
     pub unknown_peer_reserve: usize,
     pub max_hops: u8,
@@ -115,6 +117,7 @@ impl Default for SimulationConfig {
         Self {
             node_count: 1_000,
             attacker_count: 200,
+            trusted_raters: BTreeSet::new(),
             fanout: 6,
             unknown_peer_reserve: 1,
             max_hops: 16,
@@ -144,7 +147,7 @@ struct SimNode {
     rating_filters: Vec<Filter>,
     machine_reputation: Option<PeerReputation>,
     machine_policies: Option<PeerReputationPolicies>,
-    /// Rating authors admitted by this node's root after verified service.
+    /// Rating-author subscriptions earned by service; these do not grant rating authority.
     service_admitted_raters: BTreeSet<String>,
     app_authorized_authors: BTreeSet<String>,
     local_events: HashMap<String, VerifiedEvent>,
@@ -630,6 +633,10 @@ mod tests {
         let config = SimulationConfig {
             node_count: 180,
             attacker_count: 36,
+            // Fixed identities are explicit scenario inputs, including compromised raters.
+            trusted_raters: [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170]
+                .into_iter()
+                .collect(),
             loss_basis_points: 0,
             churn_basis_points: 0,
             supernode_count: 8,
@@ -675,6 +682,10 @@ mod tests {
         assert!(shared.unauthorized_source_drops > 0, "{shared:?}");
         assert_eq!(
             shared.honest_source_legitimate_machine_ingress_drops, 0,
+            "{shared:?}"
+        );
+        assert_eq!(
+            shared.lifecycle_control_machine_ingress_drops, 6,
             "{shared:?}"
         );
         assert!(shared.machine_ingress_accounting_is_conserved());

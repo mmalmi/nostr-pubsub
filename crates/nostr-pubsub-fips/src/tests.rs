@@ -26,6 +26,8 @@ use crate::client_transport::{
     peer_identity_for_connect, peer_link_needs_connect, tcp_driver_poll_needed,
 };
 
+mod managed_reputation;
+mod peer_policy;
 mod replay;
 mod reputation;
 mod routed;

@@ -97,7 +97,10 @@ pub struct SimulationReport {
     pub rejected_malformed_messages: usize,
     pub unauthorized_source_drops: usize,
     pub machine_ingress_drops: usize,
-    /// Legitimate-provenance packets blocked when carried by an honest peer.
+    /// Packets for deliberate lifecycle-control events blocked at ingress.
+    pub lifecycle_control_machine_ingress_drops: usize,
+    /// Legitimate-provenance packets, excluding lifecycle controls, blocked
+    /// when carried by an honest peer.
     pub honest_source_legitimate_machine_ingress_drops: usize,
     /// Legitimate-reference packets blocked from either a static attacker or
     /// a peer that deliberately defected after earning machine trust.
@@ -261,6 +264,7 @@ impl SimulationReport {
     #[must_use]
     pub fn machine_ingress_accounting_is_conserved(&self) -> bool {
         self.honest_source_legitimate_machine_ingress_drops
+            .saturating_add(self.lifecycle_control_machine_ingress_drops)
             .saturating_add(self.adversarial_source_legitimate_reference_machine_ingress_drops)
             .saturating_add(self.adversarial_machine_ingress_drops)
             == self.machine_ingress_drops

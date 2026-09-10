@@ -10,6 +10,7 @@ impl Simulation {
         source: usize,
         destination: usize,
         provenance: TrafficProvenance,
+        lifecycle_control: bool,
     ) -> bool {
         if self.mode == PeerSelectionMode::SharedReputation {
             self.record_cpu_work(destination, |work| {
@@ -37,21 +38,27 @@ impl Simulation {
             || self
                 .admitted_rater_poison_source
                 .is_some_and(|(publisher, _)| publisher == source);
-        match (provenance, adversarial_source) {
-            (TrafficProvenance::Legitimate, true) => {
+        match (lifecycle_control, provenance, adversarial_source) {
+            (true, _, _) => {
+                self.report.lifecycle_control_machine_ingress_drops = self
+                    .report
+                    .lifecycle_control_machine_ingress_drops
+                    .saturating_add(1);
+            }
+            (false, TrafficProvenance::Legitimate, true) => {
                 self.report
                     .adversarial_source_legitimate_reference_machine_ingress_drops = self
                     .report
                     .adversarial_source_legitimate_reference_machine_ingress_drops
                     .saturating_add(1);
             }
-            (TrafficProvenance::Legitimate, false) => {
+            (false, TrafficProvenance::Legitimate, false) => {
                 self.report.honest_source_legitimate_machine_ingress_drops = self
                     .report
                     .honest_source_legitimate_machine_ingress_drops
                     .saturating_add(1);
             }
-            (TrafficProvenance::Adversarial, _) => {
+            (false, TrafficProvenance::Adversarial, _) => {
                 self.report.adversarial_machine_ingress_drops = self
                     .report
                     .adversarial_machine_ingress_drops
@@ -167,4 +174,99 @@ impl Simulation {
 fn confident_local_rejection(observation: nostr_pubsub::PeerBehaviorObservation) -> bool {
     observation.invalid_messages >= 3
         || (observation.unserved_inventories >= 6 && observation.valid_frames == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::simulation::reputation_flow::{PeerProjection, peer_projection, virtual_unix_secs};
+    use crate::simulation::{
+        InvWantWireMessage, MachineLifecyclePhase, Packet, ReputationEventMetadata,
+        ReputationEventOrigin, SimulationConfig, peer_rating_event,
+    };
+
+    #[test]
+    fn lifecycle_control_drops_cannot_hide_real_workload_from_the_same_peer() {
+        let mut simulation = Simulation::new(
+            SimulationConfig {
+                node_count: 48,
+                attacker_count: 0,
+                loss_basis_points: 0,
+                churn_basis_points: 0,
+                ..SimulationConfig::default()
+            },
+            PeerSelectionMode::SharedReputation,
+        )
+        .unwrap();
+        let workload = simulation
+            .events
+            .values()
+            .filter(|event| event.legitimate)
+            .min_by_key(|event| (event.publisher, event.verified.as_event().id))
+            .unwrap()
+            .clone();
+        let source = workload.publisher;
+        let destination = simulation.topology.neighbors[source][0];
+        let now_ms = simulation.scheduler.now_ms();
+        let rating = peer_rating_event(
+            &simulation.keys[destination],
+            &simulation.peer_ids[destination],
+            &simulation.peer_ids[source],
+            0,
+            virtual_unix_secs(now_ms),
+        )
+        .unwrap();
+        simulation.nodes[destination]
+            .machine_reputation
+            .as_mut()
+            .unwrap()
+            .ingest_event_at(&rating, virtual_unix_secs(now_ms))
+            .unwrap();
+        assert_eq!(
+            peer_projection(
+                simulation.nodes[destination]
+                    .machine_policies
+                    .as_ref()
+                    .unwrap(),
+                &simulation.peer_ids[source],
+            )
+            .unwrap(),
+            PeerProjection::Removed
+        );
+        simulation.reputation_events.insert(
+            rating.id.to_hex(),
+            ReputationEventMetadata {
+                subject: source,
+                observed_at_ms: now_ms,
+                origin: ReputationEventOrigin::MachineLifecycle(MachineLifecyclePhase::Remove),
+            },
+        );
+        for message in [
+            InvWantWireMessage::Want {
+                event_id: rating.id.to_hex(),
+            },
+            InvWantWireMessage::Frame {
+                event_id: workload.verified.as_event().id.to_hex(),
+                event: Box::new(workload.verified.as_event().clone()),
+            },
+        ] {
+            simulation
+                .process_packet(Packet {
+                    source,
+                    destination,
+                    payload: simulation.codec.encode(&message).unwrap(),
+                })
+                .unwrap();
+        }
+        assert_eq!(simulation.report.machine_ingress_drops, 2);
+        assert_eq!(simulation.report.lifecycle_control_machine_ingress_drops, 1);
+        assert_eq!(
+            simulation
+                .report
+                .honest_source_legitimate_machine_ingress_drops,
+            1
+        );
+        assert_eq!(simulation.report.adversarial_machine_ingress_drops, 0);
+        assert!(simulation.report.machine_ingress_accounting_is_conserved());
+    }
 }

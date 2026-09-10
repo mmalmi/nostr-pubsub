@@ -11,10 +11,10 @@ use fips_core::{FipsEndpoint, PeerIdentity};
 use nostr::{JsonUtil, Kind};
 use nostr_pubsub::{
     DEFAULT_INV_WANT_FANOUT, EventBus, EventId, EventPolicyContext, EventSource, Filter,
-    FipsPubsubWireCodec, FipsPubsubWireMessage, NostrEventHandler, NostrEventSubscriber,
-    NostrEventSubscription, PolicyDecision, PublishReport, PubsubError, PubsubPeerInterest,
-    PubsubPeerSubscriptionStore, PubsubPolicy, PubsubProvider, PubsubProviderMode,
-    PubsubSubscriptionLimits, QueryEvent, QueryOptions, QueryReport, Result,
+    FipsPubsubWireCodec, FipsPubsubWireMessage, MeshPeerPolicy, NostrEventHandler,
+    NostrEventSubscriber, NostrEventSubscription, PolicyDecision, PublishReport, PubsubError,
+    PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy, PubsubProvider,
+    PubsubProviderMode, PubsubSubscriptionLimits, QueryEvent, QueryOptions, QueryReport, Result,
     SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, VerifiedEvent,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -23,6 +23,7 @@ use tokio::time::Instant;
 
 mod client_inner;
 mod client_peers;
+mod client_reputation;
 mod client_transport;
 mod peerfinding;
 mod pending_wants;
@@ -170,6 +171,7 @@ pub struct FipsPubsubClient {
     inner: Arc<ClientInner>,
     transport_task: Option<JoinHandle<()>>,
     peerfinding_task: Option<JoinHandle<()>>,
+    reputation_task: Option<JoinHandle<()>>,
 }
 
 enum TransportCommand {
@@ -238,12 +240,34 @@ fn fips_advert_refresh_delay(event: &nostr::Event) -> Duration {
         .min(FIPS_PEER_ADVERT_REFRESH_INTERVAL)
 }
 
+/// Optional application policies. Peer preference and event admission are
+/// separate from permission to access application data. Empty policies retain
+/// the default client behavior; no external trust identity is selected here.
+#[derive(Clone)]
+pub struct FipsPubsubClientPolicies {
+    pub peers: Option<Arc<dyn MeshPeerPolicy>>,
+    pub events: Option<Arc<dyn PubsubPolicy>>,
+    /// Exploration slots when ranking direct peers and live fanout. Explicit
+    /// routed identities retain priority. Endpoint-owned links are unchanged.
+    pub unknown_peer_reserve: usize,
+}
+
+impl Default for FipsPubsubClientPolicies {
+    fn default() -> Self {
+        Self {
+            peers: None,
+            events: None,
+            unknown_peer_reserve: 1,
+        }
+    }
+}
+
 impl FipsPubsubClient {
     pub async fn start(
         endpoint: Arc<FipsEndpoint>,
         options: FipsPubsubClientOptions,
     ) -> Result<Self> {
-        Self::start_for_peer_selection(endpoint, options, None, HashSet::new(), None).await
+        Self::start_with_policies(endpoint, options, FipsPubsubClientPolicies::default()).await
     }
 
     /// Start with event admission applied before received events enter the
@@ -253,7 +277,25 @@ impl FipsPubsubClient {
         options: FipsPubsubClientOptions,
         policy: Arc<dyn PubsubPolicy>,
     ) -> Result<Self> {
-        Self::start_for_peer_selection(endpoint, options, None, HashSet::new(), Some(policy)).await
+        Self::start_with_policies(
+            endpoint,
+            options,
+            FipsPubsubClientPolicies {
+                events: Some(policy),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// Start with a shared peer preference and/or event-admission policy.
+    /// Changes to a policy's shared state affect existing subscriptions.
+    pub async fn start_with_policies(
+        endpoint: Arc<FipsEndpoint>,
+        options: FipsPubsubClientOptions,
+        policies: FipsPubsubClientPolicies,
+    ) -> Result<Self> {
+        Self::start_for_peer_selection(endpoint, options, None, HashSet::new(), policies).await
     }
 
     /// Start a client that never uses peers carried by the named FIPS
@@ -273,8 +315,14 @@ impl FipsPubsubClient {
             .into_iter()
             .map(Into::into)
             .collect();
-        Self::start_for_peer_selection(endpoint, options, None, excluded_peer_transports, None)
-            .await
+        Self::start_for_peer_selection(
+            endpoint,
+            options,
+            None,
+            excluded_peer_transports,
+            FipsPubsubClientPolicies::default(),
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -288,7 +336,7 @@ impl FipsPubsubClient {
             options,
             Some(peer_transport),
             HashSet::new(),
-            None,
+            FipsPubsubClientPolicies::default(),
         )
         .await
     }
@@ -305,7 +353,10 @@ impl FipsPubsubClient {
             options,
             Some(peer_transport),
             HashSet::new(),
-            Some(policy),
+            FipsPubsubClientPolicies {
+                events: Some(policy),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -315,7 +366,7 @@ impl FipsPubsubClient {
         options: FipsPubsubClientOptions,
         peer_transport: Option<&'static str>,
         excluded_peer_transports: HashSet<String>,
-        event_policy: Option<Arc<dyn PubsubPolicy>>,
+        policies: FipsPubsubClientPolicies,
     ) -> Result<Self> {
         options.validate()?;
         let routed_peers = client_peers::validate_routed_peers(
@@ -354,7 +405,9 @@ impl FipsPubsubClient {
             routed_peers: Mutex::new(routed_peers),
             peer_transport,
             excluded_peer_transports,
-            event_policy,
+            event_policy: policies.events,
+            peer_policy: policies.peers,
+            unknown_peer_reserve: policies.unknown_peer_reserve,
             transport_tx,
             connected_transport_peers: AtomicUsize::new(0),
             req_frames_received: AtomicU64::new(0),
@@ -371,6 +424,7 @@ impl FipsPubsubClient {
             tcp_datagrams_rejected: AtomicU64::new(0),
             tcp_poll_turns: AtomicU64::new(0),
             transport_errors: AtomicU64::new(0),
+            reputation_errors: AtomicU64::new(0),
             next_subscription_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
             peer_subscriptions: Mutex::new(PubsubPeerSubscriptionStore::new(subscription_limits)),
@@ -403,6 +457,7 @@ impl FipsPubsubClient {
             inner,
             transport_task: Some(transport_task),
             peerfinding_task,
+            reputation_task: None,
         })
     }
 
@@ -452,11 +507,14 @@ impl FipsPubsubClient {
 
     pub async fn shutdown(mut self) {
         self.inner.close_all();
-        if let Some(task) = self.peerfinding_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
-        if let Some(task) = self.transport_task.take() {
+        for task in [
+            self.reputation_task.take(),
+            self.peerfinding_task.take(),
+            self.transport_task.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             task.abort();
             let _ = task.await;
         }
@@ -466,10 +524,14 @@ impl FipsPubsubClient {
 impl Drop for FipsPubsubClient {
     fn drop(&mut self) {
         self.inner.close_all();
-        if let Some(task) = self.peerfinding_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.transport_task.take() {
+        for task in [
+            self.reputation_task.take(),
+            self.peerfinding_task.take(),
+            self.transport_task.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             task.abort();
         }
     }

@@ -356,6 +356,7 @@ fn thousand_node_config(topology: TopologyStrategy) -> SimulationConfig {
     SimulationConfig {
         node_count: 1_000,
         attacker_count: 200,
+        trusted_raters: std::collections::BTreeSet::new(),
         fanout: 6,
         unknown_peer_reserve: 1,
         max_hops: 16,

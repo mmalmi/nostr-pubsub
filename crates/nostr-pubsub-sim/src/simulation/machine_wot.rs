@@ -4,9 +4,9 @@ use nostr_pubsub::{PeerBehaviorObservation, PubsubPeerInterest, SourceId, Verifi
 
 use super::reputation_flow::{PeerProjection, peer_projection, virtual_unix_secs};
 use super::{
-    DirectedServiceLink, MachineLifecyclePhase, NodeRole, PeerSelectionMode,
-    ReputationEventMetadata, ReputationEventOrigin, Result, ScheduledAction, Simulation, mix64,
-    peer_rating_event, peer_rating_event_with_samples, pubsub_error,
+    DirectedServiceLink, EventSource, MachineLifecyclePhase, NodeRole, PeerSelectionMode,
+    PolicyDecision, ReputationEventMetadata, ReputationEventOrigin, Result, ScheduledAction,
+    Simulation, mix64, peer_rating_event, peer_rating_event_with_samples, poll_ready, pubsub_error,
 };
 
 pub(super) const MAX_POSITIVE_ENDORSEMENTS_PER_NODE: usize = 2;
@@ -181,7 +181,18 @@ impl Simulation {
 
     pub(super) fn machine_lifecycle_plan(&self) -> Option<(usize, usize, usize)> {
         for receiver in self.config.attacker_count..self.config.node_count {
-            for rater in &self.nodes[receiver].service_admitted_raters {
+            let raters = self
+                .config
+                .trusted_raters
+                .iter()
+                .map(|rater| &self.peer_ids[*rater])
+                .chain(
+                    self.nodes[receiver]
+                        .service_admitted_raters
+                        .iter()
+                        .filter(|_| self.config.trusted_raters.is_empty()),
+                );
+            for rater in raters {
                 let publisher = self.peer_indices.get(rater).copied()?;
                 if publisher < self.config.attacker_count
                     || self.is_admitted_rater_publisher(publisher)
@@ -190,6 +201,9 @@ impl Simulation {
                     continue;
                 }
                 let policies = self.nodes[receiver].machine_policies.as_ref()?;
+                if peer_projection(policies, rater).ok()? != PeerProjection::Positive {
+                    continue;
+                }
                 let subject =
                     (self.config.attacker_count..self.config.node_count).find(|subject| {
                         *subject != publisher
@@ -642,19 +656,42 @@ impl Simulation {
         )?;
         let verified = VerifiedEvent::try_from(event.clone()).map_err(pubsub_error)?;
         let receiver_id = SourceId::new(&self.peer_ids[receiver]);
+        let expected_interest = if self.config.trusted_raters.contains(&publisher) {
+            PubsubPeerInterest::Subscribed
+        } else {
+            PubsubPeerInterest::Unsubscribed
+        };
         if self.nodes[receiver]
             .service_admitted_raters
             .contains(&self.peer_ids[publisher])
             || PubsubPeerInterest::from_filters(&self.nodes[receiver].rating_filters, &verified)
-                != PubsubPeerInterest::Unsubscribed
+                != expected_interest
             || self.nodes[relay]
                 .wire
                 .subscriptions()
                 .peer_interest(&receiver_id, &verified)
-                != PubsubPeerInterest::Unsubscribed
+                != expected_interest
         {
             return Err(pubsub_error(
-                "root revocation must remove the rater-author FIPS subscription before replay",
+                "root revocation must remove service-only author subscriptions before replay",
+            ));
+        }
+        self.record_cpu_work(receiver, |work| {
+            work.graph_queries = work.graph_queries.saturating_add(1);
+        });
+        self.record_avoided_signature_check(receiver);
+        let policies = self.nodes[receiver]
+            .machine_policies
+            .as_ref()
+            .ok_or_else(|| {
+                pubsub_error("revocation probe requires the receiver's machine policy")
+            })?;
+        let source = EventSource::fips_endpoint(&self.peer_ids[relay]);
+        let decision =
+            poll_ready(policies.check_verified_event(&verified, &source))?.map_err(pubsub_error)?;
+        if !matches!(decision, PolicyDecision::Drop { .. }) {
+            return Err(pubsub_error(
+                "root revocation must reject the relayed rating before ingestion",
             ));
         }
         self.report.post_revocation_rating_published = 1;
@@ -678,6 +715,7 @@ impl Simulation {
                 continue;
             };
             if publisher < self.config.attacker_count
+                || self.config.trusted_raters.contains(&publisher)
                 || !self.topology.neighbors[receiver].contains(&publisher)
                 || !self.nodes[receiver]
                     .service_admitted_raters

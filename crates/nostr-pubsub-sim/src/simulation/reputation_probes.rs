@@ -78,9 +78,16 @@ impl Simulation {
     pub(super) fn poisoned_probe_plan(&self) -> Option<(usize, usize, usize)> {
         let mut best = None;
         for publisher in self.config.attacker_count..self.config.node_count {
+            if !self.config.trusted_raters.is_empty()
+                && !self.config.trusted_raters.contains(&publisher)
+            {
+                continue;
+            }
             let trusting = self.active_rating_receivers(publisher, true);
             let untrusted = self.active_rating_receivers(publisher, false);
-            if trusting.is_empty() || untrusted.is_empty() {
+            if trusting.is_empty()
+                || (untrusted.is_empty() && self.config.trusted_raters.is_empty())
+            {
                 continue;
             }
             for receiver in trusting.iter().copied() {
@@ -126,9 +133,10 @@ impl Simulation {
                     })
             })
             .filter(|peer| {
-                self.nodes[*peer]
-                    .service_admitted_raters
-                    .contains(&self.peer_ids[publisher])
+                (self.config.trusted_raters.contains(&publisher)
+                    || self.nodes[*peer]
+                        .service_admitted_raters
+                        .contains(&self.peer_ids[publisher]))
                     == trusted
             })
             .filter(|peer| {
@@ -177,9 +185,10 @@ impl Simulation {
                             peer_projection(policies, &self.peer_ids[*subject])
                                 .is_ok_and(|projection| projection == PeerProjection::Unknown)
                         })
-                    && untrusted
-                        .iter()
-                        .any(|peer| self.topology.neighbors[*peer].contains(subject))
+                    && (self.config.trusted_raters.contains(&publisher)
+                        || untrusted
+                            .iter()
+                            .any(|peer| self.topology.neighbors[*peer].contains(subject)))
             })
             .min_by_key(|subject| {
                 (
@@ -202,6 +211,51 @@ mod tests {
         DirectedServiceLink, PeerSelectionMode, ReputationEventOrigin, SimulationConfig,
     };
     use crate::topology::{NodeRole, TopologyStrategy};
+
+    #[test]
+    fn configured_authority_poison_uses_real_subscriptions_without_service_endorsement() {
+        let mut simulation = Simulation::new(
+            SimulationConfig {
+                node_count: 48,
+                attacker_count: 8,
+                trusted_raters: [0, 17].into_iter().collect(),
+                loss_basis_points: 0,
+                churn_basis_points: 0,
+                ..SimulationConfig::default()
+            },
+            PeerSelectionMode::SharedReputation,
+        )
+        .unwrap();
+        simulation.install_subscriptions().unwrap();
+        simulation.drain_scheduler().unwrap();
+        assert_eq!(
+            simulation
+                .report
+                .machine_positive_service_endorsements_published,
+            0
+        );
+        let (publisher, receiver, subject) = simulation
+            .poisoned_probe_plan()
+            .expect("configured authority can publish before service evidence");
+        assert_eq!(publisher, 17);
+        assert!(!simulation.topology.neighbors[receiver].contains(&subject));
+        simulation.publish_poisoned_probe().unwrap();
+        simulation.drain_scheduler().unwrap();
+        assert_eq!(simulation.report.poisoned_machine_ratings_published, 1);
+        assert!(simulation.report.poisoned_machine_ratings_received > 0);
+        assert!(simulation.report.machine_poisoning_removals > 0);
+        assert_eq!(
+            peer_projection(
+                simulation.nodes[receiver]
+                    .machine_policies
+                    .as_ref()
+                    .unwrap(),
+                &simulation.peer_ids[subject]
+            )
+            .unwrap(),
+            PeerProjection::Removed
+        );
+    }
 
     #[test]
     fn removed_but_still_subscribed_receiver_is_not_an_active_poison_target() {

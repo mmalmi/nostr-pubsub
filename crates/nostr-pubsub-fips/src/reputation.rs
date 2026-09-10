@@ -179,6 +179,22 @@ impl FipsPeerReputation {
 }
 
 impl FipsPubsubPolicy {
+    /// Bounded subscription for the local root and explicitly configured raters.
+    pub fn rating_filter(&self) -> Result<nostr::Filter> {
+        self.reputation.reputation.rating_filter()
+    }
+
+    /// Apply the same configurable reputation projection to peer selection and
+    /// event admission. The default trusted-rater list is empty.
+    #[must_use]
+    pub fn client_policies(&self) -> crate::FipsPubsubClientPolicies {
+        crate::FipsPubsubClientPolicies {
+            peers: Some(self.peer_policy()),
+            events: Some(self.event_policy()),
+            ..Default::default()
+        }
+    }
+
     /// Restores the policy using the wall-clock Unix time.
     pub fn new<'a>(
         endpoint: Arc<FipsEndpoint>,
@@ -261,8 +277,10 @@ impl FipsPubsubPolicy {
         published: bool,
         now_ms: u64,
     ) -> Result<()> {
+        // Local observations remain useful while disconnected. Only the
+        // publication cadence depends on successful delivery to pubsub.
+        self.reputation.ingest_event_at(event, now_ms / 1_000)?;
         if published {
-            self.reputation.ingest_event_at(event, now_ms / 1_000)?;
             let _ = self.reputation.record_published_event(event, now_ms);
         }
         Ok(())

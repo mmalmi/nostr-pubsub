@@ -1,5 +1,53 @@
 use super::{ConnectedPeerLink, PeerIdentity, Result, invalid_option, poisoned, storage_error};
 use crate::client_inner::ClientInner;
+use nostr_pubsub::{MeshPeerPolicy, select_mesh_peers};
+
+pub(super) fn select_policy_peers(
+    policy: &dyn MeshPeerPolicy,
+    ids: impl IntoIterator<Item = String>,
+    capacity: usize,
+    unknown_reserve: usize,
+) -> Result<Vec<String>> {
+    let mut candidates = Vec::new();
+    for id in ids {
+        if let Some(mut candidate) = policy.select_mesh_peer(&id)? {
+            // A policy scores an authenticated identity; it cannot replace it.
+            candidate.id = id;
+            candidates.push(candidate);
+        }
+    }
+    Ok(
+        select_mesh_peers(&candidates, None, capacity, unknown_reserve)
+            .into_iter()
+            .map(|peer| peer.id)
+            .collect(),
+    )
+}
+
+fn select_links(
+    policy: Option<&dyn MeshPeerPolicy>,
+    links: Vec<ConnectedPeerLink>,
+    capacity: usize,
+    unknown_reserve: usize,
+) -> Result<Vec<ConnectedPeerLink>> {
+    let Some(policy) = policy else {
+        return Ok(links.into_iter().take(capacity).collect());
+    };
+    let selected = select_policy_peers(
+        policy,
+        links.iter().map(|link| link.npub.clone()),
+        capacity,
+        unknown_reserve,
+    )?;
+    let mut by_identity = links
+        .into_iter()
+        .map(|link| (link.npub.clone(), link))
+        .collect::<std::collections::HashMap<_, _>>();
+    Ok(selected
+        .into_iter()
+        .filter_map(|id| by_identity.remove(&id))
+        .collect())
+}
 
 pub(super) fn validate_routed_peers(
     mut peers: Vec<String>,
@@ -68,9 +116,20 @@ impl ClientInner {
             .collect::<Vec<_>>();
         direct.sort_unstable_by(|left, right| left.npub.cmp(&right.npub));
         direct.dedup_by(|left, right| left.npub == right.npub);
-        peers.extend(direct);
+        drop(routed);
         // Never change application-owned endpoint links to enforce pubsub bounds.
-        peers.truncate(self.options.max_connected_peers);
+        peers = select_links(
+            self.peer_policy.as_deref(),
+            peers,
+            self.options.max_connected_peers,
+            0,
+        )?;
+        peers.extend(select_links(
+            self.peer_policy.as_deref(),
+            direct,
+            self.options.max_connected_peers.saturating_sub(peers.len()),
+            self.unknown_peer_reserve,
+        )?);
         Ok(peers)
     }
 }

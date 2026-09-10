@@ -280,6 +280,7 @@ fn initial_report(
 const EMPTY_REPORT_CONFIG: SimulationConfig = SimulationConfig {
     node_count: 0,
     attacker_count: 0,
+    trusted_raters: BTreeSet::new(),
     fanout: 0,
     unknown_peer_reserve: 0,
     max_hops: 0,
@@ -380,6 +381,7 @@ const EMPTY_REPORT_TEMPLATE: SimulationReport = SimulationReport {
     rejected_malformed_messages: 0,
     unauthorized_source_drops: 0,
     machine_ingress_drops: 0,
+    lifecycle_control_machine_ingress_drops: 0,
     honest_source_legitimate_machine_ingress_drops: 0,
     adversarial_source_legitimate_reference_machine_ingress_drops: 0,
     adversarial_machine_ingress_drops: 0,

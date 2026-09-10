@@ -13,12 +13,21 @@ dropped peers are omitted.
 
 `PeerReputation` maintains the newest valid signed rating per rater, subject,
 and scope. The local node is always a trust root; callers may also configure up
-to 1,024 explicit `trusted_raters`. A rating affects the projection only when
-its Nostr signer is its declared rater and that rater is reachable from a
-configured root, preventing an unknown publisher from claiming somebody
-else's identity. Signature binding does not imply that every valid rater is
-honest; graph reachability and the caller's explicit anchors remain policy
-inputs.
+to 1,024 explicit `trusted_raters`, using public keys in hex or npub form. The
+default set is empty. A rating affects the projection only when its Nostr
+signer is its declared rater and is either the local root or an explicitly
+configured rater. Positive peer ratings improve peer selection but do not
+authorize their subjects to rate other peers. Root negative ratings can revoke
+a configured rater's influence; removing it from configuration and replaying
+also removes its influence. Signature binding does not establish whether an
+authorized rater is honest.
+
+`trusted_raters` supplies entrypoints for one general peer trust prior. It
+consumes signed kind-7368 ratings in the configured scope (`fips.peer` by
+default); it does not automatically import a person's kind-3 follow list or
+map their social identity to separate transport keys. Applications can choose
+their own public entrypoints or leave the set empty. The exported legacy
+`DEFAULT_SOCIAL_GRAPH_ENTRYPOINT_NPUB` example is never selected automatically.
 
 `PeerRatingPublisher` coalesces local machine ratings before publication.
 `from_events_at` reconstructs its retention and cadence state against a

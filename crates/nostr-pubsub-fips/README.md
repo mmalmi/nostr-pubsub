@@ -17,8 +17,36 @@ local advert into replay, refreshes it at half its signed TTL (capped at 30
 minutes), ingests received adverts through FIPS's normal validator, and gossips
 them over matching FIPS subscriptions. This works with an empty Nostr relay
 list. Applications with a social-graph policy should use
-`FipsPubsubClient::start_with_policy`; admission runs before local delivery,
-replay retention, or forwarding.
+`FipsPubsubClient::start_with_policies` with `FipsPubsubPolicy::client_policies()`
+to apply one shared trust projection to peer preference and event admission.
+Admission runs before local delivery, replay retention, or forwarding.
+The existing `start_with_policy` remains available for event admission alone.
+
+Trust entrypoints come from application configuration through
+`FipsPubsubPolicyOptions::reputation.trusted_raters`, which accepts public keys
+in hex or npub form and defaults to an empty set. No person's identity is
+chosen automatically. This projection consumes signed machine ratings; it does
+not import personal follow lists or grant access to application data. Positive
+service ratings do not authorize a peer to rate others.
+
+`FipsPubsubClient::start_with_reputation(endpoint, options, reputation_options)`
+also manages the bounded rating subscription and paced local publication. It
+uses one slot from `max_active_subscriptions`, subscribes only to the local root
+and configured raters, and releases its task and subscription with the client.
+Local observations update preference even when publication fails. The default
+evaluation interval is one minute, and both publication batches and replay are
+bounded. `reputation_error_count()` exposes failed updates or publications.
+Ratings are retained in memory and recover through available peer replay; use
+the policy facade directly when the application needs durable rating storage.
+
+The high-level client uses the same bounded quality selector as the lower-level
+mesh. With a peer policy, direct connections and inventory fanout prefer higher
+scores while retaining `unknown_peer_reserve` exploration slots (one by default).
+Explicit routed identities keep priority if admitted by the policy. Changing
+shared policy state updates existing connections and subscriptions; rejected
+peers release their pubsub state while application-owned FIPS links stay intact.
+Without a peer policy, the original identity-ordered connection selection and
+event-dependent fanout remain unchanged.
 
 Applications can supply known service identities in
 `FipsPubsubClientOptions::routed_peers`, then replace that bounded roster using

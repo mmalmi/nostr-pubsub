@@ -14,6 +14,13 @@ The simulator compares three peer-selection modes:
 - `shared-reputation`: local behavior plus signed, transported machine ratings
   evaluated by `nostr-social-graph`, while reserving unknown-peer exploration.
 
+Rating authority is an explicit scenario input: `--trusted-raters 0,17` chooses
+node indices whose signed ratings may affect other nodes. The default is empty;
+positive service ratings do not grant this authority. Indices are validated and
+the exact set appears in each CSV row as `trusted_raters` (semicolon-separated).
+Role and topology do not select authorities, so a scenario may deliberately
+configure a compromised identity. Comparisons must use the same configured set.
+
 ## Production-shaped traffic
 
 Each scenario creates real signed Nostr events, verifies them, and matches them
@@ -62,8 +69,16 @@ assuming that users maintain follow or mute lists:
 - machine admission covers targeted ratings, FIPS adverts, paid offers, and
   peer-rating control traffic. Production `PeerRatingPublisher`, signed kind
   7368 events, FIPS subscriptions, `InvWantMesh`, and `PeerReputation` carry
-  positive admission and removal transitions. One subject is admitted, removed,
-  and re-admitted by three transported ratings one virtual second apart.
+  positive admission and removal transitions. A configured-authority test
+  exercises one subject's admission, removal, and re-admission over three
+  transported ratings one virtual second apart; the empty configuration keeps
+  those remote ratings inert.
+  A removed subject may request its own lifecycle announcement after its peers
+  apply the removal. These deliberate controls remain in aggregate ingress
+  drops and wire-byte accounting, with the separate CSV counter
+  `lifecycle_control_machine_ingress_drops`. Classification follows the event's
+  lifecycle origin; ordinary workload from the same peer still counts against
+  the zero honest-legitimate ingress-drop gate.
   A sampled machine-WoT lane may publish at most two positive service
   endorsements per selected observer, and selects one in sixteen observers.
   One evidence-qualified observer is admitted as a globally bounded fallback
@@ -74,28 +89,32 @@ assuming that users maintain follow or mute lists:
   on that directed link with no invalid or unserved evidence; rating traffic
   cannot endorse itself, and negative evidence wins.
   Declared-rater forgeries are transported to and rejected by the production
-  ingester. A separate valid, self-signed compromised-trusted-rater probe
-  measures the removal power intentionally granted to an authorized rater.
+  ingester. With no configured authority, a valid self-signed poison probe reaches
+  service-subscribed and other interested recipients without gaining authority.
+  When authorities are configured, the probe uses one of those identities and
+  their real author subscriptions to measure the deliberately granted removal
+  power. A focused fixture also checks root revocation.
   Another properly signed peer defects only after verified useful service made
-  it reachable to one receiver. It poisons two unknown neighbors, then sends
+  it reachable to one receiver. It tries to poison two unknown non-neighbors, then sends
   five malformed production wire frames across that exact relationship. The
   receiver publishes machine-derived negative evidence, revokes the peer,
-  requires both poisoned targets to recover from removed to unknown, and sends
+  checks that unconfigured raters never remove either target, and sends
   a later rating by the revoked key through another relay to prove production
   event admission drops it before ingestion.
   Four valid ratings from distinct graph-unconnected keys are a separate,
   bounded retained-state and CPU-pressure control. They are intentionally inert
   in the graph and do not claim to test social-graph spam suppression. No
-  topology neighbor is pretrusted: a rating-author subscription is installed
-  only after verified service and a local-root positive graph projection, then
-  removed when the local root revokes that relation;
+  topology neighbor is automatically trusted. A rating-author subscription is
+  installed for configured authorities or after verified service and a local-root
+  positive projection. Service subscriptions do not confer rating authority and
+  are removed when the local root revokes that relation;
 - application admission checks broad Iris Drive roots against authors learned
   by applying production Nostr filter matching to established signed history.
 
 Adversarial load includes Sybil and blackhole peers, malformed wire frames,
 syntactically valid fake inventories that do not yield events, signed spam for
 all eight subscription classes, subscription floods and limit violations,
-forged machine ratings, an authorized poisoned rating, and adversarial generic
+forged machine ratings, valid signed rating-poison attempts, and adversarial generic
 discovery candidates. Seeded packet loss, bounded link churn, supernode outages, delayed
 transfer retries, and eventual disrupted-transfer delivery run on the virtual
 clock. Persistent attacker identities repeat after reputation can propagate;
@@ -103,8 +122,8 @@ separately keyed fresh Sybils first appear later as a cold-start control. Every
 identity lane is reported both across all matching traffic and for the three
 machine-admitted subscription classes, so learned removal can be separated
 from filter mismatch. The poisoned-rating probe targets an honest non-neighbor
-when possible, so it measures trust-anchor risk without manufacturing a
-workload edge; it is still accounted as spam. Historically legitimate frames
+when possible, so configured-authority scenarios measure trust-anchor risk
+without manufacturing a workload edge; the probe is still accounted as spam. Historically legitimate frames
 from the explicit post-service defector are classified separately by author
 even when an honest peer relays them. The simulator demonstrates these risks,
 not a defense against a compromised trust anchor.
@@ -204,7 +223,8 @@ The CSV report has one row per topology and peer-selection mode. It covers:
 - machine rating publication/transport/ingestion, admission/removal
   transitions, unserved-inventory-only quiet-blackhole removals, deliberate
   poisoning removals versus honest-observer false positives, same-subject
-  admit/remove/readmit completion, removal latency, machine trust-edge counts,
+  admit/remove/readmit completion, removal latency, service-author subscription
+  counts (the legacy `machine_trust_edges` field),
   signed machine graph updates, bounded positive-endorsement state, rating
   protocol messages/bytes, retained ratings/raters/roots, and separately
   classified service-admitted-rater poison, revocation, target-recovery, and
@@ -413,6 +433,12 @@ cargo run --release -p nostr-pubsub-sim
 
 The ignored release gate runs a deterministic 18-case matrix: three seeds,
 both topologies, and all three peer-selection modes, with 1,000 nodes per case.
+Each mode uses the same fixed authority indices
+`0,97,194,291,388,485,582,679,776,873,970`, including three adversarial identities.
+These are explicit inputs, independent of topology and observed behavior.
+Configured-authority and service-only defection probes remain separate: the
+first demonstrates the power intentionally granted to a compromised rater;
+the second must cause zero unauthorized removals.
 It requires at least 95% aggregate and 90% worst-cohort legitimate delivery,
 at least 50% peer-mesh and 50% mixed-hybrid signed-spam outcome suppression,
 at least 50% suppression in the persistent machine-admitted identity lane,

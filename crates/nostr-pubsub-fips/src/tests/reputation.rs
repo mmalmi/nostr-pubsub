@@ -114,9 +114,27 @@ async fn exercise_explicit_time_reputation(
             .expect("completed peer policy"),
         None
     );
+
+    let mut disconnected = FipsPubsubPolicy::new_at(
+        Arc::clone(endpoint),
+        std::iter::empty(),
+        FipsPubsubPolicyOptions::default(),
+        NOW_SECS,
+    )
+    .expect("disconnected policy");
+    disconnected
+        .complete_maintenance_event(&event, false, NOW_SECS * 1_000)
+        .expect("local observation survives a failed publication");
+    assert_eq!(
+        disconnected
+            .peer_policy()
+            .select_mesh_peer(peer_npub)
+            .unwrap(),
+        None
+    );
 }
 
-fn rating_event(signer: &Keys, subject: &str, value: i64, created_at: u64) -> Event {
+pub(super) fn rating_event(signer: &Keys, subject: &str, value: i64, created_at: u64) -> Event {
     let mut rating = Rating::new(signer.public_key().to_hex(), subject, value, 0, 100);
     rating.scope = Some("fips.peer".to_string());
     rating.created_at = created_at;

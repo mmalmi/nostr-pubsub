@@ -26,6 +26,7 @@ const CSV_COLUMNS: &[&str] = &[
     "mode",
     "nodes",
     "attackers",
+    "trusted_raters",
     "honest_nodes",
     "fanout",
     "unknown_peer_reserve",
@@ -103,6 +104,7 @@ const CSV_COLUMNS: &[&str] = &[
     "legitimate_policy_drops",
     "legitimate_application_policy_drops",
     "machine_ingress_drops",
+    "lifecycle_control_machine_ingress_drops",
     "honest_source_legitimate_machine_ingress_drops",
     "adversarial_source_legitimate_reference_machine_ingress_drops",
     "adversarial_machine_ingress_drops",
@@ -387,6 +389,13 @@ fn identity_config_values(report: &SimulationReport) -> Vec<String> {
         report.mode.as_str().to_string(),
         report.node_count.to_string(),
         report.attacker_count.to_string(),
+        report
+            .config
+            .trusted_raters
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(";"),
         report.honest_node_count.to_string(),
         report.config.fanout.to_string(),
         report.config.unknown_peer_reserve.to_string(),
@@ -472,6 +481,7 @@ fn delivery_values(report: &SimulationReport) -> Vec<String> {
         report.legitimate_policy_drops.to_string(),
         report.legitimate_application_policy_drops.to_string(),
         report.machine_ingress_drops.to_string(),
+        report.lifecycle_control_machine_ingress_drops.to_string(),
         report
             .honest_source_legitimate_machine_ingress_drops
             .to_string(),
@@ -827,6 +837,12 @@ fn parse_config(
         match flag.as_str() {
             "--nodes" => config.node_count = parse_number(&flag, &value)?,
             "--attackers" => config.attacker_count = parse_number(&flag, &value)?,
+            "--trusted-raters" => {
+                config.trusted_raters = value
+                    .split(',')
+                    .map(|index| parse_number(&flag, index))
+                    .collect::<Result<_, _>>()?;
+            }
             "--fanout" => config.fanout = parse_number(&flag, &value)?,
             "--unknown-reserve" => {
                 config.unknown_peer_reserve = parse_number(&flag, &value)?;
@@ -930,71 +946,5 @@ const fn discovery_name(strategy: SupernodeDiscoveryStrategy) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn csv_header_and_report_row_have_the_same_columns() {
-        let report = run_simulation(
-            SimulationConfig {
-                node_count: 120,
-                attacker_count: 24,
-                supernode_count: 8,
-                adversarial_discovery_candidate_count: 4,
-                loss_basis_points: 0,
-                churn_basis_points: 0,
-                ..SimulationConfig::default()
-            },
-            PeerSelectionMode::SharedReputation,
-        )
-        .unwrap();
-        let header = csv_header();
-        let row = report_csv(&report);
-
-        assert_eq!(csv_column_count(), header.split(',').count());
-        assert_eq!(csv_column_count(), row.split(',').count());
-    }
-
-    #[test]
-    fn parses_canonical_attack_controls_and_legacy_inventory_alias() {
-        let (canonical, _, _) = parse_config(
-            [
-                "--fake-inventories-per-attack-link",
-                "11",
-                "--signed-spam-rounds",
-                "5",
-                "--legitimate-publication-rounds",
-                "7",
-                "--adversarial-discovery-candidates",
-                "9",
-            ]
-            .map(String::from)
-            .into_iter(),
-        )
-        .unwrap();
-        let (legacy, _, _) =
-            parse_config(["--spam-per-honest", "7"].map(String::from).into_iter()).unwrap();
-
-        assert_eq!(canonical.fake_inventories_per_attack_link, 11);
-        assert_eq!(canonical.signed_spam_rounds, 5);
-        assert_eq!(canonical.legitimate_publication_rounds, 7);
-        assert_eq!(canonical.adversarial_discovery_candidate_count, 9);
-        assert_eq!(legacy.fake_inventories_per_attack_link, 7);
-    }
-
-    #[test]
-    fn reports_interest_affinity_for_canonical_and_legacy_discovery_names() {
-        for name in ["interest-affinity", "social-graph"] {
-            let (config, _, _) =
-                parse_config(["--discovery", name].map(String::from).into_iter()).unwrap();
-            assert_eq!(
-                config.supernode_discovery,
-                SupernodeDiscoveryStrategy::InterestAffinity
-            );
-            assert_eq!(
-                discovery_name(config.supernode_discovery),
-                "interest-affinity"
-            );
-        }
-    }
-}
+#[path = "cli_tests.rs"]
+mod tests;

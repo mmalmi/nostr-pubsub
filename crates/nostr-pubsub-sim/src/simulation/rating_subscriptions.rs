@@ -97,13 +97,21 @@ impl Simulation {
                     .map(|peer| self.keys[*peer].public_key()),
             ),
         ));
-        let trusted_raters = self.nodes[subscriber]
+        let mut rating_authors = self.nodes[subscriber]
             .service_admitted_raters
             .iter()
             .map(|rater| nostr::PublicKey::parse(rater).map_err(pubsub_error))
             .collect::<Result<Vec<_>>>()?;
-        if !trusted_raters.is_empty() {
-            filters.push(trusted_rater_filter(trusted_raters));
+        rating_authors.extend(
+            self.config
+                .trusted_raters
+                .iter()
+                .map(|rater| self.keys[*rater].public_key()),
+        );
+        rating_authors.sort();
+        rating_authors.dedup();
+        if !rating_authors.is_empty() {
+            filters.push(trusted_rater_filter(rating_authors));
         }
         Ok(filters)
     }

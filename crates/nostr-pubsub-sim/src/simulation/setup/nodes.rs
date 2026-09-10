@@ -25,9 +25,18 @@ pub(super) fn build_node(
         .map(|event| event.as_event().pubkey.to_hex())
         .collect::<BTreeSet<_>>();
     let (machine_reputation, machine_policies) = if node_index >= config.attacker_count {
-        let (reputation, policies) =
-            PeerReputation::new(&peer_ids[node_index], PeerReputationConfig::default())
-                .map_err(pubsub_error)?;
+        let (reputation, policies) = PeerReputation::new(
+            &peer_ids[node_index],
+            PeerReputationConfig {
+                trusted_raters: config
+                    .trusted_raters
+                    .iter()
+                    .map(|rater| peer_ids[*rater].clone())
+                    .collect(),
+                ..PeerReputationConfig::default()
+            },
+        )
+        .map_err(pubsub_error)?;
         (Some(reputation), Some(policies))
     } else {
         (None, None)

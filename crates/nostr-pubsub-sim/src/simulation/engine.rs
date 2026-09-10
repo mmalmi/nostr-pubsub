@@ -2,10 +2,11 @@ use super::{
     CHURN_END_MS, CHURN_START_MS, DirectedServiceLink, FipsPubsubWireMessage, InvWantWireMessage,
     LinkOutage, MALFORMED_TRAINING_SAMPLES, MeshPeer, NodeRole, OutageCause, Packet,
     PeerSelectionMode, PubsubDeliveryAction, PubsubDeliveryPolicy, PubsubPeerInterest,
-    REPUTATION_SWEEP_MS, Result, ScheduledAction, Simulation, SimulationError, SourceId,
-    SubscriptionClass, SubscriptionPurpose, TopologyStrategy, TrafficDirection, TrafficProvenance,
-    VerifiedEvent, hash_bytes, is_fresh_sybil, is_quiet_attacker, machine_admitted_class,
-    message_fault_key, message_traffic_provenance, mix64, profile_subscription_id, pubsub_error,
+    REPUTATION_SWEEP_MS, ReputationEventOrigin, Result, ScheduledAction, Simulation,
+    SimulationError, SourceId, SubscriptionClass, SubscriptionPurpose, TopologyStrategy,
+    TrafficDirection, TrafficProvenance, VerifiedEvent, hash_bytes, is_fresh_sybil,
+    is_quiet_attacker, machine_admitted_class, message_fault_key, message_traffic_provenance,
+    mix64, profile_subscription_id, pubsub_error,
 };
 use nostr::{Event, Kind};
 use nostr_social_memory::{RATING_KIND, rating_from_event};
@@ -383,7 +384,7 @@ impl Simulation {
             self.note_disrupted_payload(source, destination, &payload);
             return Ok(());
         }
-        let provenance = self.payload_traffic_provenance(&payload);
+        let (provenance, lifecycle_control) = self.payload_provenance(&payload);
         self.traffic[destination].record_message(TrafficDirection::Received, provenance, bytes);
         self.record_link_traffic(
             source,
@@ -400,7 +401,14 @@ impl Simulation {
         if self.topology.roles[destination] == NodeRole::Attacker {
             return self.process_attacker_packet(source, destination, &payload);
         }
-        self.process_honest_packet(source, destination, &payload, provenance, bytes)
+        self.process_honest_packet(
+            source,
+            destination,
+            &payload,
+            provenance,
+            bytes,
+            lifecycle_control,
+        )
     }
 
     fn process_honest_packet(
@@ -410,8 +418,9 @@ impl Simulation {
         payload: &[u8],
         provenance: TrafficProvenance,
         bytes: u64,
+        lifecycle_control: bool,
     ) -> Result<()> {
-        if self.machine_rejects_ingress(source, destination, provenance) {
+        if self.machine_rejects_ingress(source, destination, provenance, lifecycle_control) {
             return Ok(());
         }
         self.record_cpu_work(destination, |work| {
@@ -931,11 +940,20 @@ impl Simulation {
         ) % 9
     }
 
-    fn payload_traffic_provenance(&self, payload: &[u8]) -> TrafficProvenance {
+    fn payload_provenance(&self, payload: &[u8]) -> (TrafficProvenance, bool) {
         self.codec
             .decode(payload)
-            .map_or(TrafficProvenance::Adversarial, |message| {
-                message_traffic_provenance(&message, &self.events, &self.reputation_events)
+            .map_or((TrafficProvenance::Adversarial, false), |message| {
+                let lifecycle_control = self
+                    .reputation_events
+                    .get(super::wire_event_id(&message))
+                    .is_some_and(|metadata| {
+                        matches!(metadata.origin, ReputationEventOrigin::MachineLifecycle(_))
+                    });
+                (
+                    message_traffic_provenance(&message, &self.events, &self.reputation_events),
+                    lifecycle_control,
+                )
             })
     }
 }

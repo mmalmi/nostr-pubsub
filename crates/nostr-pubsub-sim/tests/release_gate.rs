@@ -19,6 +19,8 @@ const RELEASE_SEEDS: [u64; 3] = [
     0x9e37_79b9_7f4a_7c15,
     0x0000_0000_0000_0001,
 ];
+// Fixed scenario identities, including compromised raters; no role or topology selection.
+const RELEASE_TRUSTED_RATERS: [usize; 11] = [0, 97, 194, 291, 388, 485, 582, 679, 776, 873, 970];
 const MIN_DELIVERY_BPS: u32 = 9_500;
 const MIN_WORST_COHORT_BPS: u32 = 9_000;
 const MIN_EVENTUAL_DISRUPTED_TRANSFER_RECOVERY_BPS: u32 = 3_000;
@@ -233,6 +235,7 @@ fn release_config(seed: u64, topology: TopologyStrategy) -> SimulationConfig {
     SimulationConfig {
         node_count: 1_000,
         attacker_count: 200,
+        trusted_raters: RELEASE_TRUSTED_RATERS.into_iter().collect(),
         fanout: 6,
         unknown_peer_reserve: 1,
         max_hops: 16,
@@ -939,8 +942,9 @@ fn role_sent_legitimate_bytes(report: &SimulationReport, role: NodeRole) -> u64 
 
 fn report_context(report: &SimulationReport, case: &str) -> String {
     format!(
-        "{case} mode={} delivery={} worst={} spam={} suppression={} recovery={} processed={} honest_ingress_drops={} transported_transitions={} quiet_blackhole_removals={} poison_ingests={} poisoning_removals={} false_removals={} rediscovery={{sweeps:{} attempts:{} removed:{} decoys:{} added:{} state:{}}}",
+        "{case} mode={} trusted_raters={:?} delivery={} worst={} spam={} suppression={} recovery={} processed={} honest_ingress_drops={} lifecycle_control_ingress_drops={} transported_transitions={} quiet_blackhole_removals={} poison_ingests={} poisoning_removals={} false_removals={} rediscovery={{sweeps:{} attempts:{} removed:{} decoys:{} added:{} state:{}}}",
         report.mode.as_str(),
+        report.config.trusted_raters,
         report.delivery_basis_points,
         report.worst_cohort_delivery_basis_points,
         report.spam_delivered,
@@ -948,6 +952,7 @@ fn report_context(report: &SimulationReport, case: &str) -> String {
         report.eventual_disrupted_transfer_recovery_basis_points,
         report.processed_messages,
         report.honest_source_legitimate_machine_ingress_drops,
+        report.lifecycle_control_machine_ingress_drops,
         report.machine_transported_transitions,
         report.machine_quiet_blackhole_removals,
         report.poisoned_machine_ratings_ingested,

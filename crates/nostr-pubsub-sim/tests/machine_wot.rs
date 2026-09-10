@@ -2,7 +2,7 @@ use nostr_pubsub_sim::{PeerSelectionMode, SimulationConfig, TopologyStrategy, ru
 use nostr_pubsub_social_graph::PEER_RATING_MAX_ENTRIES;
 
 #[test]
-fn bounded_service_endorsements_transport_and_classify_admitted_rater_poison() {
+fn bounded_service_endorsements_do_not_authorize_transported_poison() {
     let report = run_simulation(
         SimulationConfig {
             node_count: 48,
@@ -93,11 +93,11 @@ fn bounded_service_endorsements_transport_and_classify_admitted_rater_poison() {
     assert_eq!(report.admitted_rater_poison_target_unknown_before, 2);
     assert_eq!(report.admitted_rater_poison_target_received, 2);
     assert_eq!(report.admitted_rater_poison_target_ingested, 2);
-    assert_eq!(report.admitted_rater_poison_target_removals, 2);
-    assert!(report.admitted_rater_poison_removals >= 2);
+    assert_eq!(report.admitted_rater_poison_target_removals, 0);
+    assert_eq!(report.admitted_rater_poison_removals, 0);
     assert_eq!(report.admitted_rater_misbehavior_frames, 5);
     assert_eq!(report.admitted_rater_revocations, 1);
-    assert_eq!(report.admitted_rater_poison_target_recoveries, 2);
+    assert_eq!(report.admitted_rater_poison_target_recoveries, 0);
     assert_eq!(report.post_revocation_rating_published, 1);
     assert_eq!(report.post_revocation_rating_target_policy_drops, 0);
     assert_eq!(report.post_revocation_rating_target_received, 0);

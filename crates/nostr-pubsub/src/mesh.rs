@@ -782,7 +782,7 @@ impl InvWantMesh {
         message: &InvWantWireMessage,
     ) -> Vec<InvWantAction> {
         let peers = self.peers_with_behavior(peers);
-        select_peers(
+        select_mesh_peers(
             &peers,
             excluded_peer,
             self.options.fanout,
@@ -915,7 +915,10 @@ impl InvWantMesh {
     }
 }
 
-fn select_peers(
+/// Select a stable, bounded set using one quality score per peer while keeping
+/// room for unknown peers. Identity is the deterministic tie-breaker.
+#[must_use]
+pub fn select_mesh_peers(
     peers: &[MeshPeer],
     excluded_peer: Option<&str>,
     fanout: usize,

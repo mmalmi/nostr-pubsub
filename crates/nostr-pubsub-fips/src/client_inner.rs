@@ -21,6 +21,8 @@ pub(super) struct ClientInner {
     pub(super) peer_transport: Option<&'static str>,
     pub(super) excluded_peer_transports: HashSet<String>,
     pub(super) event_policy: Option<Arc<dyn PubsubPolicy>>,
+    pub(super) peer_policy: Option<Arc<dyn nostr_pubsub::MeshPeerPolicy>>,
+    pub(super) unknown_peer_reserve: usize,
     pub(super) transport_tx: mpsc::Sender<TransportCommand>,
     pub(super) connected_transport_peers: AtomicUsize,
     pub(super) req_frames_received: AtomicU64,
@@ -37,6 +39,7 @@ pub(super) struct ClientInner {
     pub(super) tcp_datagrams_rejected: AtomicU64,
     pub(super) tcp_poll_turns: AtomicU64,
     pub(super) transport_errors: AtomicU64,
+    pub(super) reputation_errors: AtomicU64,
     pub(super) next_subscription_id: AtomicU64,
     pub(super) subscriptions: Mutex<HashMap<String, ActiveSubscription>>,
     pub(super) peer_subscriptions: Mutex<PubsubPeerSubscriptionStore>,
@@ -555,6 +558,24 @@ impl ClientInner {
                     vec![SubscriptionId::new(subscription.subscription_id.clone())],
                 ));
             }
+        }
+        drop(subscriptions);
+        if let Some(policy) = self.peer_policy.as_deref() {
+            let selected = crate::client_peers::select_policy_peers(
+                policy,
+                targets.iter().map(|(id, _)| id.clone()),
+                self.options.fanout,
+                self.unknown_peer_reserve,
+            )?;
+            let mut by_identity = targets.into_iter().collect::<HashMap<_, _>>();
+            return Ok(selected
+                .into_iter()
+                .filter_map(|id| {
+                    by_identity
+                        .remove(&id)
+                        .map(|subscriptions| (id, subscriptions))
+                })
+                .collect());
         }
         Ok(bounded_delivery_targets(
             targets,
