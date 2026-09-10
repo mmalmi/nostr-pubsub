@@ -22,9 +22,7 @@ use nostr_social_memory::RatingEventExt;
 use tokio::time::timeout;
 
 use super::*;
-use crate::client_transport::{
-    peer_identity_for_connect, peer_link_needs_connect, tcp_driver_poll_needed,
-};
+use crate::client_transport::tcp_driver_poll_needed;
 
 mod managed_reputation;
 mod peer_policy;
@@ -46,49 +44,6 @@ fn tcp_timer_poll_matches_the_minimum_retransmission_granularity() {
 fn idle_transport_does_not_poll_an_empty_tcp_stack() {
     assert!(!tcp_driver_poll_needed(0));
     assert!(tcp_driver_poll_needed(1));
-}
-
-#[test]
-fn stable_peer_link_does_not_require_transport_reconnect() {
-    let known = HashMap::from([("peer-a".to_string(), 7)]);
-
-    assert!(!peer_link_needs_connect(&known, "peer-a", 7));
-    assert!(peer_link_needs_connect(&known, "peer-a", 8));
-    assert!(peer_link_needs_connect(&known, "peer-b", 1));
-}
-
-#[test]
-fn stable_peer_link_does_not_decode_its_identity_again() {
-    let stable_peer = ConnectedPeerLink {
-        npub: "already-authenticated-peer".to_string(),
-        link_id: 7,
-    };
-    let known = HashMap::from([(stable_peer.npub.clone(), stable_peer.link_id)]);
-
-    assert!(peer_identity_for_connect(&known, &stable_peer, true).is_none());
-
-    let new_identity = Keys::generate()
-        .public_key()
-        .to_bech32()
-        .expect("encode peer npub");
-    let changed_peer = ConnectedPeerLink {
-        npub: new_identity.clone(),
-        link_id: 8,
-    };
-    assert_eq!(
-        peer_identity_for_connect(&known, &changed_peer, true)
-            .expect("changed link identity")
-            .npub(),
-        new_identity
-    );
-    let known = HashMap::from([(changed_peer.npub.clone(), changed_peer.link_id)]);
-    assert!(peer_identity_for_connect(&known, &changed_peer, true).is_none());
-    assert_eq!(
-        peer_identity_for_connect(&known, &changed_peer, false)
-            .expect("failed or closed TCP stream must retry without a new FIPS link")
-            .npub(),
-        new_identity
-    );
 }
 
 #[test]

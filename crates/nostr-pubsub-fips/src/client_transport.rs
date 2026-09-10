@@ -1,8 +1,8 @@
 use std::sync::Weak;
 
 use super::{
-    ClientInner, ConnectedPeerLink, HashMap, HashSet, Ordering, PeerIdentity, SourceId,
-    TCP_POLL_INTERVAL, TransportCommand, WireTcpDriver, mpsc, now_ms,
+    ClientInner, HashMap, HashSet, Ordering, PeerIdentity, SourceId, TCP_POLL_INTERVAL,
+    TransportCommand, WireTcpDriver, mpsc, now_ms,
 };
 use crate::wire_tcp::WireTcpReport;
 
@@ -33,7 +33,7 @@ pub(super) async fn transport_loop(
                             continue;
                         }
                         if driver.queue_frame(peer, &frame).is_err()
-                            || driver.connect_peer(peer, now_ms()).await.is_err()
+                            || driver.connect_peer(&peer.npub(), now_ms()).await.is_err()
                         {
                             inner.transport_errors.fetch_add(1, Ordering::Relaxed);
                         }
@@ -104,12 +104,7 @@ async fn sync_transport_peers(
         if inner.peer_is_in_cooldown(&peer.npub, now_ms()) {
             continue;
         }
-        let identity =
-            peer_identity_for_connect(known_links, &peer, driver.has_peer_connection(&peer.npub));
-        let Some(identity) = identity else {
-            continue;
-        };
-        if driver.connect_peer(identity, now_ms()).await.is_err() {
+        if driver.connect_peer(&peer.npub, now_ms()).await.is_err() {
             inner.transport_errors.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -126,24 +121,6 @@ fn forget_peer_state(inner: &ClientInner, peer_npub: &str) {
             subscription.peers.remove(peer_npub);
         }
     }
-}
-
-pub(super) fn peer_identity_for_connect(
-    known_links: &HashMap<String, u64>,
-    peer: &ConnectedPeerLink,
-    has_connection: bool,
-) -> Option<PeerIdentity> {
-    (!has_connection || peer_link_needs_connect(known_links, &peer.npub, peer.link_id))
-        .then(|| PeerIdentity::from_npub(&peer.npub).ok())
-        .flatten()
-}
-
-pub(super) fn peer_link_needs_connect(
-    known_links: &HashMap<String, u64>,
-    peer_npub: &str,
-    link_id: u64,
-) -> bool {
-    known_links.get(peer_npub) != Some(&link_id)
 }
 
 async fn process_wire_report(
