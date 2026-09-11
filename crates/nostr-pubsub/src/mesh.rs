@@ -948,18 +948,18 @@ pub fn select_mesh_peers(
             .then_with(|| left.id.cmp(&right.id))
     });
 
+    if fanout >= candidates.len() {
+        return candidates;
+    }
+
     let target = fanout.min(candidates.len());
     let required_unknown = unknown_peer_reserve
         .min(target)
         .min(candidates.iter().filter(|peer| peer.is_unknown()).count());
     let mut selected = candidates.iter().take(target).cloned().collect::<Vec<_>>();
-    let selected_ids = selected
+    let mut replacement_unknowns = candidates[target..]
         .iter()
-        .map(|peer| peer.id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut replacement_unknowns = candidates
-        .iter()
-        .filter(|peer| peer.is_unknown() && !selected_ids.contains(&peer.id))
+        .filter(|peer| peer.is_unknown())
         .cloned();
 
     while selected.iter().filter(|peer| peer.is_unknown()).count() < required_unknown {
