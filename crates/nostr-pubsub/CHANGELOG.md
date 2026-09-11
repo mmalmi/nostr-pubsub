@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15 - 2026-09-11
+
+- Reduce peer-selection allocations when all candidates fit and when reserving
+  capacity for unknown peers. Preserve deterministic ranking, duplicate-score
+  handling, exclusions, and the existing unknown-peer reserve.
+
 ## 0.1.13 - 2026-07-18
 
 - Add one transport-neutral router model for Hashtree/local indexes, FIPS
