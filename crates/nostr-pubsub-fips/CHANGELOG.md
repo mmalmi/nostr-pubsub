@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.5 - 2026-09-15
+
+- Update to FIPS core 0.4.82 and TCP endpoint 0.2.17 for recovery of
+  unanswered sparse traffic and interrupted UDP path handshakes.
+
 ## 0.5.4 - 2026-09-10
 
 - Bound repeated service connection attempts to one per three seconds per
