@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.6 - 2026-09-28
+
+- Update to FIPS core 0.4.83 and TCP endpoint 0.2.18 for connection lifecycle,
+  discovery, and identity recovery improvements. Pubsub wire behavior is unchanged.
+
 ## 0.5.5 - 2026-09-15
 
 - Update to FIPS core 0.4.82 and TCP endpoint 0.2.17 for recovery of
