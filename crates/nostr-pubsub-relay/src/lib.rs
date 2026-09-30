@@ -1,5 +1,8 @@
 //! Actual Nostr relay backend for `nostr-pubsub`.
 
+mod session;
+pub use session::{RelaySession, RelaySessionEvent};
+
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
