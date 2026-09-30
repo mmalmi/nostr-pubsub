@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.7 - 2026-09-30
+
+- Update to FIPS core 0.4.86 and TCP endpoint 0.2.19 for linear peer snapshots
+  and routing recovery under load. Pubsub wire behavior is unchanged.
+
 ## 0.5.6 - 2026-09-28
 
 - Update to FIPS core 0.4.83 and TCP endpoint 0.2.18 for connection lifecycle,
