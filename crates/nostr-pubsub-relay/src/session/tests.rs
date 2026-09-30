@@ -210,3 +210,18 @@ async fn reconnect_replays_only_live_interests_and_drop_closes_socket() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn reports_failure_before_the_first_successful_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let mut session = RelaySession::connect(&url).await.unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), session.next())
+            .await
+            .unwrap()
+            .unwrap(),
+        Some(RelaySessionEvent::Connection(false))
+    ));
+}

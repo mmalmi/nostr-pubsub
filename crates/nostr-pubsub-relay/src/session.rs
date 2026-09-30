@@ -88,7 +88,14 @@ impl RelaySession {
             match self.notifications.recv().await {
                 Ok(RelayNotification::RelayStatus { status }) => {
                     let connected = status == RelayStatus::Connected;
-                    if self.connected != connected {
+                    if (connected && !self.connected)
+                        || matches!(
+                            status,
+                            RelayStatus::Disconnected
+                                | RelayStatus::Terminated
+                                | RelayStatus::Banned
+                        )
+                    {
                         self.connected = connected;
                         return Ok(Some(RelaySessionEvent::Connection(connected)));
                     }
