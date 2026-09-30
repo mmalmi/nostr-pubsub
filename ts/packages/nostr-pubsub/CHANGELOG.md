@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.8 - 2026-09-30
+
+- Bound FIPS historical queries by their configured observation window even
+  when the caller allows a later overall deadline; empty peer history remains
+  explicitly incomplete and does not delay relay-backed app queries.
+
 ## 0.5.7 - 2026-09-30
 
 - Add a shared browser/worker Nostr runtime with exact-filter relay batching,
