@@ -76,7 +76,7 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
   query(filters: NostrFilter[], options: QueryOptions = {}): Promise<QueryReport> {
     validateQueryOptions(options);
     if (options.signal?.aborted) return Promise.reject(abortError(options.signal.reason));
-    const deadline = options.deadline ?? Date.now() + this.queryWindowMs;
+    const deadline = Math.min(options.deadline ?? Infinity, Date.now() + this.queryWindowMs);
     if (deadline <= Date.now()) {
       return Promise.reject(new DOMException('FIPS pubsub query deadline exceeded', 'TimeoutError'));
     }

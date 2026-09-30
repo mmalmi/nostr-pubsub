@@ -404,6 +404,19 @@ describe('FipsNostrPubsubClient', () => {
     await bob.stop();
   });
 
+  it('bounds empty peer history by its observation window even with a later caller deadline', async () => {
+    const network = new MemoryFipsNetwork();
+    const client = new FipsNostrPubsubClient({ localPeerId: ALICE, node: network.node(ALICE), peers: () => [] }).start();
+    try {
+      const source = new FipsNostrPubsubEventSource(client, 25);
+      const start = Date.now();
+      const report = await source.query([{ kinds: [1060] }], { deadline: Date.now() + 5000 });
+      expect(report).toEqual({ events: [], complete: false });
+      expect(Date.now() - start).toBeLessThan(500);
+      expect(client.activeSubscriptionCount()).toBe(0);
+    } finally { await client.stop(); }
+  });
+
   it('refreshes subscriptions when an admitted standalone link appears', async () => {
     const network = new MemoryFipsNetwork();
     const aliceNode = network.node(ALICE);
