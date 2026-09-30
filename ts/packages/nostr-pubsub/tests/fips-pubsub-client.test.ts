@@ -330,11 +330,13 @@ describe('FipsNostrPubsubClient', () => {
       expect(bob.activeSubscriptionCount()).toBe(16);
       expect(alice.peerSubscriptionCount(BOB)).toBe(16);
       const events = Array.from(counts, (_, index) => eventFor(index));
-      for (let index = 0; index < events.length; index++) {
-        await alice.publish(events[index]!);
-        if (index % 16 === 15) await settle(alice, bob);
+      // An unpaced finite burst may hold WANT responses in TCP longer than its
+      // alternate-provider retry interval. All requested events must still arrive.
+      for (const event of events) await alice.publish(event);
+      for (let attempt = 0; attempt < 100 && counts.some(count => count === 0); attempt++) {
+        await settle(alice, bob);
+        await new Promise(resolve => setTimeout(resolve, 10));
       }
-      await settle(alice, bob);
       expect([...counts]).toEqual(Array(512).fill(1));
       const crossed = finalizeEvent({ kind: 1060, created_at: 1700000000, tags: [['p', recipient(1)]], content: 'must not widen author/recipient pairs' }, keys[0]!);
       await alice.publish(crossed); await settle(alice, bob);

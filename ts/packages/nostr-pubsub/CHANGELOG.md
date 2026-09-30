@@ -2,6 +2,10 @@
 
 ## 0.5.11 - 2026-09-30
 
+- Keep requested peer responses eligible during finite CPU/transport backlogs
+  while trying alternate providers. The first valid requested response wins;
+  unanswered work expires after ten seconds and remains capacity-bounded.
+
 - Reject unadmitted peer datagrams before TCP allocates connection state, and
   treat a remote half-close released by a concurrent reset as already closed.
 

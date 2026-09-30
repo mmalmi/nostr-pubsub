@@ -8,16 +8,22 @@ interface InventoryProvider {
 interface PendingWant {
   selected: InventoryProvider;
   alternatives: InventoryProvider[];
+  previous: InventoryProvider[];
+  expiresAtMs: number;
   eventKind: number;
   payloadBytes: number;
   hopLimit: number;
   requestedAtMs: number;
+  needsRequest: boolean;
 }
 
 export interface WantRequest {
   peerId: string;
   eventId: string;
 }
+
+// A slow main thread must not turn a queued reliable TCP response into a miss.
+const WANT_LIFETIME_MS = 10_000;
 
 /** Bounded global WANT selection shared by live and historical inventories. */
 export class FipsPubsubInvWantState {
@@ -41,11 +47,11 @@ export class FipsPubsubInvWantState {
         existing.eventKind !== message.eventKind ||
         existing.payloadBytes !== message.payloadBytes
       ) return undefined;
-      const provider = [existing.selected, ...existing.alternatives]
+      const provider = [existing.selected, ...existing.alternatives, ...existing.previous]
         .find((candidate) => candidate.peerId === peerId);
       if (provider !== undefined) {
         for (const id of validSubscriptionIds) provider.subscriptionIds.add(id);
-      } else if (existing.alternatives.length < this.maxAlternatives) {
+      } else if (existing.alternatives.length + existing.previous.length < this.maxAlternatives) {
         existing.alternatives.push({
           peerId,
           subscriptionIds: new Set(validSubscriptionIds),
@@ -57,10 +63,13 @@ export class FipsPubsubInvWantState {
     this.pending.set(message.eventId, {
       selected: { peerId, subscriptionIds: new Set(validSubscriptionIds) },
       alternatives: [],
+      previous: [],
+      expiresAtMs: nowMs + WANT_LIFETIME_MS,
       eventKind: message.eventKind,
       payloadBytes: message.payloadBytes,
       hopLimit: message.hopLimit,
       requestedAtMs: nowMs,
+      needsRequest: false,
     });
     this.order.push(message.eventId);
     this.trim();
@@ -77,8 +86,8 @@ export class FipsPubsubInvWantState {
     const pending = this.pending.get(eventId);
     if (
       pending === undefined ||
-      pending.selected.peerId !== peerId ||
-      !pending.selected.subscriptionIds.has(subscriptionId) ||
+      ![pending.selected, ...pending.previous].some(provider =>
+        provider.peerId === peerId && provider.subscriptionIds.has(subscriptionId)) ||
       pending.eventKind !== eventKind ||
       pending.payloadBytes !== payloadBytes
     ) return undefined;
@@ -89,15 +98,19 @@ export class FipsPubsubInvWantState {
   retryDue(nowMs: number, retryAfterMs: number): WantRequest[] {
     const retries: WantRequest[] = [];
     for (const [eventId, pending] of this.pending) {
-      if (nowMs - pending.requestedAtMs < retryAfterMs) continue;
-      const next = pending.alternatives.shift();
-      if (next === undefined) {
-        this.delete(eventId);
-        continue;
+      if (nowMs >= pending.expiresAtMs) { this.delete(eventId); continue; }
+      if (!pending.needsRequest && nowMs - pending.requestedAtMs < retryAfterMs) continue;
+      if (!pending.needsRequest) {
+        const next = pending.alternatives.shift();
+        // Retain evidence for the in-flight TCP response even when no alternate
+        // exists. A retry interval is not proof that the original request failed.
+        if (next === undefined) continue;
+        pending.previous.push(pending.selected);
+        pending.selected = next;
       }
-      pending.selected = next;
+      pending.needsRequest = false;
       pending.requestedAtMs = nowMs;
-      retries.push({ peerId: next.peerId, eventId });
+      retries.push({ peerId: pending.selected.peerId, eventId });
     }
     return retries;
   }
@@ -105,15 +118,15 @@ export class FipsPubsubInvWantState {
   removeSubscription(subscriptionId: string): void {
     for (const [eventId, pending] of this.pending) {
       pending.selected.subscriptionIds.delete(subscriptionId);
-      for (const provider of pending.alternatives) {
+      for (const provider of [...pending.alternatives, ...pending.previous]) {
         provider.subscriptionIds.delete(subscriptionId);
       }
-      pending.alternatives = pending.alternatives
-        .filter((provider) => provider.subscriptionIds.size > 0);
+      pending.alternatives = pending.alternatives.filter(provider => provider.subscriptionIds.size > 0);
+      pending.previous = pending.previous.filter(provider => provider.subscriptionIds.size > 0);
       if (pending.selected.subscriptionIds.size > 0) continue;
-      const next = pending.alternatives.shift();
+      const next = pending.alternatives.shift() ?? pending.previous.shift();
       if (next === undefined) this.delete(eventId);
-      else pending.selected = next;
+      else { pending.selected = next; pending.needsRequest = true; }
     }
   }
 
@@ -121,12 +134,13 @@ export class FipsPubsubInvWantState {
     for (const [eventId, pending] of this.pending) {
       pending.alternatives = pending.alternatives
         .filter((provider) => provider.peerId !== peerId);
+      pending.previous = pending.previous.filter(provider => provider.peerId !== peerId);
       if (pending.selected.peerId !== peerId) continue;
-      const next = pending.alternatives.shift();
+      const next = pending.alternatives.shift() ?? pending.previous.shift();
       if (next === undefined) this.delete(eventId);
       else {
         pending.selected = next;
-        pending.requestedAtMs = 0;
+        pending.needsRequest = true;
       }
     }
   }
