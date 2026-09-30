@@ -21,6 +21,7 @@ type Batch = {
     entries: Entry[];
     links: Map<string, Link>;
     closed: boolean;
+    reopenTimer?: ReturnType<typeof setTimeout>;
 };
 /** Batches OR filters without merging their fields, preserving recipient/author intersections. */
 export declare class RuntimeRelays {

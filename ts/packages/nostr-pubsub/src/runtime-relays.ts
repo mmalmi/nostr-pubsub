@@ -7,7 +7,7 @@ import type { NostrRuntimeOptions, RuntimeRelayStats } from './runtime-types.js'
 
 type Entry = { relays?: readonly string[]; filters: NostrFilter[]; event: (event: NostrEvent, relay: string) => void; state: (relay: string, complete: boolean, error?: string) => void; closed: boolean; batch?: Batch };
 type Link = { generation: number; close?: () => void; timer?: ReturnType<typeof setTimeout>; attempts: number; eosed: boolean; latest: Map<string, number> };
-type Batch = { entries: Entry[]; links: Map<string, Link>; closed: boolean };
+type Batch = { entries: Entry[]; links: Map<string, Link>; closed: boolean; reopenTimer?: ReturnType<typeof setTimeout> };
 
 /** Batches OR filters without merging their fields, preserving recipient/author intersections. */
 export class RuntimeRelays {
@@ -54,7 +54,15 @@ export class RuntimeRelays {
     return { close: () => {
       if (entry.closed) return;
       entry.closed = true;
-      if (entry.batch) this.reopen(entry.batch);
+      const batch = entry.batch;
+      if (!batch) return;
+      if (batch.entries.every((entry) => entry.closed)) { this.closeBatch(batch); return; }
+      // UI unsubscriptions arrive as separate worker tasks. A microtask cannot
+      // coalesce them, and reopening after each removal creates a REQ storm.
+      if (!batch.reopenTimer) batch.reopenTimer = setTimeout(() => {
+        batch.reopenTimer = undefined;
+        if (!batch.closed) this.reopen(batch);
+      }, this.options.batchWindowMs ?? 10);
     } };
   }
   setRelays(urls: readonly string[]): void {
@@ -110,6 +118,8 @@ export class RuntimeRelays {
     this.reopen(batch);
   }
   private reopen(batch: Batch): void {
+    if (batch.reopenTimer) clearTimeout(batch.reopenTimer);
+    batch.reopenTimer = undefined;
     for (const link of batch.links.values()) this.closeLink(link);
     batch.links.clear();
     batch.entries = batch.entries.filter((entry) => !entry.closed);
@@ -173,6 +183,8 @@ export class RuntimeRelays {
   }
   private closeBatch(batch: Batch): void {
     batch.closed = true;
+    if (batch.reopenTimer) clearTimeout(batch.reopenTimer);
+    batch.reopenTimer = undefined;
     for (const link of batch.links.values()) this.closeLink(link);
     batch.links.clear(); this.batches.delete(batch);
   }

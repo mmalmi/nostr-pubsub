@@ -55,8 +55,21 @@ export class RuntimeRelays {
                 if (entry.closed)
                     return;
                 entry.closed = true;
-                if (entry.batch)
-                    this.reopen(entry.batch);
+                const batch = entry.batch;
+                if (!batch)
+                    return;
+                if (batch.entries.every((entry) => entry.closed)) {
+                    this.closeBatch(batch);
+                    return;
+                }
+                // UI unsubscriptions arrive as separate worker tasks. A microtask cannot
+                // coalesce them, and reopening after each removal creates a REQ storm.
+                if (!batch.reopenTimer)
+                    batch.reopenTimer = setTimeout(() => {
+                        batch.reopenTimer = undefined;
+                        if (!batch.closed)
+                            this.reopen(batch);
+                    }, this.options.batchWindowMs ?? 10);
             } };
     }
     setRelays(urls) {
@@ -122,6 +135,9 @@ export class RuntimeRelays {
         this.reopen(batch);
     }
     reopen(batch) {
+        if (batch.reopenTimer)
+            clearTimeout(batch.reopenTimer);
+        batch.reopenTimer = undefined;
         for (const link of batch.links.values())
             this.closeLink(link);
         batch.links.clear();
@@ -209,6 +225,9 @@ export class RuntimeRelays {
     }
     closeBatch(batch) {
         batch.closed = true;
+        if (batch.reopenTimer)
+            clearTimeout(batch.reopenTimer);
+        batch.reopenTimer = undefined;
         for (const link of batch.links.values())
             this.closeLink(link);
         batch.links.clear();

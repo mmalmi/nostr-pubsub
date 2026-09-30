@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.9 - 2026-09-30
+
+- Coalesce relay subscription removals across worker tasks, retiring empty
+  batches immediately so closing hundreds of interests does not send hundreds
+  of replacement requests. Surviving interests retain exact local matching.
+
 ## 0.5.8 - 2026-09-30
 
 - Bound FIPS historical queries by their configured observation window even

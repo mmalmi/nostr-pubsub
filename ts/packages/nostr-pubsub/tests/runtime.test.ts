@@ -166,6 +166,23 @@ describe('Nostr runtime over real relay sockets', () => {
     expect(await client.publish(event('mesh only'), { relays: [], sources: ['mesh'] })).toMatchObject({ accepted: false, queued: true, sources: [{ id: 'mesh', accepted: false, queued: true }] });
     await client.close(); expect(await query).toMatchObject({ complete: false, reason: 'closed' });
   });
+  it('coalesces 500 subscription removals arriving as separate worker tasks', async () => {
+    const server = await relay(); const client = runtime({ relays: [await server.url()] });
+    let ready = 0;
+    const subscriptions = Array.from({ length: 500 }, (_, i) => client.subscribe([{ kinds: [1], '#p': [`remove-${i}`] }], {
+      onEvent: () => {}, onEose: () => { ready++; },
+    }, { cache: 'network-only' }));
+    await until(() => ready === 500);
+    expect(server.requests).toHaveLength(16);
+    // setImmediate yields a separate task, like main-thread messages to a worker.
+    for (const subscription of subscriptions) {
+      subscription.close();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(server.requests.length).toBeLessThanOrEqual(20);
+    expect(client.metrics().relaySubscriptions).toBe(0);
+  });
   it('stress: 1200 interests share bounded batches and deliver exactly once per matching listener', async () => {
     const server = await relay();
     const client = runtime({ relays: [await server.url()], maxSubscriptions: 1500, batchWindowMs: 10, historyTimeoutMs: 10000 });
