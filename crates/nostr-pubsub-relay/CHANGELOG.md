@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12 - 2026-09-30
+
+- Share relay reconnect, heartbeat, and subscription replay through `RelaySession` for applications with their own persistent stores and NIP-77 reconciliation.
+- Preserve exact relay acknowledgments, history completion and reconciliation frames; report notification gaps explicitly.
+- Verify event signatures and subscription filters, and discard forged duplicate events without interrupting other subscriptions.
+
 ## 0.1.11 - 2026-07-18
 
 - Implement the shared live-source contract over ordinary relay
