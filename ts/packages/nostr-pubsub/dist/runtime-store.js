@@ -48,19 +48,23 @@ function deletedBy(event, deletion) {
 }
 /** Called serially by a runtime after signature admission. Deletion events are retained as tombstones. */
 export async function storeRuntimeEvent(store, event) {
+    return await admitRuntimeEvent(store, event) === 'admitted';
+}
+/** Preserve rejection reasons so historical callers can opt into superseded versions only. */
+export async function admitRuntimeEvent(store, event) {
     if (expired(event))
-        return false;
+        return 'rejected';
     if (event.kind >= 20000 && event.kind < 30000)
-        return true;
+        return 'admitted';
     const ownDeletions = await store.query([{ authors: [event.pubkey], kinds: [5], '#e': [event.id] },
         ...(address(event) ? [{ authors: [event.pubkey], kinds: [5], '#a': [address(event)] }] : [])]);
     if (ownDeletions.some((deletion) => deletedBy(event, deletion)))
-        return false;
+        return 'rejected';
     const replacement = replacementFilter(event);
     if (replacement) {
         const previous = (await store.query([replacement])).filter((old) => address(old) === address(event));
         if (previous.some((old) => eventOrder(old, event) < 0))
-            return false;
+            return 'superseded';
         // Retain only the NIP-01 winner, including the lower ID on timestamp ties.
         await store.delete(previous.filter((old) => old.id !== event.id).map((old) => old.id));
     }
@@ -81,7 +85,7 @@ export async function storeRuntimeEvent(store, event) {
         await store.delete(previous.filter((old) => deletedBy(old, event)).map((old) => old.id));
     }
     await store.put(event);
-    return true;
+    return 'admitted';
 }
 /** Bounded default cache. Supply a persistent store for offline operation across reloads. */
 export class MemoryEventStore {

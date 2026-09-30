@@ -7,6 +7,8 @@ export declare function abortError(reason?: unknown): DOMException;
 export declare function replacementFilter(event: NostrEvent): NostrFilter | undefined;
 /** Called serially by a runtime after signature admission. Deletion events are retained as tombstones. */
 export declare function storeRuntimeEvent(store: RuntimeEventStore, event: NostrEvent): Promise<boolean>;
+/** Preserve rejection reasons so historical callers can opt into superseded versions only. */
+export declare function admitRuntimeEvent(store: RuntimeEventStore, event: NostrEvent): Promise<'admitted' | 'superseded' | 'rejected'>;
 /** Bounded default cache. Supply a persistent store for offline operation across reloads. */
 export declare class MemoryEventStore implements RuntimeEventStore {
     readonly maxEvents: number;

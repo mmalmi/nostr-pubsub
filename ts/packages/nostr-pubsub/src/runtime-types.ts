@@ -32,6 +32,9 @@ export interface RuntimeSubscriptionHandlers {
 }
 export interface RuntimeSubscribeOptions {
   cache?: RuntimeCacheMode;
+  /** Deliver older replaceable versions returned by the network without caching them.
+   * Requires cache: 'network-only'; deletion and expiration checks still apply. */
+  includeSuperseded?: boolean;
   /** Explicit relay scope also excludes additional sources unless sources is supplied. */
   relays?: readonly string[];
   sources?: readonly string[];
@@ -40,7 +43,7 @@ export interface RuntimeSubscribeOptions {
   deadline?: number;
 }
 export interface RuntimeSubscription { close(): void; }
-export interface RuntimeQueryOptions extends QueryOptions { cache?: RuntimeCacheMode; relays?: readonly string[]; sources?: readonly string[]; }
+export interface RuntimeQueryOptions extends QueryOptions, RuntimeSubscribeOptions {}
 export interface RuntimePublishOptions {
   relays?: readonly string[]; sources?: readonly string[];
   /** Commit locally only after a positive remote acknowledgment. Implies queue:false and localEcho:false until accepted. */

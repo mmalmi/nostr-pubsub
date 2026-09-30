@@ -50,6 +50,24 @@ describe('Nostr runtime over real relay sockets', () => {
     server.emit(event('after quiet interval'));
     await until(() => received.length === 1);
   });
+  it('reports incomplete history to every matching query when durable admission fails after EOSE', async () => {
+    const server = await relay(); server.events.push(event('must persist'));
+    class FailingStore extends MemoryEventStore {
+      override async put(): Promise<void> {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        throw new Error('Persistent index write failed');
+      }
+    }
+    const client = runtime({ relays: [await server.url()], store: new FailingStore() });
+    const results = await Promise.all([
+      client.query([{ kinds: [1] }], { cache: 'network-only' }),
+      client.query([{ authors: [server.events[0]!.pubkey] }], { cache: 'network-only' }),
+    ]);
+    for (const result of results) {
+      expect(result).toMatchObject({ complete: false, reason: 'unavailable', events: [] });
+      expect(result.sources).toContainEqual({ id: 'local-cache', complete: false, error: 'Persistent index write failed' });
+    }
+  });
   it('reconnects with overlapping time and does not lose another event in the same second', async () => {
     const server = await relay(); const first = event('first'); server.events.push(first);
     const client = runtime({ relays: [await server.url()] });
@@ -119,6 +137,24 @@ describe('Nostr runtime over real relay sockets', () => {
     const second = runtime({ store });
     expect(await second.ingest(note)).toBe(false);
     expect((await second.query([{ kinds: [0] }], { cache: 'cache-only' })).events.map((event) => event.id)).toEqual([fresh.id]);
+  });
+  it('allows explicit remote replaceable history without caching old versions or bypassing tombstones', async () => {
+    const server = await relay();
+    const old = event('older playable root', 30078, 100, [['d', 'video']]);
+    const latest = event('new unavailable root', 30078, 101, [['d', 'video']]);
+    server.events.push(old, latest);
+    const store = new MemoryEventStore();
+    const client = runtime({ relays: [await server.url()], store });
+    await client.ingest(latest);
+    const filters = [{ kinds: [30078], authors: [old.pubkey], '#d': ['video'] }];
+    expect((await client.query(filters, { cache: 'network-only' })).events.map(e => e.id)).toEqual([latest.id]);
+    expect((await client.query(filters, { cache: 'network-only', includeSuperseded: true })).events.map(e => e.id)).toEqual([latest.id, old.id]);
+    expect((await store.query(filters)).map(e => e.id)).toEqual([latest.id]);
+    await client.ingest(event('', 5, 102, [['e', old.id]]));
+    const result = await client.query(filters, { cache: 'network-only', includeSuperseded: true });
+    expect(result.complete).toBe(true);
+    expect(result.events.map(e => e.id)).toEqual([latest.id]);
+    await expect(client.query(filters, { cache: 'cache-only', includeSuperseded: true })).rejects.toThrow('network-only');
   });
   it('authenticates a relay using the application signer', async () => {
     const server = await relay(); server.requireAuth = true;

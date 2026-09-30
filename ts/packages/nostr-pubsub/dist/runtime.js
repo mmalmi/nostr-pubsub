@@ -1,7 +1,7 @@
 import { matchFilters } from 'nostr-tools/filter';
 import { verifyNostrEvent, validateQueryOptions } from './types.js';
 import { localIndexSource } from './source.js';
-import { MemoryEventStore, abortError, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
+import { MemoryEventStore, abortError, selectStoredEvents, admitRuntimeEvent } from './runtime-store.js';
 import { RuntimeInterests } from './runtime-interests.js';
 import { RuntimeRelays } from './runtime-relays.js';
 /** One signer-neutral owner of relay connections, live interests, local events and an outbox. */
@@ -31,6 +31,8 @@ export class NostrRuntime {
         this.ensureOpen();
         if (!filters.length)
             throw new RangeError('Nostr subscriptions require at least one filter');
+        if (options.includeSuperseded && options.cache !== 'network-only')
+            throw new Error('Historical replaceable versions require network-only queries');
         if (this.listeners.size >= (this.options.maxSubscriptions ?? 1024))
             throw new RangeError('Nostr subscription capacity exhausted');
         validateQueryOptions({ deadline: options.deadline });
@@ -89,11 +91,21 @@ export class NostrRuntime {
         if (ongoing)
             return ongoing;
         const operation = this.writes.then(async () => {
-            const accepted = await storeRuntimeEvent(this.store, event);
-            if (accepted && !this.stopped)
-                for (const listener of this.interests.candidates(event))
-                    this.deliver(listener, event, { source, cached: false });
-            return accepted;
+            const admission = await admitRuntimeEvent(this.store, event);
+            if (admission !== 'rejected' && !this.stopped)
+                for (const listener of this.interests.candidates(event)) {
+                    if (admission === 'admitted' || listener.options.includeSuperseded)
+                        this.deliver(listener, event, { source, cached: false });
+                }
+            return admission === 'admitted';
+        }).catch((error) => {
+            // Admission is shared across overlapping interests. A failed durable write
+            // must make every affected history incomplete, even if relay EOSE arrived.
+            for (const listener of this.interests.candidates(event)) {
+                if (!listener.stopped && matchFilters(listener.filters, event))
+                    listener.admissionError = asError(error).message;
+            }
+            throw error;
         });
         this.writes = operation.catch(() => undefined);
         this.incoming.set(event.id, operation);
@@ -302,6 +314,10 @@ export class NostrRuntime {
         const sources = [...listener.statuses].map(([id, state]) => ({ id, ...state }));
         for (const id of listener.pending)
             sources.push({ id, complete: false, error: 'Historical query is incomplete' });
+        if (listener.admissionError) {
+            reason = 'unavailable';
+            sources.push({ id: 'local-cache', complete: false, error: listener.admissionError });
+        }
         const complete = reason === 'cache' || (reason === 'eose' && sources.length > 0 && sources.every((source) => source.complete));
         try {
             listener.handlers.onEose?.({ complete, reason, sources });

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.10 - 2026-09-30
+
+- Allow explicitly requested network history to return superseded replaceable
+  versions without changing the latest-value cache or bypassing deletion and
+  expiration checks.
+
+- Report incomplete history when durable event admission fails, including every
+  overlapping query sharing the failed write. Relay EOSE cannot hide an index error.
+
 ## 0.5.9 - 2026-09-30
 
 - Coalesce relay subscription removals across worker tasks, retiring empty
