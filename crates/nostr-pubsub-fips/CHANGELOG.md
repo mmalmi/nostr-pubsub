@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.8 - 2026-09-30
+
+- Update to FIPS core 0.4.87 and TCP endpoint 0.2.20 for shared Bloom-filter
+  aggregation under peer load. Pubsub wire behavior is unchanged.
+
 ## 0.5.7 - 2026-09-30
 
 - Update to FIPS core 0.4.86 and TCP endpoint 0.2.19 for linear peer snapshots
