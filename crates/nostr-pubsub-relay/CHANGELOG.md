@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13 - 2026-09-30
+
+- Recover live notification gaps with bounded replay of the original configured relay filters, preserving limits, expiry, duplicate callbacks, and client keys.
+- Add optional admission feedback for direct consumers to request replay after transient downstream queue rejection.
+- Coalesce repeated gaps, back off failed recovery, and stop replay before closing subscriptions. Recovery remains best effort within relay-retained history.
+
 ## 0.1.12 - 2026-09-30
 
 - Share relay reconnect, heartbeat, and subscription replay through `RelaySession` for applications with their own persistent stores and NIP-77 reconciliation.
