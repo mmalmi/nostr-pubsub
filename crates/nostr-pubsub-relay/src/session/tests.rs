@@ -45,7 +45,7 @@ async fn preserves_control_frames_and_filters_event_admission_on_one_connection(
             {
                 assert_eq!(subscription_id.as_str(), "interest");
                 assert_eq!(filters.len(), 2, "preserve exact OR filters");
-                for event in [wrong, forged, event] {
+                for event in [wrong, forged.clone(), event, forged] {
                     socket
                         .send(Message::Text(
                             RelayMessage::event(subscription_id.clone().into_owned(), event)

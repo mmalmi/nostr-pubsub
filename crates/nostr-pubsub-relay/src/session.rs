@@ -94,8 +94,12 @@ impl RelaySession {
                     }
                 }
                 Ok(RelayNotification::Message { message }) => {
-                    if let RelayMessage::Event { event, .. } = &message {
-                        VerifiedEvent::try_from(event.as_ref().clone())?;
+                    if let RelayMessage::Event { event, .. } = &message
+                        && VerifiedEvent::try_from(event.as_ref().clone()).is_err()
+                    {
+                        // A relay can reuse a known ID with a different payload. Its
+                        // invalid event must not poison unrelated live interests.
+                        continue;
                     }
                     return Ok(Some(RelaySessionEvent::Message(Box::new(message))));
                 }
