@@ -1,4 +1,5 @@
-import { SOURCE_PRIORITY_FIPS_ENDPOINT, fipsEndpointSource, } from './source.js';
+import { FipsSourceSubscriptions } from './fips-pubsub-source-subscriptions.js';
+import { SOURCE_PRIORITY_FIPS_ENDPOINT, } from './source.js';
 import { validateQueryOptions, verifyNostrEvent, } from './types.js';
 export const DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS = 1_000;
 /** Router adapter for the FIPS-TCP REQ/INV/WANT/EVENT subscription protocol. */
@@ -7,7 +8,7 @@ export class FipsNostrPubsubEventSource {
     queryWindowMs;
     id;
     publishAcceptance = 'queued';
-    live = new Map();
+    subscriptions;
     constructor(client, queryWindowMs = DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS, id = 'fips') {
         this.client = client;
         this.queryWindowMs = queryWindowMs;
@@ -15,57 +16,14 @@ export class FipsNostrPubsubEventSource {
         if (!Number.isSafeInteger(queryWindowMs) || queryWindowMs <= 0) {
             throw new RangeError('FIPS pubsub query window must be a positive safe integer');
         }
+        this.subscriptions = new FipsSourceSubscriptions(client);
     }
     async publish(event, _source) {
         await this.client.publish(event);
         return { accepted: true, priority: SOURCE_PRIORITY_FIPS_ENDPOINT };
     }
     subscribe(filters, handler) {
-        // A runtime opens live delivery before its history query. Both must share
-        // the same wire interest instead of consuming two bounded peer slots.
-        const key = JSON.stringify(filters.map((filter) => Object.fromEntries(Object.entries(filter).sort(([a], [b]) => a.localeCompare(b)))));
-        let shared = this.live.get(key);
-        if (shared) {
-            shared.handlers.add(handler);
-            for (const incoming of shared.recent.values())
-                handler(incoming);
-        }
-        else {
-            shared = { handlers: new Set([handler]), recent: new Map() };
-            this.live.set(key, shared);
-            const entry = shared;
-            try {
-                entry.subscription = this.client.subscribe(filters, (event, peerId) => {
-                    const incoming = { event, source: fipsEndpointSource(peerId), priority: SOURCE_PRIORITY_FIPS_ENDPOINT };
-                    entry.recent.set(event.id, incoming);
-                    if (entry.recent.size > this.client.limits.maxReplayEvents)
-                        entry.recent.delete(entry.recent.keys().next().value);
-                    let failure;
-                    for (const receive of [...entry.handlers]) {
-                        try {
-                            receive(incoming);
-                        }
-                        catch (error) {
-                            failure = error;
-                        }
-                    }
-                    if (failure)
-                        throw failure;
-                });
-            }
-            catch (error) {
-                this.live.delete(key);
-                throw error;
-            }
-        }
-        const entry = shared;
-        return { close: () => {
-                entry.handlers.delete(handler);
-                if (!entry.handlers.size && this.live.get(key) === entry) {
-                    this.live.delete(key);
-                    entry.subscription?.close();
-                }
-            } };
+        return this.subscriptions.subscribe(filters, handler);
     }
     query(filters, options = {}) {
         validateQueryOptions(options);
@@ -78,7 +36,7 @@ export class FipsNostrPubsubEventSource {
         return new Promise((resolve, reject) => {
             const events = new Map();
             let settled = false;
-            let closeOnAssign = false;
+            let outcome;
             let timer;
             let subscription;
             const finish = (complete, error) => {
@@ -88,26 +46,39 @@ export class FipsNostrPubsubEventSource {
                 if (timer !== undefined)
                     clearTimeout(timer);
                 options.signal?.removeEventListener('abort', cancel);
-                if (subscription === undefined)
-                    closeOnAssign = true;
+                outcome = { complete, error };
+                deliverOutcome();
+            };
+            const deliverOutcome = () => {
+                if (!outcome || !subscription)
+                    return;
+                subscription.close();
+                if (outcome.error !== undefined)
+                    reject(outcome.error);
                 else
-                    subscription.close();
-                if (error !== undefined)
-                    reject(error);
-                else
-                    resolve({ events: ordered(events.values(), options.limit), complete });
+                    resolve({ events: ordered(events.values(), options.limit), complete: outcome.complete });
             };
             const cancel = () => finish(false, abortError(options.signal?.reason));
             options.signal?.addEventListener('abort', cancel, { once: true });
-            subscription = this.subscribe(filters, (incoming) => {
+            void this.subscribe(filters, (incoming) => {
+                if (settled)
+                    return;
                 const event = verifyNostrEvent(incoming.event);
                 if (!events.has(event.id))
                     events.set(event.id, { ...incoming, event });
                 if (options.limit !== undefined && events.size >= options.limit)
                     finish(true);
+            }).then((assigned) => {
+                subscription = assigned;
+                deliverOutcome();
+            }, (error) => {
+                // Validation/startup failure has no subscription handle to release.
+                subscription = { close() { } };
+                if (settled)
+                    deliverOutcome();
+                else
+                    finish(false, error);
             });
-            if (closeOnAssign)
-                subscription.close();
             if (!settled)
                 timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()));
         });

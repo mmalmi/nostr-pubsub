@@ -9,10 +9,10 @@ export declare class FipsNostrPubsubEventSource implements NostrEventReader, Nos
     readonly queryWindowMs: number;
     readonly id: string;
     readonly publishAcceptance: "queued";
-    private readonly live;
+    private readonly subscriptions;
     constructor(client: FipsNostrPubsubClient, queryWindowMs?: number, id?: string);
     publish(event: NostrEvent, _source: EventSource): Promise<PublishReport>;
-    subscribe(filters: NostrFilter[], handler: (event: QueryEvent) => void): NostrEventSubscription;
+    subscribe(filters: NostrFilter[], handler: (event: QueryEvent) => void): Promise<NostrEventSubscription>;
     query(filters: NostrFilter[], options?: QueryOptions): Promise<QueryReport>;
 }
 //# sourceMappingURL=fips-pubsub-event-source.d.ts.map

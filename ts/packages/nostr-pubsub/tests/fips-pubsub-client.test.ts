@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { createInterface, type Interface } from 'node:readline';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
+import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import type { FipsServiceContext } from '@fips/tcp';
 import {
   FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES,
@@ -295,18 +295,94 @@ describe('FipsNostrPubsubClient', () => {
     const source = new FipsNostrPubsubEventSource(bob, 30);
     try {
       const interests = Array.from({ length: 40 }, (_, since) => [{ kinds: [1060], since }]);
-      const subscriptions = interests.map((filters) => source.subscribe(filters, () => {}));
+      const subscriptions = await Promise.all(interests.map((filters) => source.subscribe(filters, () => {})));
       const queries = interests.map((filters) => source.query(filters));
-      expect(bob.activeSubscriptionCount()).toBe(40);
+      expect(bob.activeSubscriptionCount()).toBe(10);
       await settle(alice, bob);
       const event = chatEvent(1_700_000_030, 'shared history');
       await alice.publish(event); await settle(alice, bob);
       expect((await Promise.all(queries)).every((report) => report.events[0]?.event.id === event.id)).toBe(true);
-      expect(bob.activeSubscriptionCount()).toBe(40);
+      expect(bob.activeSubscriptionCount()).toBe(10);
       expect((await source.query(interests[0]!, { limit: 1 })).events[0]?.event.id).toBe(event.id);
       for (const subscription of subscriptions) subscription.close();
       expect(bob.activeSubscriptionCount()).toBe(0);
     } finally { await alice.stop(); await bob.stop(); }
+  });
+
+  it('batches 512 exact peer interests below the carrier cap and cancels without leaking recipients', async () => {
+    const network = new MemoryFipsNetwork();
+    const limits = { maxActiveSubscriptions: 128, maxSubscriptionsPerPeer: 128, maxFiltersPerSubscription: 32, maxCachedEvents: 1024, maxReplayEvents: 512 };
+    const errors: string[] = [];
+    const alice = new FipsNostrPubsubClient({ localPeerId: ALICE, node: network.node(ALICE), peers: () => [BOB], limits, onError: error => errors.push(error.message) }).start();
+    const bob = new FipsNostrPubsubClient({ localPeerId: BOB, node: network.node(BOB), peers: () => [ALICE], limits, onError: error => errors.push(error.message) }).start();
+    const requests = vi.spyOn(bob, 'subscribe');
+    const source = new FipsNostrPubsubEventSource(bob, 1000);
+    const keys = [generateSecretKey(), generateSecretKey()];
+    const counts = new Uint16Array(512);
+    const recipient = (index: number) => index.toString(16).padStart(64, '0');
+    const filters = Array.from(counts, (_, index) => [{ kinds: [1060], authors: [getPublicKey(keys[index % 2]!)], '#p': [recipient(index)] }]);
+    const eventFor = (index: number, content = 'exact recipient') => finalizeEvent({ kind: 1060, created_at: 1700000000, tags: [['p', recipient(index)]], content }, keys[index % 2]!);
+    const start = performance.now();
+    const cpu = process.cpuUsage();
+    try {
+      const subscriptions = await Promise.all(filters.map((interest, index) => source.subscribe(interest, () => { counts[index]++; })));
+      await settle(alice, bob);
+      expect(bob.activeSubscriptionCount()).toBe(16);
+      expect(alice.peerSubscriptionCount(BOB)).toBe(16);
+      const events = Array.from(counts, (_, index) => eventFor(index));
+      for (let index = 0; index < events.length; index++) {
+        await alice.publish(events[index]!);
+        if (index % 16 === 15) await settle(alice, bob);
+      }
+      await settle(alice, bob);
+      expect([...counts]).toEqual(Array(512).fill(1));
+      const crossed = finalizeEvent({ kind: 1060, created_at: 1700000000, tags: [['p', recipient(1)]], content: 'must not widen author/recipient pairs' }, keys[0]!);
+      await alice.publish(crossed); await settle(alice, bob);
+      expect([...counts]).toEqual(Array(512).fill(1));
+      expect((await source.query(filters[0]!, { limit: 1 })).events[0]?.event.id).toBe(events[0]!.id);
+      // Closing many subscriptions from separate worker tasks must not reopen each time.
+      for (let index = 0; index < 256; index++) {
+        subscriptions[index]!.close();
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      await alice.publish(eventFor(0, 'closed'));
+      await alice.publish(eventFor(511, 'still live'));
+      await settle(alice, bob);
+      expect(counts[0]).toBe(1);
+      expect(counts[511]).toBe(2);
+      expect(requests.mock.calls.length).toBeLessThan(64);
+      for (const subscription of subscriptions) subscription.close();
+      expect(bob.activeSubscriptionCount()).toBe(0);
+      await settle(alice, bob);
+      expect(alice.peerSubscriptionCount(BOB)).toBe(0);
+      expect(errors).toEqual([]);
+      const usage = process.cpuUsage(cpu);
+      process.stdout.write(`fips stress ${JSON.stringify({ fipsInterests: 512, events: 512, reqs: requests.mock.calls.length, wallMs: Math.round(performance.now() - start), cpuMs: Math.round((usage.user + usage.system) / 1000) })}\n`);
+    } finally { await alice.stop(); await bob.stop(); }
+  });
+
+  it('bounds batch frames, reports capacity failures, and releases aborted pending queries', async () => {
+    const network = new MemoryFipsNetwork();
+    const client = new FipsNostrPubsubClient({ localPeerId: ALICE, node: network.node(ALICE), peers: () => [],
+      limits: { maxActiveSubscriptions: 2, maxFiltersPerSubscription: 4, maxFrameBytes: 256 } }).start();
+    const source = new FipsNostrPubsubEventSource(client, 25);
+    try {
+      // Each fits independently, but two cannot share a bounded frame.
+      const filters = [{ search: 'a'.repeat(210) }];
+      const first = await source.subscribe(filters, () => {});
+      const second = await source.subscribe([{ search: 'b'.repeat(210) }], () => {});
+      expect(client.activeSubscriptionCount()).toBe(2);
+      await expect(source.query([{ kinds: [1] }])).rejects.toThrow(/batch limit/);
+      await expect(source.query([{ search: 'c'.repeat(256) }])).rejects.toThrow(/bytes, limit/);
+      first.close(); second.close();
+      const controller = new AbortController();
+      const query = source.query([{ kinds: [1060] }], { signal: controller.signal });
+      controller.abort();
+      await expect(query).rejects.toMatchObject({ name: 'AbortError' });
+      expect(client.activeSubscriptionCount()).toBe(0);
+      await client.stop();
+      await expect(source.query([{ kinds: [1060] }])).rejects.toThrow(/started/);
+    } finally { await client.stop(); }
   });
 
   it('serves admitted persistent history without prewarming the mesh cache', async () => {

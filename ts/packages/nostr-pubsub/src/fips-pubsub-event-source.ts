@@ -8,9 +8,9 @@ import type {
   QueryReport,
 } from './event-bus.js';
 import { FipsNostrPubsubClient } from './fips-pubsub-client.js';
+import { FipsSourceSubscriptions } from './fips-pubsub-source-subscriptions.js';
 import {
   SOURCE_PRIORITY_FIPS_ENDPOINT,
-  fipsEndpointSource,
   type EventSource,
 } from './source.js';
 import {
@@ -27,7 +27,7 @@ export const DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS = 1_000;
 export class FipsNostrPubsubEventSource
 implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
   readonly publishAcceptance = 'queued' as const;
-  private readonly live = new Map<string, { handlers: Set<(event: QueryEvent) => void>; recent: Map<string, QueryEvent>; subscription?: NostrEventSubscription }>();
+  private readonly subscriptions: FipsSourceSubscriptions;
   constructor(
     readonly client: FipsNostrPubsubClient,
     readonly queryWindowMs = DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS,
@@ -36,6 +36,7 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
     if (!Number.isSafeInteger(queryWindowMs) || queryWindowMs <= 0) {
       throw new RangeError('FIPS pubsub query window must be a positive safe integer');
     }
+    this.subscriptions = new FipsSourceSubscriptions(client);
   }
 
   async publish(event: NostrEvent, _source: EventSource): Promise<PublishReport> {
@@ -46,31 +47,8 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
   subscribe(
     filters: NostrFilter[],
     handler: (event: QueryEvent) => void,
-  ): NostrEventSubscription {
-    // A runtime opens live delivery before its history query. Both must share
-    // the same wire interest instead of consuming two bounded peer slots.
-    const key = JSON.stringify(filters.map((filter) => Object.fromEntries(Object.entries(filter).sort(([a], [b]) => a.localeCompare(b)))));
-    let shared = this.live.get(key);
-    if (shared) { shared.handlers.add(handler); for (const incoming of shared.recent.values()) handler(incoming); }
-    else {
-      shared = { handlers: new Set([handler]), recent: new Map() }; this.live.set(key, shared);
-      const entry = shared;
-      try {
-        entry.subscription = this.client.subscribe(filters, (event, peerId) => {
-          const incoming = { event, source: fipsEndpointSource(peerId), priority: SOURCE_PRIORITY_FIPS_ENDPOINT };
-          entry.recent.set(event.id, incoming);
-          if (entry.recent.size > this.client.limits.maxReplayEvents) entry.recent.delete(entry.recent.keys().next().value!);
-          let failure: unknown;
-          for (const receive of [...entry.handlers]) { try { receive(incoming); } catch (error) { failure = error; } }
-          if (failure) throw failure;
-        });
-      } catch (error) { this.live.delete(key); throw error; }
-    }
-    const entry = shared;
-    return { close: () => {
-      entry.handlers.delete(handler);
-      if (!entry.handlers.size && this.live.get(key) === entry) { this.live.delete(key); entry.subscription?.close(); }
-    } };
+  ): Promise<NostrEventSubscription> {
+    return this.subscriptions.subscribe(filters, handler);
   }
 
   query(filters: NostrFilter[], options: QueryOptions = {}): Promise<QueryReport> {
@@ -83,7 +61,7 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
     return new Promise((resolve, reject) => {
       const events = new Map<string, QueryEvent>();
       let settled = false;
-      let closeOnAssign = false;
+      let outcome: { complete: boolean; error?: unknown } | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let subscription: NostrEventSubscription | undefined;
       const finish = (complete: boolean, error?: unknown): void => {
@@ -91,19 +69,31 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
         options.signal?.removeEventListener('abort', cancel);
-        if (subscription === undefined) closeOnAssign = true;
-        else subscription.close();
-        if (error !== undefined) reject(error);
-        else resolve({ events: ordered(events.values(), options.limit), complete });
+        outcome = { complete, error };
+        deliverOutcome();
+      };
+      const deliverOutcome = (): void => {
+        if (!outcome || !subscription) return;
+        subscription.close();
+        if (outcome.error !== undefined) reject(outcome.error);
+        else resolve({ events: ordered(events.values(), options.limit), complete: outcome.complete });
       };
       const cancel = (): void => finish(false, abortError(options.signal?.reason));
       options.signal?.addEventListener('abort', cancel, { once: true });
-      subscription = this.subscribe(filters, (incoming) => {
+      void this.subscribe(filters, (incoming) => {
+        if (settled) return;
         const event = verifyNostrEvent(incoming.event);
         if (!events.has(event.id)) events.set(event.id, { ...incoming, event });
         if (options.limit !== undefined && events.size >= options.limit) finish(true);
+      }).then((assigned) => {
+        subscription = assigned;
+        deliverOutcome();
+      }, (error: unknown) => {
+        // Validation/startup failure has no subscription handle to release.
+        subscription = { close() {} };
+        if (settled) deliverOutcome();
+        else finish(false, error);
       });
-      if (closeOnAssign) subscription.close();
       if (!settled) timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()));
     });
   }

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.11 - 2026-09-30
+
+- Batch distinct FIPS interests as exact OR filters within the configured peer
+  filter and frame bounds. Preserve independent local matching, recent history,
+  and cancellation while sharing live/history interests on the same connection.
+- Coalesce peer subscription changes across worker tasks and retire empty
+  batches immediately. Async source subscription failures propagate to queries
+  instead of leaking pending interests or claiming complete history.
+- Exercise 512 peer interests and deliveries under a 128-subscription carrier
+  cap, including recipient isolation, bounded teardown, frame limits, and aborts.
+
 ## 0.5.10 - 2026-09-30
 
 - Enforce explicit relay/source delivery scopes and optional local-echo exclusion
