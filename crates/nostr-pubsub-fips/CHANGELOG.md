@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.9 - 2026-10-01
+
+- Update to FIPS core 0.4.88 and TCP endpoint 0.2.21 for incremental pending
+  Bloom deadlines under peer load. Pubsub wire behavior is unchanged.
+
 ## 0.5.8 - 2026-09-30
 
 - Update to FIPS core 0.4.87 and TCP endpoint 0.2.20 for shared Bloom-filter
