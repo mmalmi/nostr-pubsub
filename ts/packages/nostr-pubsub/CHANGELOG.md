@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.12 - 2026-09-30
+
+- Wait for event admissions queued during earlier cache writes before completing
+  history. Queries retain all received events even when relay EOSE arrives while
+  the persistent index is busy; cancellation and deadlines remain prompt.
+
 ## 0.5.11 - 2026-09-30
 
 - Keep requested peer responses eligible during finite CPU/transport backlogs

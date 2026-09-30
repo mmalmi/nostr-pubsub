@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { AbstractSimplePool } from 'nostr-tools/abstract-pool';
 import { finalizeEvent, verifyEvent } from 'nostr-tools/pure';
-import { NostrRuntime, MemoryEventStore, SimplePoolNostrRelayTransport, verifyNostrEvent, type NostrEvent, type NostrRuntimeOptions } from '../src/index.js';
+import { NostrRuntime, MemoryEventStore, SimplePoolNostrRelayTransport, verifyNostrEvent, type NostrEvent, type NostrRuntimeOptions, type QueryEvent } from '../src/index.js';
 import { RuntimeRelayFixture, until } from './runtime-relay-fixture.js';
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -66,6 +66,48 @@ describe('Nostr runtime over real relay sockets', () => {
     for (const result of results) {
       expect(result).toMatchObject({ complete: false, reason: 'unavailable', events: [] });
       expect(result.sources).toContainEqual({ id: 'local-cache', complete: false, error: 'Persistent index write failed' });
+    }
+  });
+  it.each(['cache-first', 'network-only'] as const)('waits for admissions queued behind an older write before completing %s history', async (cache) => {
+    const releases: Array<() => void> = [];
+    class GatedStore extends MemoryEventStore {
+      override async put(value: NostrEvent): Promise<void> {
+        await new Promise<void>(resolve => releases.push(resolve));
+        await super.put(value);
+      }
+    }
+    let deliver!: (value: QueryEvent) => void;
+    let eose!: () => void;
+    const completion = new Promise<void>(resolve => { eose = resolve; });
+    const source = { id: 'peer',
+      subscribe: (_filters: unknown, handler: typeof deliver) => { deliver = handler; return { close() {} }; },
+      query: async () => { await completion; return { events: [], complete: true }; },
+    };
+    const store = new GatedStore();
+    const client = runtime({ store, sources: [source] });
+    const olderWrite = client.ingest(event('older unrelated write'));
+    await until(() => releases.length === 1);
+    const expected = verifyNostrEvent(event('friend opinion', 3));
+    let resolved = false;
+    const history = client.query([{ kinds: [3] }], { cache }).then(result => { resolved = true; return result; });
+    try {
+      deliver({ event: expected, source: { id: source.id, kind: 'peer' }, priority: 0 });
+      eose();
+      await new Promise(resolve => setImmediate(resolve));
+      releases[0]!();
+      await until(() => releases.length === 2);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(resolved, 'EOSE must wait for the newly queued durable admission').toBe(false);
+      const controller = new AbortController();
+      const cancelled = client.query([{ kinds: [3] }], { cache, signal: controller.signal });
+      controller.abort();
+      await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+      releases[1]!();
+      expect(await history).toMatchObject({ complete: true, events: [expected] });
+      expect(await store.query([{ kinds: [3] }])).toEqual([structuredClone(expected)]);
+    } finally {
+      eose(); releases.forEach(release => release());
+      await olderWrite;
     }
   });
   it('reconnects with overlapping time and does not lose another event in the same second', async () => {

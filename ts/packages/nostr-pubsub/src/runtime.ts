@@ -181,8 +181,7 @@ export class NostrRuntime {
     }
     if (listener.stopped) return;
     if (listener.options.cache === 'cache-only') { this.complete(listener, 'cache'); return; }
-    await this.writes;
-    this.maybeComplete(listener);
+    await this.maybeComplete(listener);
   }
   private wantsSource(listener: Listener, id: string): boolean {
     return listener.options.cache !== 'cache-only' && (listener.options.sources ? listener.options.sources.includes(id) : listener.options.relays === undefined);
@@ -235,13 +234,20 @@ export class NostrRuntime {
     if (listener.stopped) return;
     listener.pending.delete(id); listener.statuses.set(id, { complete, error });
     // Wait for ordered admission/cache writes before exposing EOSE.
-    void listener.ready.then(() => this.writes).then(() => this.maybeComplete(listener));
+    void listener.ready.then(() => this.maybeComplete(listener));
   }
-  private maybeComplete(listener: Listener): void {
-    if (listener.pending.size === 0) {
+  private async maybeComplete(listener: Listener): Promise<void> {
+    // New arrivals can extend the write chain while an older admission is pending.
+    // Drain the current chain before reporting EOSE, including arrivals during cache replay.
+    while (!listener.stopped && !listener.notified && listener.pending.size === 0) {
+      const writes = this.writes;
+      await writes;
+      if (writes !== this.writes) continue;
+      if (listener.stopped || listener.notified || listener.pending.size) return;
       const states = [...listener.statuses.values()];
       this.complete(listener, states.length && states.every((state) => state.complete) ? 'eose'
         : states.some((state) => state.error) || !states.length ? 'unavailable' : 'timeout');
+      return;
     }
   }
   private complete(listener: Listener, reason: RuntimeCompletion['reason']): void {

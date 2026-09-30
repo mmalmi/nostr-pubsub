@@ -227,8 +227,7 @@ export class NostrRuntime {
             this.complete(listener, 'cache');
             return;
         }
-        await this.writes;
-        this.maybeComplete(listener);
+        await this.maybeComplete(listener);
     }
     wantsSource(listener, id) {
         return listener.options.cache !== 'cache-only' && (listener.options.sources ? listener.options.sources.includes(id) : listener.options.relays === undefined);
@@ -309,13 +308,22 @@ export class NostrRuntime {
         listener.pending.delete(id);
         listener.statuses.set(id, { complete, error });
         // Wait for ordered admission/cache writes before exposing EOSE.
-        void listener.ready.then(() => this.writes).then(() => this.maybeComplete(listener));
+        void listener.ready.then(() => this.maybeComplete(listener));
     }
-    maybeComplete(listener) {
-        if (listener.pending.size === 0) {
+    async maybeComplete(listener) {
+        // New arrivals can extend the write chain while an older admission is pending.
+        // Drain the current chain before reporting EOSE, including arrivals during cache replay.
+        while (!listener.stopped && !listener.notified && listener.pending.size === 0) {
+            const writes = this.writes;
+            await writes;
+            if (writes !== this.writes)
+                continue;
+            if (listener.stopped || listener.notified || listener.pending.size)
+                return;
             const states = [...listener.statuses.values()];
             this.complete(listener, states.length && states.every((state) => state.complete) ? 'eose'
                 : states.some((state) => state.error) || !states.length ? 'unavailable' : 'timeout');
+            return;
         }
     }
     complete(listener, reason) {
