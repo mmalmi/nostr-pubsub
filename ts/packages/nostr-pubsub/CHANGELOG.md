@@ -2,6 +2,9 @@
 
 ## 0.5.11 - 2026-09-30
 
+- Reject unadmitted peer datagrams before TCP allocates connection state, and
+  treat a remote half-close released by a concurrent reset as already closed.
+
 - Batch distinct FIPS interests as exact OR filters within the configured peer
   filter and frame bounds. Preserve independent local matching, recent history,
   and cancellation while sharing live/history interests on the same connection.

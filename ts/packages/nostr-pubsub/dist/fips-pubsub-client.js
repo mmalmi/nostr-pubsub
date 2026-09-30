@@ -55,6 +55,7 @@ export class FipsNostrPubsubClient {
             maxIoBytesPerDrive: 512 * 1024,
             maxFramesPerDrive: this.limits.receiveBatchSize,
         }, {
+            admitsPeer: peerId => this.currentPeers().includes(normalizePeerId(peerId) ?? ''),
             frame: (peerId, frame) => this.handleFrame(peerId, frame),
             connected: (peerId) => this.handleTransportConnected(peerId),
             disconnected: (peerId) => this.handleTransportDisconnected(peerId),

@@ -385,6 +385,29 @@ describe('FipsNostrPubsubClient', () => {
     } finally { await client.stop(); }
   });
 
+  it('rejects unilateral peer connections before allocating TCP state and closes cleanly', async () => {
+    const network = new MemoryFipsNetwork();
+    const bobNode = network.node(BOB);
+    const sends = vi.spyOn(bobNode, 'sendDatagram');
+    const alice = new FipsNostrPubsubClient({ localPeerId: ALICE, node: network.node(ALICE), peers: () => [BOB] }).start();
+    const bob = new FipsNostrPubsubClient({ localPeerId: BOB, node: bobNode, peers: () => [ALICE] }).start();
+    const charlie = new FipsNostrPubsubClient({ localPeerId: CHARLIE, node: network.node(CHARLIE), peers: () => [BOB] }).start();
+    const admitted = vi.fn(); const stranger = vi.fn();
+    try {
+      await Promise.all([
+        new FipsNostrPubsubEventSource(alice).subscribe([{ kinds: [1060] }], admitted),
+        new FipsNostrPubsubEventSource(charlie).subscribe([{ kinds: [1060] }], stranger),
+      ]);
+      await settle(alice, bob, charlie);
+      await bob.publish(chatEvent(1700000000, 'account history'));
+      await settle(alice, bob, charlie);
+      expect(admitted).toHaveBeenCalledTimes(1);
+      expect(stranger).not.toHaveBeenCalled();
+      expect(bob.peerSubscriptionCount(CHARLIE)).toBe(0);
+      expect(sends.mock.calls.some(([args]) => args.dst === CHARLIE)).toBe(false);
+    } finally { await Promise.all([alice.stop(), bob.stop(), charlie.stop()]); }
+  });
+
   it('serves admitted persistent history without prewarming the mesh cache', async () => {
     const network = new MemoryFipsNetwork();
     const stored = chatEvent(1_700_000_010, 'persistent only');

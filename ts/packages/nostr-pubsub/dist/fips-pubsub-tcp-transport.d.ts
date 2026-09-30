@@ -9,6 +9,8 @@ export interface FipsPubsubTcpTransportOptions {
     maxFramesPerDrive: number;
 }
 export interface FipsPubsubTcpTransportCallbacks {
+    /** Reject unadmitted identities before allocating TCP connection state. */
+    admitsPeer?(peerId: string): boolean;
     frame(peerId: string, frame: Uint8Array): void;
     connected(peerId: string): void;
     disconnected(peerId: string): void;

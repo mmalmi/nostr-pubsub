@@ -19,3 +19,18 @@ export async function abortTcpConnectionIfPresent(
     throw error;
   }
 }
+
+/** Finish a remote half-close while allowing a concurrent reset to release it. */
+export async function closeTcpConnectionIfPresent(
+  tcp: Pick<FipsTcpEndpoint, 'close' | 'state'>,
+  id: ConnectionId,
+  nowMs: number,
+): Promise<void> {
+  if (await tcp.state(id) === undefined) return;
+  try {
+    await tcp.close(id, nowMs);
+  } catch (error) {
+    if (await tcp.state(id) === undefined) return;
+    throw error;
+  }
+}
