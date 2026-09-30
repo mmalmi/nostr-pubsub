@@ -3,10 +3,14 @@
 mod session;
 pub use session::{RelaySession, RelaySessionEvent};
 
+#[cfg(test)]
+mod live_recovery_tests;
+
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     fmt::Debug,
+    sync::Arc,
     time::Duration,
 };
 
@@ -20,7 +24,7 @@ use nostr_sdk::{
     Client, ClientMessage, Filter, Keys, RelayMessage, RelayPoolNotification, SubscriptionId,
     nostr::message::MachineReadablePrefix, pool::Output,
 };
-use tokio::task::JoinHandle;
+use tokio::{task::JoinHandle, time::Instant};
 
 #[derive(Clone)]
 pub struct RelayEventBus {
@@ -148,6 +152,31 @@ impl NostrEventSubscriber for RelayEventBus {
         filters: Vec<Filter>,
         handler: NostrEventHandler,
     ) -> Result<Box<dyn NostrEventSubscription>> {
+        self.subscribe_with_admission(
+            filters,
+            Arc::new(move |event| {
+                handler(event);
+                true
+            }),
+        )
+        .await
+    }
+}
+
+impl RelayEventBus {
+    /// Subscribe with feedback from a bounded downstream consumer.
+    ///
+    /// Return `true` when handled or accepted (not necessarily persisted).
+    /// Return `false` only for transient rejection, such as a full queue, to
+    /// request a coalesced replay of the original retained window. Treat closed
+    /// queues and intentional policy rejection as handled; they cannot recover
+    /// through retry. Expired, ephemeral, or no-longer-retained events may be lost.
+    /// This direct adapter API does not change routed subscriptions' deduplication.
+    pub async fn subscribe_with_admission(
+        &self,
+        filters: Vec<Filter>,
+        handler: Arc<dyn Fn(QueryEvent) -> bool + Send + Sync>,
+    ) -> Result<Box<dyn NostrEventSubscription>> {
         let mut notifications = self.client.notifications();
         let filters = if filters.is_empty() {
             vec![Filter::new()]
@@ -179,9 +208,24 @@ impl NostrEventSubscriber for RelayEventBus {
         }
 
         let watched_filters = subscriptions.iter().cloned().collect::<HashMap<_, _>>();
+        let client = self.client.clone();
+        let relays = self.relays.clone();
+        let replay_timeout = self.query_timeout;
         let notifications_task = tokio::spawn(async move {
+            let mut replay = LiveReplay::default();
             loop {
-                match notifications.recv().await {
+                let notification = tokio::select! {
+                    notification = notifications.recv() => notification,
+                    () = tokio::time::sleep_until(replay.due.unwrap_or_else(Instant::now)),
+                        if replay.due.is_some() => {
+                        let restored = replay_live_subscriptions(
+                            &client, &relays, &watched_filters, replay_timeout,
+                        ).await;
+                        replay.attempted(Instant::now(), restored);
+                        continue;
+                    }
+                };
+                match notification {
                     Ok(RelayPoolNotification::Message {
                         relay_url,
                         message:
@@ -193,17 +237,21 @@ impl NostrEventSubscriber for RelayEventBus {
                         if let Ok(event) = VerifiedEvent::try_from(event.into_owned())
                             && watched_filters[subscription_id.as_ref()]
                                 .match_event(event.as_event(), MatchEventOptions::new())
-                        {
-                            handler(QueryEvent {
+                            && !handler(QueryEvent {
                                 event,
                                 source: EventSource::relay(relay_url.to_string()),
                                 priority: SOURCE_PRIORITY_RELAY,
-                            });
+                            })
+                        {
+                            replay.gap(Instant::now());
                         }
                     }
                     Ok(RelayPoolNotification::Shutdown)
                     | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        replay.gap(Instant::now());
+                    }
+                    Ok(_) => {}
                 }
             }
         });
@@ -213,6 +261,75 @@ impl NostrEventSubscriber for RelayEventBus {
             notifications_task: Some(notifications_task),
         }))
     }
+}
+
+/// A gap cannot be located in the SDK's ID-only cache. Replay the original
+/// retained window; ephemeral or already-expired events cannot be recovered.
+/// Keep one pending replay with bounded retry frequency even during sustained
+/// unrelated traffic. This is best-effort recovery, not lossless backpressure.
+struct LiveReplay {
+    due: Option<Instant>,
+    last_gap: Option<Instant>,
+    delay: Duration,
+}
+
+impl Default for LiveReplay {
+    fn default() -> Self {
+        Self {
+            due: None,
+            last_gap: None,
+            delay: Self::MIN_DELAY,
+        }
+    }
+}
+
+impl LiveReplay {
+    const MIN_DELAY: Duration = Duration::from_millis(250);
+    const MAX_DELAY: Duration = Duration::from_secs(30);
+
+    fn gap(&mut self, now: Instant) {
+        if self
+            .last_gap
+            .is_none_or(|last| now - last >= Self::MAX_DELAY * 2)
+        {
+            self.delay = Self::MIN_DELAY;
+        }
+        self.last_gap = Some(now);
+        self.due.get_or_insert(now + self.delay);
+    }
+
+    fn attempted(&mut self, now: Instant, restored: bool) {
+        self.delay = (self.delay * 2).min(Self::MAX_DELAY);
+        self.due = (!restored).then_some(now + self.delay);
+    }
+}
+
+async fn replay_live_subscriptions(
+    client: &Client,
+    relays: &[String],
+    subscriptions: &HashMap<SubscriptionId, Filter>,
+    deadline: Duration,
+) -> bool {
+    let mut restored = true;
+    for (id, filter) in subscriptions {
+        // Reset the SDK's pre-EOSE event count before reinstalling the same
+        // bounded filter. Message::Event still carries bodies for known IDs.
+        // Each intent gets its own deadline so one failure cannot starve others.
+        let result = tokio::time::timeout(deadline, async {
+            client.unsubscribe(id).await;
+            client
+                .subscribe_with_id_to(
+                    relays.iter().map(String::as_str),
+                    id.clone(),
+                    filter.clone(),
+                    None,
+                )
+                .await
+        })
+        .await;
+        restored &= matches!(result, Ok(Ok(output)) if !output.success.is_empty() && output.failed.is_empty());
+    }
+    restored
 }
 
 struct RelayLiveSubscription {
@@ -232,10 +349,12 @@ impl Drop for RelayLiveSubscription {
 #[async_trait]
 impl NostrEventSubscription for RelayLiveSubscription {
     async fn close(mut self: Box<Self>) -> Result<()> {
-        unsubscribe_all(&self.client, &self.subscription_ids).await;
         if let Some(task) = self.notifications_task.take() {
             task.abort();
+            // No recovery REQ may race after the final CLOSE.
+            let _ = task.await;
         }
+        unsubscribe_all(&self.client, &self.subscription_ids).await;
         Ok(())
     }
 }
@@ -561,7 +680,7 @@ mod tests {
         .expect("receive subscription close");
     }
 
-    async fn wait_until_connected(bus: &RelayEventBus, relay_url: &str) {
+    pub(super) async fn wait_until_connected(bus: &RelayEventBus, relay_url: &str) {
         timeout(Duration::from_secs(2), async {
             loop {
                 let connected = bus
