@@ -105,6 +105,7 @@ export interface NostrRuntimeOptions {
     verifyEvent?: NostrEventVerifier;
     signAuthEvent?: (relay: string, event: import('nostr-tools').EventTemplate) => Promise<NostrEvent>;
     batchWindowMs?: number;
+    /** Maximum OR filters per relay REQ (default 20); raise only for relays that accept larger batches. */
     maxFiltersPerBatch?: number;
     maxFilterBytesPerBatch?: number;
     maxSubscriptions?: number;

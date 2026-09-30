@@ -5,10 +5,12 @@ import type { NostrEvent, NostrFilter } from '../src/index.js';
 export class RuntimeRelayFixture {
   readonly server: WebSocketServer;
   readonly requests: NostrFilter[][] = [];
+  readonly rejectedRequests: NostrFilter[][] = [];
   readonly events: NostrEvent[] = [];
   readonly clients = new Map<WebSocket, Map<string, NostrFilter[]>>();
   acknowledge: boolean | 'silent' = true;
   eoseDelay = 0;
+  maxFilters = Infinity;
   requireAuth = false;
   authEvents: NostrEvent[] = [];
   constructor() {
@@ -26,7 +28,12 @@ export class RuntimeRelayFixture {
         } else if (type === 'REQ') {
           if (!authenticated) { socket.send(JSON.stringify(['CLOSED', id, 'auth-required: sign in'])); return; }
           const filters = rest as NostrFilter[];
-          this.requests.push(filters); subscriptions.set(id, filters);
+          this.requests.push(filters);
+          if (filters.length > this.maxFilters) {
+            this.rejectedRequests.push(filters);
+            socket.send(JSON.stringify(['CLOSED', id, `too many filters (max ${this.maxFilters})`])); return;
+          }
+          subscriptions.set(id, filters);
           const events = new Map<string, NostrEvent>();
           for (const filter of filters) {
             for (const event of this.events.filter((event) => matchFilters([filter], event)).sort((a, b) => b.created_at - a.created_at).slice(0, filter.limit)) events.set(event.id, event);

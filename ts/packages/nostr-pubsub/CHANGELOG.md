@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.13 - 2026-09-30
+
+- Default relay requests to at most 20 exact OR filters so ordinary batches work
+  with common relay limits. Larger batches remain an explicit application option.
+- Cover rejected over-limit history and explicit larger limits with real socket
+  tests; retain exact recipient matching and bounded subscription teardown.
+
 ## 0.5.12 - 2026-09-30
 
 - Wait for event admissions queued during earlier cache writes before completing

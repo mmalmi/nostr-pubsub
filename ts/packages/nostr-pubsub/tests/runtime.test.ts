@@ -20,13 +20,29 @@ async function relay(): Promise<RuntimeRelayFixture> {
 }
 
 describe('Nostr runtime over real relay sockets', () => {
+  it.each([
+    { label: 'the interoperable default', maxFilters: 20, options: {}, batches: [20, 12] },
+    { label: 'an explicit larger limit', maxFilters: 32, options: { maxFiltersPerBatch: 32 }, batches: [32] },
+  ])('completes exact history on a relay enforcing $label', async ({ maxFilters, options, batches }) => {
+    const server = await relay(); server.maxFilters = maxFilters;
+    const client = runtime({ relays: [await server.url()], ...options });
+    const events = Array.from({ length: 32 }, (_, i) => event(`history-${i}`, i % 2 ? 1 : 4, 100, [['p', `recipient-${i}`]]));
+    server.events.push(...events, event('wrong kind/recipient intersection', 1, 100, [['p', 'recipient-0']]));
+    const results = await Promise.all(events.map(expected => client.query([
+      { authors: [expected.pubkey], kinds: [expected.kind], '#p': [expected.tags[0]![1]!] },
+    ], { cache: 'network-only' })));
+    expect(results.every(result => result.complete)).toBe(true);
+    expect(results.map(result => result.events.map(event => event.id))).toEqual(events.map(event => [event.id]));
+    expect(server.rejectedRequests).toEqual([]);
+    expect(server.requests.map(filters => filters.length)).toEqual(batches);
+  });
   it('batches exact OR interests without Cartesian recipient widening', async () => {
     const server = await relay();
     const client = runtime({ relays: [await server.url()], batchWindowMs: 10 });
     const received: string[] = [];
     const sample = event('sample');
     for (let i = 0; i < 100; i++) client.subscribe([{ authors: [sample.pubkey], kinds: [i % 2 ? 1 : 4], '#p': [`recipient-${i}`] }], { onEvent: (event) => received.push(event.id) }, { cache: 'network-only' });
-    await until(() => server.requests.length === 4);
+    await until(() => server.requests.length === 5);
     expect(server.requests.flat()).toHaveLength(100);
     for (const filter of server.requests.flat()) {
       expect(filter.authors).toHaveLength(1); expect(filter.kinds).toHaveLength(1); expect(filter['#p']).toHaveLength(1);
@@ -34,7 +50,7 @@ describe('Nostr runtime over real relay sockets', () => {
     server.emit(event('does not match original pair', 1, 100, [['p', 'recipient-0']]));
     server.emit(event('matches', 4, 100, [['p', 'recipient-0']]));
     await until(() => received.length === 1);
-    expect(client.metrics().relaySubscriptions).toBe(4);
+    expect(client.metrics().relaySubscriptions).toBe(5);
   });
   it('waits for actual delayed EOSE and keeps live subscriptions open after a partial timeout', async () => {
     const server = await relay(); server.eoseDelay = 750;
@@ -284,14 +300,14 @@ describe('Nostr runtime over real relay sockets', () => {
       onEvent: () => {}, onEose: () => { ready++; },
     }, { cache: 'network-only' }));
     await until(() => ready === 500);
-    expect(server.requests).toHaveLength(16);
+    expect(server.requests).toHaveLength(25);
     // setImmediate yields a separate task, like main-thread messages to a worker.
     for (const subscription of subscriptions) {
       subscription.close();
       await new Promise((resolve) => setImmediate(resolve));
     }
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(server.requests.length).toBeLessThanOrEqual(20);
+    expect(server.requests.length).toBeLessThanOrEqual(29);
     expect(client.metrics().relaySubscriptions).toBe(0);
   });
   it('stress: 1200 interests share bounded batches and deliver exactly once per matching listener', async () => {
@@ -309,8 +325,8 @@ describe('Nostr runtime over real relay sockets', () => {
     await until(() => eose === count, 10000);
     for (const event of signed) server.emit(event);
     await until(() => deliveries.every((count) => count === 1), 10000);
-    expect(server.requests.length).toBe(Math.ceil(count / 32));
-    expect(server.requests.every((filters) => filters.length <= 32)).toBe(true);
+    expect(server.requests.length).toBe(Math.ceil(count / 20));
+    expect(server.requests.every((filters) => filters.length <= 20)).toBe(true);
     const elapsed = process.cpuUsage(cpu);
     process.stdout.write('runtime stress ' + JSON.stringify({ interests: count, events: count, relayRequests: server.requests.length, wallMs: Math.round(performance.now() - start), cpuMs: Math.round((elapsed.user + elapsed.system) / 1000), deliveries: deliveries.reduce((a, b) => a + b, 0) }) + '\n');
   }, 20000);

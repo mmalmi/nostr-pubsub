@@ -20,7 +20,7 @@ export class RuntimeRelays {
         this.options = options;
         this.boundary = createSimplePoolNostrRelayVerificationBoundary(boundedVerifier(options.verifyEvent ?? verifyEvent));
         this.relays = normalizeRelays(options.relays ?? []);
-        this.maxFilters = positive(options.maxFiltersPerBatch, 32);
+        this.maxFilters = positive(options.maxFiltersPerBatch, 20);
         this.maxBytes = positive(options.maxFilterBytesPerBatch, 32768);
         this.pool = new AbstractSimplePool({
             maxWaitForConnection: options.historyTimeoutMs ?? 3000,
