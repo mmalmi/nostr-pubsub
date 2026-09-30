@@ -5,9 +5,13 @@ export const DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS = 1_000;
 export class FipsNostrPubsubEventSource {
     client;
     queryWindowMs;
-    constructor(client, queryWindowMs = DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS) {
+    id;
+    publishAcceptance = 'queued';
+    live = new Map();
+    constructor(client, queryWindowMs = DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS, id = 'fips') {
         this.client = client;
         this.queryWindowMs = queryWindowMs;
+        this.id = id;
         if (!Number.isSafeInteger(queryWindowMs) || queryWindowMs <= 0) {
             throw new RangeError('FIPS pubsub query window must be a positive safe integer');
         }
@@ -17,12 +21,51 @@ export class FipsNostrPubsubEventSource {
         return { accepted: true, priority: SOURCE_PRIORITY_FIPS_ENDPOINT };
     }
     subscribe(filters, handler) {
-        const subscription = this.client.subscribe(filters, (event, peerId) => handler({
-            event,
-            source: fipsEndpointSource(peerId),
-            priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-        }));
-        return { close: () => subscription.close() };
+        // A runtime opens live delivery before its history query. Both must share
+        // the same wire interest instead of consuming two bounded peer slots.
+        const key = JSON.stringify(filters.map((filter) => Object.fromEntries(Object.entries(filter).sort(([a], [b]) => a.localeCompare(b)))));
+        let shared = this.live.get(key);
+        if (shared) {
+            shared.handlers.add(handler);
+            for (const incoming of shared.recent.values())
+                handler(incoming);
+        }
+        else {
+            shared = { handlers: new Set([handler]), recent: new Map() };
+            this.live.set(key, shared);
+            const entry = shared;
+            try {
+                entry.subscription = this.client.subscribe(filters, (event, peerId) => {
+                    const incoming = { event, source: fipsEndpointSource(peerId), priority: SOURCE_PRIORITY_FIPS_ENDPOINT };
+                    entry.recent.set(event.id, incoming);
+                    if (entry.recent.size > this.client.limits.maxReplayEvents)
+                        entry.recent.delete(entry.recent.keys().next().value);
+                    let failure;
+                    for (const receive of [...entry.handlers]) {
+                        try {
+                            receive(incoming);
+                        }
+                        catch (error) {
+                            failure = error;
+                        }
+                    }
+                    if (failure)
+                        throw failure;
+                });
+            }
+            catch (error) {
+                this.live.delete(key);
+                throw error;
+            }
+        }
+        const entry = shared;
+        return { close: () => {
+                entry.handlers.delete(handler);
+                if (!entry.handlers.size && this.live.get(key) === entry) {
+                    this.live.delete(key);
+                    entry.subscription?.close();
+                }
+            } };
     }
     query(filters, options = {}) {
         validateQueryOptions(options);

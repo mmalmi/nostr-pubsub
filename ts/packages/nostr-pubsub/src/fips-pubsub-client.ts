@@ -1,3 +1,4 @@
+import { FipsRetainedReplay } from './fips-pubsub-retained.js';
 import { cloneFilter } from './filter.js';
 import { PubsubPeerSubscriptionStore } from './subscription.js';
 import {
@@ -54,6 +55,7 @@ export class FipsNostrPubsubClient {
   private peerSubscriptions: PubsubPeerSubscriptionStore;
   private readonly subscriptions = new Map<string, FipsPubsubLocalSubscription>();
   private readonly events: FipsPubsubEventCache;
+  private readonly retained: FipsRetainedReplay;
   private readonly invWant: FipsPubsubInvWantState;
   private readonly pending = new Set<Promise<unknown>>();
   private transport?: FipsPubsubTcpTransport;
@@ -75,6 +77,10 @@ export class FipsNostrPubsubClient {
     this.codec = new FipsPubsubWireCodec(this.limits.maxFrameBytes);
     this.allowedKinds = normalizeAllowedKinds(options.allowedKinds);
     this.peerSubscriptions = createClientPeerSubscriptionStore(this.limits);
+    this.retained = new FipsRetainedReplay(this.events, options.retainedEventReader, this.limits.maxReplayEvents, this.limits.maxHops,
+      (event) => this.admitEvent(event),
+      (peer, id, event) => this.currentPeers().includes(peer) && this.peerSubscriptions.matchingSubscriptions(peer, event).some((sub) => sub.subscriptionId === id),
+      (peer, message) => this.send(peer, message));
   }
   start(): this {
     if (this.transport !== undefined) return this;
@@ -106,6 +112,7 @@ export class FipsNostrPubsubClient {
     return this;
   }
   async stop(): Promise<void> {
+    this.retained.close();
     for (const subscriptionId of [...this.subscriptions.keys()]) {
       this.closeSubscription(subscriptionId);
     }
@@ -232,16 +239,8 @@ export class FipsNostrPubsubClient {
 
     if (message.type === 'req') {
       this.peerSubscriptions.upsertFilters(peerId, message.subscriptionId, message.filters);
-      for (const cached of this.events.replay(message.filters, this.limits.maxReplayEvents)) {
-        this.background(
-          this.send(peerId, inventoryMessage(
-            cached.event,
-            [message.subscriptionId],
-            cached.hopLimit,
-          )),
-          { operation: 'send', peerId, subscriptionId: message.subscriptionId },
-        );
-      }
+      this.background(this.retained.replay(peerId, message.subscriptionId, message.filters),
+        { operation: 'send', peerId, subscriptionId: message.subscriptionId });
       return;
     }
     if (message.type === 'close') {

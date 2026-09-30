@@ -26,12 +26,15 @@ export declare class FipsPubsubTcpTransport {
     private readonly inputs;
     private readonly localPeerOrderKey;
     private operation;
+    private readonly connecting;
     private timer?;
     private disposed;
     constructor(endpoint: FipsDatagramEndpoint, localPeerId: string, options: FipsPubsubTcpTransportOptions, callbacks: FipsPubsubTcpTransportCallbacks, isnSeed?: bigint | number);
     connectPeer(peer: string, nowMs?: number): Promise<void>;
+    private connectPeerOnce;
     queueFrame(peerId: string, frame: Uint8Array): void;
     abortPeer(peer: string): Promise<void>;
+    private abortPeerOnce;
     connectedPeerCount(): number;
     isConnected(peerId: string): boolean;
     idle(): Promise<void>;

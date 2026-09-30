@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.7 - 2026-09-30
+
+- Add a shared browser/worker Nostr runtime with exact-filter relay batching,
+  explicit historical completion, overlapping reconnect recovery, authenticated
+  relay support, scoped publication, and truthful remote acknowledgments.
+- Add an application-owned persistent event store/outbox contract with
+  replacement, expiration, and authorized deletion handling.
+- Coalesce concurrent peer connection attempts and share matching live/history
+  interests so application startup does not exhaust TCP or peer subscription bounds.
+- Serve bounded retained local event history over the existing FIPS node,
+  alongside other services such as Hashtree file sharing.
+- Exercise 1,200 live interests over real relay sockets without widening
+  recipient filters or duplicating matching deliveries.
+
 ## 0.5.6 - 2026-08-19
 
 - Treat an authenticated TCP/FIPS stream that closes between a cleanup state

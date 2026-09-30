@@ -25,6 +25,7 @@ export class FipsPubsubTcpTransport {
     inputs = new Map();
     localPeerOrderKey;
     operation = Promise.resolve();
+    connecting = new Map();
     timer;
     disposed = false;
     constructor(endpoint, localPeerId, options, callbacks, isnSeed = 1n) {
@@ -51,7 +52,21 @@ export class FipsPubsubTcpTransport {
         });
         this.localPeerOrderKey = fipsInvWantTcpPeerOrderKey(localPeerId);
     }
-    async connectPeer(peer, nowMs = Date.now()) {
+    connectPeer(peer, nowMs = Date.now()) {
+        this.ensureOpen();
+        const existing = this.connecting.get(peer);
+        if (existing)
+            return existing;
+        // Subscription setup and peer notifications can request the same connection
+        // before TCP's async connect returns. Share the attempt and serialize it with
+        // stream maintenance so no untracked SYN consumes the per-peer capacity.
+        const next = this.operation.then(() => this.connectPeerOnce(peer, nowMs));
+        this.operation = next.catch(() => undefined);
+        const pending = next.finally(() => this.connecting.delete(peer));
+        this.connecting.set(peer, pending);
+        return pending;
+    }
+    async connectPeerOnce(peer, nowMs) {
         this.ensureOpen();
         for (const [id, connection] of this.connections) {
             const state = await this.tcp.state(id);
@@ -74,8 +89,15 @@ export class FipsPubsubTcpTransport {
         this.queues.enqueue([{ peerId, record }]);
         this.scheduleDrive(false);
     }
-    async abortPeer(peer) {
+    abortPeer(peer) {
         this.ensureOpen();
+        const next = this.operation.then(() => this.abortPeerOnce(peer));
+        this.operation = next.catch(() => undefined);
+        return next;
+    }
+    async abortPeerOnce(peer) {
+        if (this.disposed)
+            return;
         const ids = [...this.connections]
             .filter(([, connection]) => connection.peer === peer)
             .map(([id]) => id);

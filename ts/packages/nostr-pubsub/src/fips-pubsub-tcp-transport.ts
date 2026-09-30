@@ -56,6 +56,7 @@ export class FipsPubsubTcpTransport {
   private readonly inputs = new Map<string, InvWantRecordDecoder>();
   private readonly localPeerOrderKey: string;
   private operation: Promise<void> = Promise.resolve();
+  private readonly connecting = new Map<string, Promise<void>>();
   private timer?: ReturnType<typeof setTimeout>;
   private disposed = false;
 
@@ -87,7 +88,21 @@ export class FipsPubsubTcpTransport {
     this.localPeerOrderKey = fipsInvWantTcpPeerOrderKey(localPeerId);
   }
 
-  async connectPeer(peer: string, nowMs = Date.now()): Promise<void> {
+  connectPeer(peer: string, nowMs = Date.now()): Promise<void> {
+    this.ensureOpen();
+    const existing = this.connecting.get(peer);
+    if (existing) return existing;
+    // Subscription setup and peer notifications can request the same connection
+    // before TCP's async connect returns. Share the attempt and serialize it with
+    // stream maintenance so no untracked SYN consumes the per-peer capacity.
+    const next = this.operation.then(() => this.connectPeerOnce(peer, nowMs));
+    this.operation = next.catch(() => undefined);
+    const pending = next.finally(() => this.connecting.delete(peer));
+    this.connecting.set(peer, pending);
+    return pending;
+  }
+
+  private async connectPeerOnce(peer: string, nowMs: number): Promise<void> {
     this.ensureOpen();
     for (const [id, connection] of this.connections) {
       const state = await this.tcp.state(id);
@@ -111,8 +126,15 @@ export class FipsPubsubTcpTransport {
     this.scheduleDrive(false);
   }
 
-  async abortPeer(peer: string): Promise<void> {
+  abortPeer(peer: string): Promise<void> {
     this.ensureOpen();
+    const next = this.operation.then(() => this.abortPeerOnce(peer));
+    this.operation = next.catch(() => undefined);
+    return next;
+  }
+
+  private async abortPeerOnce(peer: string): Promise<void> {
+    if (this.disposed) return;
     const ids = [...this.connections]
       .filter(([, connection]) => connection.peer === peer)
       .map(([id]) => id);

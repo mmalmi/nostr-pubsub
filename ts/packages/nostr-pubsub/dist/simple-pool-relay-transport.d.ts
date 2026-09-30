@@ -1,7 +1,7 @@
 import { SimplePool } from 'nostr-tools';
 import { type NostrEvent, type NostrEventVerifier, type NostrFilter, type NostrVerifiedEvent } from './types.js';
 import type { NostrRelaySubscription, NostrRelayTransport, NostrRelayTransportHandlers, NostrRelayTransportSubscribeOptions } from './relay-event-source.js';
-type RelayPool = Pick<SimplePool, 'publish' | 'subscribeMany'>;
+type RelayPool = Pick<SimplePool, 'publish' | 'subscribeMany'> & Partial<Pick<SimplePool, 'ensureRelay'>>;
 export interface SimplePoolNostrRelayVerificationBoundary {
     /** Pass this exact function to the shared SimplePool constructor. */
     readonly verifyEvent: NostrEventVerifier;

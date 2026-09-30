@@ -13,6 +13,7 @@ export declare class FipsNostrPubsubClient {
     private peerSubscriptions;
     private readonly subscriptions;
     private readonly events;
+    private readonly retained;
     private readonly invWant;
     private readonly pending;
     private transport?;

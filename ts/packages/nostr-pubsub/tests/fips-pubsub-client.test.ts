@@ -11,6 +11,7 @@ import {
   FipsNostrPubsubClient,
   FipsNostrPubsubEventSource,
   FipsPubsubWireCodec,
+  localIndexSource,
   type FipsPubsubClientNode,
 } from '../src/index.js';
 
@@ -265,6 +266,62 @@ describe('FipsNostrPubsubClient', () => {
 
     await alice.stop();
     await bob.stop();
+  });
+
+  it('shares one TCP connection attempt for many simultaneous subscriptions', async () => {
+    const network = new MemoryFipsNetwork();
+    const errors: Error[] = [];
+    const options = { allowedKinds: [1060], limits: { maxActiveSubscriptions: 64, maxSubscriptionsPerPeer: 64 }, onError: (error: Error) => errors.push(error) };
+    const alice = new FipsNostrPubsubClient({ ...options, localPeerId: ALICE, node: network.node(ALICE), peers: () => [BOB] }).start();
+    const bob = new FipsNostrPubsubClient({ ...options, localPeerId: BOB, node: network.node(BOB), peers: () => [ALICE] }).start();
+    const received = new Uint16Array(40);
+    try {
+      for (let i = 0; i < received.length; i++) bob.subscribe([{ kinds: [1060] }], () => { received[i]++; });
+      // Both ends connect concurrently while subscription setup is still in flight.
+      alice.subscribe([{ kinds: [1060] }], () => {});
+      await settle(alice, bob);
+      expect(errors.map((error) => error.message)).toEqual([]);
+      expect(alice.peerSubscriptionCount(BOB)).toBe(received.length);
+      await alice.publish(chatEvent(1_700_000_020, 'shared transport'));
+      await settle(alice, bob);
+      expect([...received]).toEqual(Array(40).fill(1));
+    } finally { await alice.stop(); await bob.stop(); }
+  });
+
+  it('shares live and history interests and replays recent peer events to a later query', async () => {
+    const network = new MemoryFipsNetwork();
+    const alice = new FipsNostrPubsubClient({ localPeerId: ALICE, node: network.node(ALICE), peers: () => [BOB] }).start();
+    const bob = new FipsNostrPubsubClient({ localPeerId: BOB, node: network.node(BOB), peers: () => [ALICE] }).start();
+    const source = new FipsNostrPubsubEventSource(bob, 30);
+    try {
+      const interests = Array.from({ length: 40 }, (_, since) => [{ kinds: [1060], since }]);
+      const subscriptions = interests.map((filters) => source.subscribe(filters, () => {}));
+      const queries = interests.map((filters) => source.query(filters));
+      expect(bob.activeSubscriptionCount()).toBe(40);
+      await settle(alice, bob);
+      const event = chatEvent(1_700_000_030, 'shared history');
+      await alice.publish(event); await settle(alice, bob);
+      expect((await Promise.all(queries)).every((report) => report.events[0]?.event.id === event.id)).toBe(true);
+      expect(bob.activeSubscriptionCount()).toBe(40);
+      expect((await source.query(interests[0]!, { limit: 1 })).events[0]?.event.id).toBe(event.id);
+      for (const subscription of subscriptions) subscription.close();
+      expect(bob.activeSubscriptionCount()).toBe(0);
+    } finally { await alice.stop(); await bob.stop(); }
+  });
+
+  it('serves admitted persistent history without prewarming the mesh cache', async () => {
+    const network = new MemoryFipsNetwork();
+    const stored = chatEvent(1_700_000_010, 'persistent only');
+    const query = vi.fn(async () => ({ events: [{ event: stored, source: localIndexSource('retained'), priority: 0 }] }));
+    const alice = new FipsNostrPubsubClient({ localPeerId: ALICE, node: network.node(ALICE), peers: () => [BOB], allowedKinds: [1060], retainedEventReader: { query } }).start();
+    const bob = new FipsNostrPubsubClient({ localPeerId: BOB, node: network.node(BOB), peers: () => [ALICE], allowedKinds: [1060] }).start();
+    const received = vi.fn();
+    try {
+      bob.subscribe([{ kinds: [1060] }], received);
+      await settle(alice, bob);
+      expect(query).toHaveBeenCalledWith([{ kinds: [1060] }], expect.objectContaining({ limit: 8, signal: expect.any(AbortSignal) }));
+      expect(received.mock.calls.map((args) => args[0].id)).toEqual([stored.id]);
+    } finally { await alice.stop(); await bob.stop(); }
   });
 
   it('replays bounded signed events and drops traffic outside admission policy', async () => {

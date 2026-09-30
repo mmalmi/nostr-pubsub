@@ -22,4 +22,6 @@ export { defaultFipsNostrPubsubClientLimits, } from './fips-pubsub-client-types.
 export { FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL, FIPS_NOSTR_PUBSUB_INV_WANT_VERSION, FipsInvWantStream, defaultFipsInvWantStreamOptions, } from './fips-invwant-stream.js';
 export { FipsInvWantTcpDriver } from './fips-invwant-tcp-driver.js';
 export { fipsInvWantTcpCapabilityName, fipsInvWantTcpPeerOrderKey, } from './fips-invwant-tcp-types.js';
+export { NostrRuntime, createNostrRuntime } from './runtime.js';
+export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
 //# sourceMappingURL=index.js.map

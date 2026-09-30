@@ -7,7 +7,10 @@ export declare const DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS = 1000;
 export declare class FipsNostrPubsubEventSource implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
     readonly client: FipsNostrPubsubClient;
     readonly queryWindowMs: number;
-    constructor(client: FipsNostrPubsubClient, queryWindowMs?: number);
+    readonly id: string;
+    readonly publishAcceptance: "queued";
+    private readonly live;
+    constructor(client: FipsNostrPubsubClient, queryWindowMs?: number, id?: string);
     publish(event: NostrEvent, _source: EventSource): Promise<PublishReport>;
     subscribe(filters: NostrFilter[], handler: (event: QueryEvent) => void): NostrEventSubscription;
     query(filters: NostrFilter[], options?: QueryOptions): Promise<QueryReport>;
