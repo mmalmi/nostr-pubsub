@@ -24,7 +24,7 @@ export class NostrRuntime {
   private readonly sources = new Map<string, RuntimeSource>();
   private readonly listeners = new Set<Listener>();
   private readonly interests = new RuntimeInterests<Listener>();
-  private readonly incoming = new Map<string, Promise<boolean>>();
+  private readonly incoming = new Map<string, { operation: Promise<Awaited<ReturnType<typeof admitRuntimeEvent>>>; sources: Set<string> }>();
   private readonly publishing = new Map<string, Promise<RuntimePublishResult>>();
   private writes: Promise<unknown> = Promise.resolve();
   private stopped = false;
@@ -84,26 +84,31 @@ export class NostrRuntime {
     let event: NostrEvent;
     try { event = verifyNostrEvent(raw, this.options.verifyEvent); }
     catch (error) { this.counters.verificationFailures++; throw error; }
-    const ongoing = this.incoming.get(event.id);
-    if (ongoing) return ongoing;
-    const operation = this.writes.then(async () => {
-      const admission = await admitRuntimeEvent(this.store, event);
-      if (admission !== 'rejected' && !this.stopped) for (const listener of this.interests.candidates(event)) {
+    let pending = this.incoming.get(event.id);
+    const owner = !pending;
+    if (!pending) {
+      const operation = this.writes.then(() => admitRuntimeEvent(this.store, event)).catch((error) => {
+        // Shared admission failure makes every matching history incomplete.
+        for (const listener of this.interests.candidates(event)) {
+          if (!listener.stopped && matchFilters(listener.filters, event)) listener.admissionError = asError(error).message;
+        }
+        throw error;
+      });
+      this.writes = operation.catch(() => undefined);
+      pending = { operation, sources: new Set() };
+      this.incoming.set(event.id, pending);
+    }
+    const newSource = !pending.sources.has(source);
+    pending.sources.add(source);
+    try {
+      const admission = await pending.operation;
+      if (newSource && admission !== 'rejected' && !this.stopped) for (const listener of this.interests.candidates(event)) {
         if (admission === 'admitted' || listener.options.includeSuperseded) this.deliver(listener, event, { source, cached: false });
       }
       return admission === 'admitted';
-    }).catch((error) => {
-      // Admission is shared across overlapping interests. A failed durable write
-      // must make every affected history incomplete, even if relay EOSE arrived.
-      for (const listener of this.interests.candidates(event)) {
-        if (!listener.stopped && matchFilters(listener.filters, event)) listener.admissionError = asError(error).message;
-      }
-      throw error;
-    });
-    this.writes = operation.catch(() => undefined);
-    this.incoming.set(event.id, operation);
-    try { return await operation; } finally { this.incoming.delete(event.id); }
+    } finally { if (owner) this.incoming.delete(event.id); }
   }
+
   publish(event: NostrEvent, options: RuntimePublishOptions = {}): Promise<RuntimePublishResult> {
     this.ensureOpen();
     const key = JSON.stringify([event.id, options]);
@@ -207,16 +212,24 @@ export class NostrRuntime {
   private receive(listener: Listener, event: NostrEvent, source: string): void {
     if (listener.stopped) return;
     this.counters.receivedEvents++;
-    if (listener.seen.has(event.id) || this.incoming.has(event.id)) { this.counters.duplicateEvents++; return; }
+    if (listener.seen.has(event.id) || this.incoming.get(event.id)?.sources.has(source)) { this.counters.duplicateEvents++; return; }
     void this.ingest(event, source).catch((error) => this.report(listener, error));
   }
   private deliver(listener: Listener, event: NostrEvent, info: RuntimeEventInfo): void {
-    if (listener.stopped || !matchFilters(listener.filters, event)) return;
+    if (listener.stopped || !matchFilters(listener.filters, event) || !this.acceptsOrigin(listener, info)) return;
     if (listener.seen.has(event.id)) { this.counters.duplicateEvents++; return; }
     listener.seen.add(event.id);
     if (listener.seen.size > (this.options.maxSeenEventsPerSubscription ?? 4096)) listener.seen.delete(listener.seen.values().next().value!);
     this.counters.deliveredEvents++;
     try { listener.handlers.onEvent(event, info); } catch (error) { this.report(listener, error); }
+  }
+  private acceptsOrigin(listener: Listener, info: RuntimeEventInfo): boolean {
+    if (info.cached) return listener.options.cache !== 'network-only';
+    if (info.source === 'local-publish') return listener.options.localEcho !== false;
+    const { relays, sources } = listener.options;
+    if (relays === undefined && sources === undefined) return true;
+    const selectedRelays = relays?.map(url => new URL(url).toString()) ?? this.relays.urls();
+    return selectedRelays.includes(info.source) || (sources?.includes(info.source) ?? false);
   }
   private sourceState(listener: Listener, id: string, complete: boolean, error?: string): void {
     if (listener.stopped) return;

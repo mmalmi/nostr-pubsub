@@ -32,6 +32,7 @@ export declare class NostrRuntime {
     private attachSource;
     private receive;
     private deliver;
+    private acceptsOrigin;
     private sourceState;
     private maybeComplete;
     private complete;

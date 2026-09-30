@@ -115,6 +115,39 @@ describe('Nostr runtime over real relay sockets', () => {
     const result = await client.publish(event('fast'), { requireAck: true });
     expect(result.remoteAccepted).toBe(true); expect(Date.now() - start).toBeLessThan(500);
   });
+  it('preserves selected relay evidence during concurrent local admission without leaking other routes', async () => {
+    const selected = await relay(); const other = await relay();
+    const selectedUrl = await selected.url(); const otherUrl = await other.url();
+    let release!: () => void; let started = false;
+    const pendingWrite = new Promise<void>(resolve => { release = resolve; });
+    class DelayedStore extends MemoryEventStore {
+      override async put(value: NostrEvent): Promise<void> { started = true; await pendingWrite; await super.put(value); }
+    }
+    const client = runtime({ relays: [otherUrl], store: new DelayedStore() });
+    const seen: Array<{ id: string; source: string }> = [];
+    client.subscribe([{ kinds: [1] }], { onEvent: (event, info) => seen.push({ id: event.id, source: info.source }) },
+      { cache: 'network-only', relays: [selectedUrl], sources: [], localEcho: false });
+    const otherSubscription = client.subscribe([{ kinds: [1] }], { onEvent: () => {} }, { cache: 'network-only', relays: [otherUrl] });
+    await until(() => selected.requests.length > 0 && other.requests.length > 0);
+    const signed = event('authorization evidence');
+    const optimistic = client.publish(signed, { relays: [], sources: [] });
+    await until(() => started);
+    selected.emit(signed); other.emit(signed);
+    await until(() => client.metrics().receivedEvents >= 2);
+    expect(seen).toEqual([]);
+    release(); await optimistic;
+    await until(() => seen.length === 1);
+    expect(seen).toEqual([{ id: signed.id, source: selectedUrl }]);
+    const unrelated = event('other route only'); other.emit(unrelated);
+    await until(() => client.metrics().receivedEvents >= 3);
+    await client.ingest(unrelated, otherUrl);
+    expect(seen).toHaveLength(1);
+    await client.ingest(event('peer source only'), 'fips');
+    expect(seen).toHaveLength(1);
+    selected.emit(signed); await new Promise(resolve => setTimeout(resolve, 20));
+    expect(seen).toHaveLength(1);
+    otherSubscription.close();
+  });
   it('scopes private interests and queued retry destinations to explicit relays', async () => {
     const defaultRelay = await relay(); const privateRelay = await relay(); privateRelay.acknowledge = false;
     const store = new MemoryEventStore();

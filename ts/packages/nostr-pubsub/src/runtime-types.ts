@@ -35,6 +35,8 @@ export interface RuntimeSubscribeOptions {
   /** Deliver older replaceable versions returned by the network without caching them.
    * Requires cache: 'network-only'; deletion and expiration checks still apply. */
   includeSuperseded?: boolean;
+  /** Exclude optimistic local publication; later matching relay evidence still delivers. */
+  localEcho?: boolean;
   /** Explicit relay scope also excludes additional sources unless sources is supplied. */
   relays?: readonly string[];
   sources?: readonly string[];

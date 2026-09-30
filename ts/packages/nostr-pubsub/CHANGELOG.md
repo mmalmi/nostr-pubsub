@@ -2,6 +2,10 @@
 
 ## 0.5.10 - 2026-09-30
 
+- Enforce explicit relay/source delivery scopes and optional local-echo exclusion
+  before event deduplication. Concurrent copies retain their separate source
+  evidence while sharing one durable admission.
+
 - Allow explicitly requested network history to return superseded replaceable
   versions without changing the latest-value cache or bypassing deletion and
   expiration checks.

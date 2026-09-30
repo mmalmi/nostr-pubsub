@@ -87,33 +87,35 @@ export class NostrRuntime {
             this.counters.verificationFailures++;
             throw error;
         }
-        const ongoing = this.incoming.get(event.id);
-        if (ongoing)
-            return ongoing;
-        const operation = this.writes.then(async () => {
-            const admission = await admitRuntimeEvent(this.store, event);
-            if (admission !== 'rejected' && !this.stopped)
+        let pending = this.incoming.get(event.id);
+        const owner = !pending;
+        if (!pending) {
+            const operation = this.writes.then(() => admitRuntimeEvent(this.store, event)).catch((error) => {
+                // Shared admission failure makes every matching history incomplete.
+                for (const listener of this.interests.candidates(event)) {
+                    if (!listener.stopped && matchFilters(listener.filters, event))
+                        listener.admissionError = asError(error).message;
+                }
+                throw error;
+            });
+            this.writes = operation.catch(() => undefined);
+            pending = { operation, sources: new Set() };
+            this.incoming.set(event.id, pending);
+        }
+        const newSource = !pending.sources.has(source);
+        pending.sources.add(source);
+        try {
+            const admission = await pending.operation;
+            if (newSource && admission !== 'rejected' && !this.stopped)
                 for (const listener of this.interests.candidates(event)) {
                     if (admission === 'admitted' || listener.options.includeSuperseded)
                         this.deliver(listener, event, { source, cached: false });
                 }
             return admission === 'admitted';
-        }).catch((error) => {
-            // Admission is shared across overlapping interests. A failed durable write
-            // must make every affected history incomplete, even if relay EOSE arrived.
-            for (const listener of this.interests.candidates(event)) {
-                if (!listener.stopped && matchFilters(listener.filters, event))
-                    listener.admissionError = asError(error).message;
-            }
-            throw error;
-        });
-        this.writes = operation.catch(() => undefined);
-        this.incoming.set(event.id, operation);
-        try {
-            return await operation;
         }
         finally {
-            this.incoming.delete(event.id);
+            if (owner)
+                this.incoming.delete(event.id);
         }
     }
     publish(event, options = {}) {
@@ -266,14 +268,14 @@ export class NostrRuntime {
         if (listener.stopped)
             return;
         this.counters.receivedEvents++;
-        if (listener.seen.has(event.id) || this.incoming.has(event.id)) {
+        if (listener.seen.has(event.id) || this.incoming.get(event.id)?.sources.has(source)) {
             this.counters.duplicateEvents++;
             return;
         }
         void this.ingest(event, source).catch((error) => this.report(listener, error));
     }
     deliver(listener, event, info) {
-        if (listener.stopped || !matchFilters(listener.filters, event))
+        if (listener.stopped || !matchFilters(listener.filters, event) || !this.acceptsOrigin(listener, info))
             return;
         if (listener.seen.has(event.id)) {
             this.counters.duplicateEvents++;
@@ -289,6 +291,17 @@ export class NostrRuntime {
         catch (error) {
             this.report(listener, error);
         }
+    }
+    acceptsOrigin(listener, info) {
+        if (info.cached)
+            return listener.options.cache !== 'network-only';
+        if (info.source === 'local-publish')
+            return listener.options.localEcho !== false;
+        const { relays, sources } = listener.options;
+        if (relays === undefined && sources === undefined)
+            return true;
+        const selectedRelays = relays?.map(url => new URL(url).toString()) ?? this.relays.urls();
+        return selectedRelays.includes(info.source) || (sources?.includes(info.source) ?? false);
     }
     sourceState(listener, id, complete, error) {
         if (listener.stopped)
