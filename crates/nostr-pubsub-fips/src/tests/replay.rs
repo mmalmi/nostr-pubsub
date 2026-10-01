@@ -132,8 +132,10 @@ async fn fresh_subscriber_reobserves_cached_events_and_stays_quiet_offline() {
     assert_eq!(cached.recv().await.unwrap().event, event);
     drop(cached);
     let (sender, mut deliveries) = mpsc::unbounded_channel();
-    let subscription = receiver
-        .fresh_subscriber()
+    let fresh = receiver.fresh_subscriber();
+    drop(receiver);
+    // A standalone adapter owns its client tasks after the original handle drops.
+    let subscription = fresh
         .subscribe(
             vec![filter],
             Arc::new(move |incoming| {
@@ -148,7 +150,7 @@ async fn fresh_subscriber_reobserves_cached_events_and_stays_quiet_offline() {
             .is_err()
     );
     subscription.close().await.unwrap();
-    assert_eq!(receiver.active_subscription_count().unwrap(), baseline);
-    receiver.shutdown_shared().await;
+    assert_eq!(fresh.client.active_subscription_count().unwrap(), baseline);
+    fresh.client.shutdown_shared().await;
     b.shutdown().await.unwrap();
 }
