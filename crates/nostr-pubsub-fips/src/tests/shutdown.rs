@@ -13,6 +13,9 @@ async fn retained_client_shutdown_joins_every_owned_task() {
         .unwrap(),
     );
     let retained = client.clone();
+    let store = Arc::new(InMemoryEventBus::new());
+    let store_lifetime = Arc::downgrade(&store);
+    client.set_replay_source(Some(store)).unwrap();
     let tasks = {
         let tasks = client.tasks.lock().await;
         [
@@ -29,6 +32,10 @@ async fn retained_client_shutdown_joins_every_owned_task() {
     assert_eq!(retained.active_subscription_count().unwrap(), 3);
     client.shutdown_shared().await;
     assert!(tasks.iter().all(tokio::task::AbortHandle::is_finished));
+    assert!(
+        store_lifetime.upgrade().is_none(),
+        "a stopped retained client must release its event store"
+    );
     assert_eq!(retained.active_subscription_count().unwrap(), 0);
     assert!(delivery.recv().await.is_none());
     assert!(retained.subscribe(vec![Filter::new()]).await.is_err());

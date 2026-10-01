@@ -863,23 +863,6 @@ impl ClientInner {
         self.send_close(key, active.peers);
     }
 
-    pub(super) fn close_all(&self) {
-        if let Ok(mut open) = self.admission.lock() {
-            *open = false;
-        }
-        let active = self
-            .subscriptions
-            .lock()
-            .map(|mut subscriptions| subscriptions.drain().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for (key, subscription) in active {
-            self.send_close(&key, subscription.peers);
-        }
-        if let Ok(mut pending) = self.pending_wants.lock() {
-            pending.clear();
-        }
-    }
-
     pub(super) fn send_close(&self, key: &str, peers: HashSet<String>) {
         let Ok(frame) =
             self.codec

@@ -8,6 +8,8 @@
   including responses carried by an older overlapping subscription.
 - Combine batched filters' replay budgets within the existing client cap, so
   requesting one event from each filter can return every requested event.
+- Release the attached event store on shutdown even when applications retain
+  the stopped client.
 
 ## 0.5.12 - 2026-10-01
 

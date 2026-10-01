@@ -56,3 +56,28 @@ impl Drop for FipsPubsubClient {
         self.tasks.get_mut().abort_all();
     }
 }
+
+impl super::ClientInner {
+    pub(super) fn close_all(&self) {
+        if let Ok(mut open) = self.admission.lock() {
+            *open = false;
+        }
+        let source = self
+            .replay_source
+            .lock()
+            .ok()
+            .and_then(|mut source| source.take());
+        drop(source);
+        let active = self
+            .subscriptions
+            .lock()
+            .map(|mut subscriptions| subscriptions.drain().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for (key, subscription) in active {
+            self.send_close(&key, subscription.peers);
+        }
+        if let Ok(mut pending) = self.pending_wants.lock() {
+            pending.clear();
+        }
+    }
+}
