@@ -4,12 +4,14 @@ pub(super) struct ClientTasks {
     pub(super) transport: Option<JoinHandle<()>>,
     pub(super) peerfinding: Option<JoinHandle<()>>,
     pub(super) reputation: Option<JoinHandle<()>>,
+    pub(super) replay: Option<JoinHandle<()>>,
 }
 
 impl ClientTasks {
     fn slots(&mut self) -> impl Iterator<Item = &mut Option<JoinHandle<()>>> {
         [
             &mut self.reputation,
+            &mut self.replay,
             &mut self.peerfinding,
             &mut self.transport,
         ]

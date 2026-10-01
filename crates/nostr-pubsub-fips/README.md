@@ -93,6 +93,16 @@ also works for historical events. For a large stored set, a reconciliation
 layer such as NIP-77 Negentropy can identify the missing IDs first and then use
 the same event transfer path more efficiently.
 
+`set_replay_source(Some(store))` attaches an application-owned local `EventBus`
+for historical `REQ` queries and exact-ID `WANT` reads beyond the memory window.
+Attach only a store containing events peers may read. The application controls
+durable ingestion, retention and restart recovery; Hashtree event indexes can
+implement this interface. Storage reads run outside the transport loop, with
+four concurrent queries, a queue bounded by `max_connected_peers`, and the
+existing `query_timeout`. Responses recheck current subscriptions, event policy
+and the attached source. Detaching the source suppresses pending responses;
+client shutdown cancels and joins the query workers.
+
 An explicit local publish retries a payload that has left this replay window,
 while duplicate incoming gossip stays suppressed. Durable application outboxes
 should pace retry batches within `max_replay_events` so payloads remain

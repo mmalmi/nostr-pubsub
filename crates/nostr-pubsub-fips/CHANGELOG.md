@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Serve bounded historical peer requests from an application-owned local event
+  store without expanding the transport's memory cache or blocking live traffic.
+- Let fresh subscriptions refetch evicted bodies whose IDs are still remembered,
+  including responses carried by an older overlapping subscription.
+
 ## 0.5.12 - 2026-10-01
 
 - Add `fresh_subscriber()` to observe new peer responses over an existing client

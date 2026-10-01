@@ -27,6 +27,7 @@ use crate::client_transport::tcp_driver_poll_needed;
 mod managed_reputation;
 mod peer_policy;
 mod replay;
+mod replay_source;
 mod reputation;
 mod routed;
 mod service_retry;

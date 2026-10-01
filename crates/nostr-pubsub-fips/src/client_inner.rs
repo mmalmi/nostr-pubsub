@@ -25,6 +25,8 @@ pub(super) struct ClientInner {
     pub(super) peer_policy: Option<Arc<dyn nostr_pubsub::MeshPeerPolicy>>,
     pub(super) unknown_peer_reserve: usize,
     pub(super) transport_tx: mpsc::Sender<TransportCommand>,
+    pub(super) replay_source: Mutex<Option<Arc<dyn nostr_pubsub::EventBus>>>,
+    pub(super) replay_tx: mpsc::Sender<crate::replay_source::ReplayRequest>,
     pub(super) connected_transport_peers: AtomicUsize,
     pub(super) req_frames_received: AtomicU64,
     pub(super) close_frames_received: AtomicU64,
@@ -208,17 +210,20 @@ impl ClientInner {
                 event,
             } => {
                 self.event_frames_received.fetch_add(1, Ordering::Relaxed);
-                let subscription_key = subscription_id
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default();
+                let is_subscribed =
+                    self.event_matches_subscription(&source_npub, subscription_id.as_ref(), &event);
+                let fresh_id = if is_subscribed && subscription_id.is_some() {
+                    self.fresh_response_subscription(&source_npub, &event)
+                } else {
+                    None
+                };
+                let response_id = fresh_id.as_ref().or(subscription_id.as_ref());
+                let subscription_key = response_id.map(ToString::to_string).unwrap_or_default();
                 let event_id = event.as_event().id.to_string();
                 let first_observation = self
                     .observed_full_events
                     .lock()
                     .is_ok_and(|mut seen| seen.observe(&source_npub, &subscription_key, &event_id));
-                let is_subscribed =
-                    self.event_matches_subscription(&source_npub, subscription_id.as_ref(), &event);
                 if !is_subscribed {
                     self.record_provider_violation(
                         source_peer,
@@ -235,7 +240,7 @@ impl ClientInner {
                 if !self.event_is_admitted(&event, &source).await {
                     return;
                 }
-                self.handle_event(&source_npub, &source_id, subscription_id.as_ref(), &event);
+                self.handle_event(&source_npub, &source_id, response_id, &event);
             }
             FipsPubsubWireMessage::Inv {
                 subscription_ids,
@@ -255,7 +260,7 @@ impl ClientInner {
                         hop_limit,
                     },
                 )
-                .await
+                .await;
             }
             FipsPubsubWireMessage::Want { event_id } => {
                 self.want_frames_received.fetch_add(1, Ordering::Relaxed);
@@ -277,7 +282,14 @@ impl ClientInner {
         {
             return;
         }
-        for cached in self.recent_matching_events(filters).unwrap_or_default() {
+        let limit = crate::replay_source::query_limit(filters, self.options.max_replay_events);
+        let mut excluded = Vec::new();
+        for cached in self
+            .recent_matching_events(filters)
+            .unwrap_or_default()
+            .into_iter()
+            .take(limit)
+        {
             let Ok(frame) = self.inventory_frame(
                 vec![subscription_id.clone()],
                 &cached.event,
@@ -286,6 +298,18 @@ impl ClientInner {
                 continue;
             };
             let _ = self.send_frame(source_peer, frame);
+            excluded.push(cached.event.as_event().id);
+        }
+        if excluded.len() < limit {
+            self.queue_replay(
+                source_peer,
+                crate::replay_source::ReplayQuery::Subscription {
+                    id: subscription_id.clone(),
+                    filters: filters.to_vec(),
+                    excluded,
+                    limit,
+                },
+            );
         }
     }
 
@@ -333,68 +357,6 @@ impl ClientInner {
         }
     }
 
-    pub(super) async fn handle_inv(
-        &self,
-        source_peer: PeerIdentity,
-        source_npub: &str,
-        inventory: InventoryAdvertisement,
-    ) {
-        self.inv_frames_received.fetch_add(1, Ordering::Relaxed);
-        if inventory.subscription_ids.len()
-            > self.options.max_active_subscriptions.saturating_add(1)
-        {
-            return;
-        }
-        let event_id = inventory.event_id.to_hex();
-        let cached = self
-            .recent_events
-            .lock()
-            .ok()
-            .and_then(|events| events.event(&event_id).cloned());
-        if let Some(event) = cached {
-            let source = EventSource::fips_endpoint(source_npub);
-            if event.as_event().kind.as_u16() != inventory.event_kind
-                || event_payload_bytes(&event).ok() != Some(inventory.payload_bytes)
-                || !self.event_is_admitted(&event, &source).await
-            {
-                return;
-            }
-            // A peer has freshly advertised this authenticated body. Scope the
-            // observation to its fresh subscriptions; replay and dedup on ordinary
-            // subscriptions stay unchanged. WANT has no subscription ID, so a
-            // redundant refetch could be answered under an older subscription.
-            let Ok(mut subscriptions) = self.lock_subscriptions() else {
-                return;
-            };
-            for id in inventory.subscription_ids {
-                let Some(active) = subscriptions.get_mut(&id.to_string()) else {
-                    continue;
-                };
-                if active.fresh
-                    && active.peers.contains(source_npub)
-                    && !active.recent_event_ids.contains(&event_id)
-                    && PubsubPeerInterest::from_filters(&active.filters, &event)
-                        == PubsubPeerInterest::Subscribed
-                {
-                    deliver_local(
-                        active,
-                        event.clone(),
-                        source.clone(),
-                        &event_id,
-                        FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS,
-                    );
-                }
-            }
-            return;
-        }
-        let Ok(Some(frame)) = self.accept_inventory(source_npub, inventory) else {
-            return;
-        };
-        if self.send_frame(source_peer, frame).is_ok() {
-            self.want_frames_sent.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
     pub(super) fn handle_want(
         &self,
         source_peer: PeerIdentity,
@@ -402,6 +364,10 @@ impl ClientInner {
         event_id: &EventId,
     ) {
         let Ok(Some((subscription_id, event))) = self.event_for_want(source_id, event_id) else {
+            self.queue_replay(
+                source_peer,
+                crate::replay_source::ReplayQuery::Event(*event_id),
+            );
             return;
         };
         let Ok(frame) = self
@@ -545,7 +511,11 @@ impl ClientInner {
         })
     }
 
-    async fn event_is_admitted(&self, event: &VerifiedEvent, source: &EventSource) -> bool {
+    pub(super) async fn event_is_admitted(
+        &self,
+        event: &VerifiedEvent,
+        source: &EventSource,
+    ) -> bool {
         self.event_decision(event, source)
             .await
             .is_ok_and(|decision| !matches!(decision, PolicyDecision::Drop { .. }))
@@ -713,14 +683,11 @@ impl ClientInner {
             return Ok(None);
         }
         let event_id_hex = event_id.to_hex();
-        if self
+        let already_seen = self
             .recent_events
             .lock()
             .map_err(|_| poisoned("FIPS recent event cache"))?
-            .contains(&event_id_hex)
-        {
-            return Ok(None);
-        }
+            .contains(&event_id_hex);
         let subscriptions = self.lock_subscriptions()?;
         let candidate_subscription_ids = subscription_ids
             .into_iter()
@@ -729,6 +696,7 @@ impl ClientInner {
                     .get(&subscription_id.to_string())
                     .is_some_and(|active| {
                         active.peers.contains(source_npub)
+                            && (!already_seen || active.fresh)
                             && !active.recent_event_ids.contains(&event_id_hex)
                     })
             })

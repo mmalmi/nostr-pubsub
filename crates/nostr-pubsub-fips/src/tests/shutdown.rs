@@ -19,6 +19,7 @@ async fn retained_client_shutdown_joins_every_owned_task() {
             tasks.transport.as_ref().unwrap().abort_handle(),
             tasks.peerfinding.as_ref().unwrap().abort_handle(),
             tasks.reputation.as_ref().unwrap().abort_handle(),
+            tasks.replay.as_ref().unwrap().abort_handle(),
         ]
     };
     let mut delivery = retained

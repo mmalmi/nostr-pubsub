@@ -30,6 +30,7 @@ mod peerfinding;
 mod pending_wants;
 mod provider_behavior;
 mod recent_events;
+mod replay_source;
 mod reputation;
 mod seen_ids;
 mod stats;
@@ -115,6 +116,14 @@ impl Default for FipsPubsubClientOptions {
 }
 
 impl FipsPubsubClientOptions {
+    fn subscription_limits(&self) -> PubsubSubscriptionLimits {
+        PubsubSubscriptionLimits {
+            max_peers: self.max_connected_peers,
+            max_subscriptions_per_peer: self.max_active_subscriptions.saturating_add(1),
+            max_filters_per_subscription: self.max_filters_per_subscription,
+        }
+    }
+
     fn wire_tcp_options(&self) -> WireTcpOptions {
         let records = self
             .max_active_subscriptions
@@ -377,11 +386,7 @@ impl FipsPubsubClient {
         )?;
         let codec = FipsPubsubWireCodec::new(options.max_frame_bytes)?;
         let subscription_capacity = options.max_active_subscriptions.saturating_add(1);
-        let subscription_limits = PubsubSubscriptionLimits {
-            max_peers: options.max_connected_peers,
-            max_subscriptions_per_peer: subscription_capacity,
-            max_filters_per_subscription: options.max_filters_per_subscription,
-        };
+        let subscription_limits = options.subscription_limits();
         let max_replay_events = options.max_replay_events;
         let max_pending_events = subscription_capacity
             .saturating_mul(options.max_replay_events)
@@ -398,6 +403,7 @@ impl FipsPubsubClient {
             .saturating_mul(options.receive_batch_size)
             .max(1);
         let (transport_tx, transport_rx) = mpsc::channel(command_capacity);
+        let (replay_tx, replay_rx) = mpsc::channel(options.max_connected_peers);
         let inner = Arc::new(ClientInner {
             admission: Mutex::new(true),
             endpoint: Arc::clone(&endpoint),
@@ -410,6 +416,8 @@ impl FipsPubsubClient {
             peer_policy: policies.peers,
             unknown_peer_reserve: policies.unknown_peer_reserve,
             transport_tx,
+            replay_source: Mutex::new(None),
+            replay_tx,
             connected_transport_peers: AtomicUsize::new(0),
             req_frames_received: AtomicU64::new(0),
             close_frames_received: AtomicU64::new(0),
@@ -452,6 +460,7 @@ impl FipsPubsubClient {
             .await?;
         let transport_task =
             tokio::spawn(transport_loop(Arc::downgrade(&inner), driver, transport_rx));
+        let replay_task = tokio::spawn(replay_source::run(Arc::downgrade(&inner), replay_rx));
         let peerfinding_task = Some(tokio::spawn(run_default_peerfinding(
             Arc::clone(&inner),
             peerfinding_subscription,
@@ -462,6 +471,7 @@ impl FipsPubsubClient {
                 transport: Some(transport_task),
                 peerfinding: peerfinding_task,
                 reputation: None,
+                replay: Some(replay_task),
             }),
         })
     }
@@ -534,7 +544,10 @@ impl NostrEventSubscriber for FipsFreshEventSubscriber {
         filters: Vec<Filter>,
         handler: NostrEventHandler,
     ) -> Result<Box<dyn NostrEventSubscription>> {
-        forward_subscription(self.client.inner.subscribe(filters, false).await?, handler)
+        Ok(forward_subscription(
+            self.client.inner.subscribe(filters, false).await?,
+            handler,
+        ))
     }
 }
 
@@ -582,14 +595,17 @@ impl NostrEventSubscriber for FipsPubsubClient {
         filters: Vec<Filter>,
         handler: NostrEventHandler,
     ) -> Result<Box<dyn NostrEventSubscription>> {
-        forward_subscription(FipsPubsubClient::subscribe(self, filters).await?, handler)
+        Ok(forward_subscription(
+            FipsPubsubClient::subscribe(self, filters).await?,
+            handler,
+        ))
     }
 }
 
 fn forward_subscription(
     mut subscription: FipsPubsubSubscription,
     handler: NostrEventHandler,
-) -> Result<Box<dyn NostrEventSubscription>> {
+) -> Box<dyn NostrEventSubscription> {
     let (close_sender, close_receiver) = oneshot::channel();
     let task = tokio::spawn(async move {
         tokio::select! {
@@ -602,10 +618,10 @@ fn forward_subscription(
         }
         subscription.close();
     });
-    Ok(Box::new(FipsRoutedSubscription {
+    Box::new(FipsRoutedSubscription {
         close_sender: Some(close_sender),
         task: Some(task),
-    }))
+    })
 }
 
 struct FipsRoutedSubscription {
