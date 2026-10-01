@@ -195,10 +195,13 @@ fn bounded_events(
 }
 
 pub(super) fn query_limit(filters: &[Filter], maximum: usize) -> usize {
+    if filters.is_empty() {
+        return maximum;
+    }
     filters
         .iter()
-        .filter_map(|filter| filter.limit)
-        .max()
-        .unwrap_or(maximum)
+        .fold(0_usize, |total, filter| {
+            total.saturating_add(filter.limit.unwrap_or(maximum))
+        })
         .min(maximum)
 }

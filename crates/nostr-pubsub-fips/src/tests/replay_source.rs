@@ -1,6 +1,83 @@
 use super::routed::{signed_note, udp_endpoint};
 use super::*;
 
+#[test]
+fn replay_budget_combines_filter_limits_without_overflow() {
+    use crate::replay_source::query_limit;
+
+    assert_eq!(query_limit(&[], 8), 8);
+    assert_eq!(query_limit(&[Filter::new().limit(0)], 8), 0);
+    assert_eq!(
+        query_limit(&[Filter::new().limit(1), Filter::new().limit(1)], 8),
+        2
+    );
+    assert_eq!(query_limit(&[Filter::new().limit(1), Filter::new()], 8), 8);
+    assert_eq!(
+        query_limit(
+            &[Filter::new().limit(usize::MAX), Filter::new().limit(1)],
+            8
+        ),
+        8
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn independent_filter_limits_replay_hot_and_durable_events_together() {
+    let a = udp_endpoint([107; 32], Vec::new()).await;
+    let publisher = FipsPubsubClient::start(a.clone(), FipsPubsubClientOptions::default())
+        .await
+        .unwrap();
+    let store = Arc::new(InMemoryEventBus::new());
+    let events = (0..4)
+        .map(|i| signed_note(&format!("independent historical filter {i}")))
+        .collect::<Vec<_>>();
+    for (index, event) in events.iter().enumerate() {
+        store
+            .publish(event.clone(), EventSource::local_index("history"))
+            .await
+            .unwrap();
+        if index < 2 {
+            publisher
+                .publish(event.clone(), EventSource::local_index("history"))
+                .await
+                .unwrap();
+        }
+    }
+    publisher.set_replay_source(Some(store)).unwrap();
+    let addr = a.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+    let b = udp_endpoint([108; 32], vec![PeerConfig::new(a.npub(), "udp", &addr)]).await;
+    let reader = FipsPubsubClient::start(b.clone(), FipsPubsubClientOptions::default())
+        .await
+        .unwrap();
+    let filters = events
+        .iter()
+        .map(|event| Filter::new().id(event.as_event().id).limit(1))
+        .collect();
+    let mut subscription = reader.subscribe(filters).await.unwrap();
+    let mut actual = HashSet::new();
+    let replay = timeout(Duration::from_secs(5), async {
+        while actual.len() < events.len() {
+            actual.insert(subscription.recv().await.unwrap().event.as_event().id);
+        }
+    })
+    .await;
+    drop(subscription);
+    reader.shutdown().await;
+    publisher.shutdown().await;
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+    assert!(
+        replay.is_ok(),
+        "received {}/{} independently requested events",
+        actual.len(),
+        events.len()
+    );
+    assert_eq!(
+        actual,
+        events.iter().map(|event| event.as_event().id).collect()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restarted_provider_serves_external_history_beyond_the_hot_window() {
     let a = udp_endpoint([101; 32], Vec::new()).await;

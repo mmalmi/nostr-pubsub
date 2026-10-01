@@ -6,6 +6,8 @@
   store without expanding the transport's memory cache or blocking live traffic.
 - Let fresh subscriptions refetch evicted bodies whose IDs are still remembered,
   including responses carried by an older overlapping subscription.
+- Combine batched filters' replay budgets within the existing client cap, so
+  requesting one event from each filter can return every requested event.
 
 ## 0.5.12 - 2026-10-01
 
