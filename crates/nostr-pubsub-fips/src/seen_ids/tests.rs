@@ -44,6 +44,44 @@ fn observations_are_bounded_and_scoped_by_authenticated_peer() {
 }
 
 #[test]
+fn matched_observations_expire_with_the_existing_bounded_window() {
+    let mut seen = ScopedSeenIds::new(1, 2);
+    assert!(seen.observe_with_match("peer", "old", "answer", true).first);
+    assert!(
+        seen.observe_with_match("peer", "old", "answer", false)
+            .previously_matched
+    );
+    assert!(
+        !seen
+            .observe_with_match("other", "old", "answer", false)
+            .previously_matched
+    );
+    assert!(
+        !seen
+            .observe_with_match("peer", "new", "answer", false)
+            .previously_matched
+    );
+    // The oldest matched observation has been evicted, with no separate grace cache.
+    assert!(
+        !seen
+            .observe_with_match("peer", "old", "answer", false)
+            .previously_matched
+    );
+    assert_bounded(&seen);
+    assert!(
+        seen.observe_with_match("peer", "fresh", "answer", true)
+            .first
+    );
+    seen.clear_peer("peer");
+    assert!(
+        !seen
+            .observe_with_match("peer", "fresh", "answer", false)
+            .previously_matched
+    );
+    assert_bounded(&seen);
+}
+
+#[test]
 fn single_scope_churn_bounds_bookkeeping_and_keeps_recent_ids() {
     let mut seen = ScopedSeenIds::new(2, 4);
     for i in 0..10_000 {

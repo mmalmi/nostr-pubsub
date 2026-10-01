@@ -8,8 +8,18 @@ struct ObservationScope {
 
 #[derive(Default)]
 struct IdWindow {
-    ids: HashMap<String, u64>,
+    ids: HashMap<String, IdObservation>,
     order: VecDeque<(String, u64)>,
+}
+
+struct IdObservation {
+    generation: u64,
+    matched_subscription: bool,
+}
+
+pub(super) struct Observation {
+    pub(super) first: bool,
+    pub(super) previously_matched: bool,
 }
 
 /// Bounded event-ID observations scoped to one authenticated peer and
@@ -46,18 +56,62 @@ impl ScopedSeenIds {
         subscription_id: &str,
         event_id: &str,
     ) -> bool {
+        self.observe_with_match(peer_npub, subscription_id, event_id, false)
+            .first
+    }
+
+    pub(super) fn observe_response(
+        &mut self,
+        peer_npub: &str,
+        wire_subscription: Option<&str>,
+        response_subscription: &str,
+        event_id: &str,
+        matched_subscription: bool,
+    ) -> Observation {
+        // Fresh WANTs may be answered under an older open wire subscription.
+        // Keep that identity for late duplicates without pre-observing the
+        // current delivery when the two subscriptions are the same.
+        if let Some(wire) = wire_subscription
+            && wire != response_subscription
+        {
+            self.observe_with_match(peer_npub, wire, event_id, matched_subscription);
+        }
+        self.observe_with_match(
+            peer_npub,
+            response_subscription,
+            event_id,
+            matched_subscription,
+        )
+    }
+
+    pub(super) fn observe_with_match(
+        &mut self,
+        peer_npub: &str,
+        subscription_id: &str,
+        event_id: &str,
+        matched_subscription: bool,
+    ) -> Observation {
         let scope = ObservationScope {
             peer_npub: peer_npub.to_string(),
             subscription_id: subscription_id.to_string(),
         };
         let window = self.scopes.entry(scope.clone()).or_default();
-        if window.ids.contains_key(event_id) {
-            return false;
+        if let Some(previous) = window.ids.get(event_id) {
+            return Observation {
+                first: false,
+                previously_matched: previous.matched_subscription,
+            };
         }
 
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
-        window.ids.insert(event_id.to_string(), generation);
+        window.ids.insert(
+            event_id.to_string(),
+            IdObservation {
+                generation,
+                matched_subscription,
+            },
+        );
         window.order.push_back((event_id.to_string(), generation));
         self.global_order
             .push_back((scope.clone(), event_id.to_string(), generation));
@@ -67,13 +121,16 @@ impl ScopedSeenIds {
             let Some((oldest, oldest_generation)) = window.order.pop_front() else {
                 break;
             };
-            if window.ids.get(&oldest) == Some(&oldest_generation) {
+            if window.ids.get(&oldest).map(|id| id.generation) == Some(oldest_generation) {
                 window.ids.remove(&oldest);
                 self.total -= 1;
             }
         }
         self.evict_global();
-        true
+        Observation {
+            first: true,
+            previously_matched: false,
+        }
     }
 
     pub(super) fn clear_peer(&mut self, peer_npub: &str) {
@@ -105,15 +162,13 @@ impl ScopedSeenIds {
             };
             let mut remove_scope = false;
             if let Some(window) = self.scopes.get_mut(&scope)
-                && window.ids.get(&event_id) == Some(&generation)
+                && window.ids.get(&event_id).map(|id| id.generation) == Some(generation)
             {
                 window.ids.remove(&event_id);
                 self.total -= 1;
-                while window
-                    .order
-                    .front()
-                    .is_some_and(|(id, generation)| window.ids.get(id) != Some(generation))
-                {
+                while window.order.front().is_some_and(|(id, generation)| {
+                    window.ids.get(id).map(|id| id.generation) != Some(*generation)
+                }) {
                     window.order.pop_front();
                 }
                 remove_scope = window.ids.is_empty();
@@ -126,7 +181,11 @@ impl ScopedSeenIds {
         // live oldest entry. Compact in batches while preserving FIFO order.
         if self.global_order.len() > self.max_total.saturating_mul(2) {
             self.global_order.retain(|(scope, id, generation)| {
-                self.scopes.get(scope).and_then(|window| window.ids.get(id)) == Some(generation)
+                self.scopes
+                    .get(scope)
+                    .and_then(|window| window.ids.get(id))
+                    .map(|id| id.generation)
+                    == Some(*generation)
             });
         }
     }

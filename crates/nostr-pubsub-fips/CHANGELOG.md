@@ -10,6 +10,8 @@
   requesting one event from each filter can return every requested event.
 - Release the attached event store on shutdown even when applications retain
   the stopped client.
+- Preserve bounded event-ID observations across subscription close, so repeated
+  answers already in flight do not penalize an honest provider.
 
 ## 0.5.12 - 2026-10-01
 

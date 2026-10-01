@@ -220,20 +220,33 @@ impl ClientInner {
                 let response_id = fresh_id.as_ref().or(subscription_id.as_ref());
                 let subscription_key = response_id.map(ToString::to_string).unwrap_or_default();
                 let event_id = event.as_event().id.to_string();
-                let first_observation = self
-                    .observed_full_events
-                    .lock()
-                    .is_ok_and(|mut seen| seen.observe(&source_npub, &subscription_key, &event_id));
+                let observation = self.observed_full_events.lock().ok().map(|mut seen| {
+                    seen.observe_response(
+                        &source_npub,
+                        subscription_id.as_ref().map(SubscriptionId::as_str),
+                        &subscription_key,
+                        &event_id,
+                        is_subscribed,
+                    )
+                });
+                let Some(observation) = observation else {
+                    return;
+                };
                 if !is_subscribed {
-                    self.record_provider_violation(
-                        source_peer,
-                        ProviderViolation::OutOfFilterEvent {
-                            repeated: !first_observation,
-                        },
-                    );
+                    // A response to a retried WANT may already be in flight at
+                    // local CLOSE. The exact previously matched observation is
+                    // harmless; new unsolicited IDs still count as violations.
+                    if !observation.previously_matched {
+                        self.record_provider_violation(
+                            source_peer,
+                            ProviderViolation::OutOfFilterEvent {
+                                repeated: !observation.first,
+                            },
+                        );
+                    }
                     return;
                 }
-                if !first_observation {
+                if !observation.first {
                     return;
                 }
                 let source = EventSource::fips_endpoint(&source_npub);
@@ -857,9 +870,8 @@ impl ClientInner {
         if let Ok(mut observed) = self.observed_inventories.lock() {
             observed.clear_subscription(key);
         }
-        if let Ok(mut observed) = self.observed_full_events.lock() {
-            observed.clear_subscription(key);
-        }
+        // Retain bounded full-event observations to recognize answers already
+        // in flight. Peer-epoch reset and normal FIFO eviction still clear them.
         self.send_close(key, active.peers);
     }
 
