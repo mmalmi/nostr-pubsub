@@ -4,7 +4,10 @@ fn assert_bounded(seen: &ScopedSeenIds) {
     assert!(seen.total <= seen.max_total);
     assert_eq!(
         seen.total,
-        seen.scopes.values().map(|window| window.ids.len()).sum()
+        seen.scopes
+            .values()
+            .map(|window| window.ids.len())
+            .sum::<usize>()
     );
     assert!(
         seen.global_order.len() <= 2 * seen.max_total,
