@@ -294,7 +294,9 @@ async fn slow_history_never_blocks_live_delivery_and_shutdown_cancels_queries() 
     assert!(store.active.load(Ordering::SeqCst) > 0);
     publisher.shutdown_shared().await;
     assert_eq!(store.active.load(Ordering::SeqCst), 0);
-    assert!(publisher.set_replay_source(None).is_err());
+    publisher.set_replay_source(None).unwrap();
+    publisher.set_replay_source(None).unwrap();
+    assert!(publisher.set_replay_source(Some(store.clone())).is_err());
     drop(subscription);
     drop(pending);
     reader.shutdown().await;

@@ -31,13 +31,19 @@ impl FipsPubsubClient {
     /// It is queried off the transport loop with bounded work. The application
     /// owns ingestion and persistence; live delivery and fresh-read provenance
     /// are unchanged. Do not attach a network router or this client itself.
+    /// Detaching with `None` remains valid after shutdown.
     pub fn set_replay_source(&self, source: Option<Arc<dyn EventBus>>) -> Result<()> {
-        let _admission = self.inner.admit()?;
-        *self
-            .inner
-            .replay_source
-            .lock()
-            .map_err(|_| poisoned("FIPS replay source"))? = source;
+        let admission = source.as_ref().map(|_| self.inner.admit()).transpose()?;
+        let previous = std::mem::replace(
+            &mut *self
+                .inner
+                .replay_source
+                .lock()
+                .map_err(|_| poisoned("FIPS replay source"))?,
+            source,
+        );
+        drop(admission);
+        drop(previous);
         Ok(())
     }
 }
