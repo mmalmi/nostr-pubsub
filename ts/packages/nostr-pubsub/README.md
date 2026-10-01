@@ -24,6 +24,66 @@ provides the browser/WebSocket relay mechanics without choosing a default relay
 or gateway. See the repository `docs/inv-want-wire.md` for compatibility and
 security boundaries.
 
+## Shared application runtime
+
+`NostrRuntime` owns one relay pool, batches concurrent interests as exact OR
+filters, and composes additional `RuntimeSource` implementations such as
+`FipsNostrPubsubEventSource`. Filters retain their author/recipient intersections;
+filter count, encoded bytes, active subscriptions, verification cache, and
+per-subscription duplicate tracking are bounded. Run it in a worker when the
+application already owns a worker; forward operations instead of starting a
+second pool in the UI.
+
+```ts
+import { NostrRuntime, FipsNostrPubsubEventSource } from 'nostr-pubsub';
+
+const runtime = new NostrRuntime({
+  relays: configuredRelays,
+  store: applicationEventStore,
+  sources: [new FipsNostrPubsubEventSource(pubsub)],
+});
+const subscription = runtime.subscribe([{ kinds: [1], authors }], {
+  onEvent: (event, info) => renderEvent(event, info.cached),
+  onEose: (status) => showHistoryStatus(status.complete),
+});
+const result = await runtime.query([{ kinds: [0], authors }], {
+  cache: 'cache-first', deadline: Date.now() + 2000, signal,
+});
+const publication = await runtime.publish(signedEvent);
+// Confirmed state changes can require remote acceptance before local delivery.
+await runtime.publish(signedUpdate, { requireAck: true });
+subscription.close();
+await runtime.close();
+```
+
+`RuntimeEventStore` is storage only: query/put/delete events and list/put/delete
+pending publications. Supply a Hashtree index or IndexedDB adapter to retain
+history and outbox intent across reloads. The bounded default `MemoryEventStore`
+is volatile. No login keys or signer state are stored by the runtime, and no old
+application event cache is migrated. The runtime verifies events and applies
+replaceable-event ordering, expiration, and author-authorized deletion tombstones.
+
+Only actual relay EOSE is complete. A deadline, disconnected source, or partial
+mesh history reports incomplete and leaves live subscriptions running. Relay
+reconnect overlaps the last seen second and deduplicates event IDs. `cache-only`
+queries complete from local storage; `network-only` omits initial cache replay.
+Explicit `relays` scope also excludes additional sources unless `sources` is
+specified, and the outbox preserves those destinations when retrying.
+
+`publish().remoteAccepted` requires a positive relay/source acknowledgment.
+Local echo, persisted retry intent, and a FIPS send queue do not count as remote
+acceptance. `requireAck: true` disables both pre-acceptance local delivery and
+queueing; the first positive acknowledgment completes without waiting for silent
+relays. Optional `signAuthEvent(relay, template)` handles relay authentication
+using the application's existing signer.
+
+Give `FipsNostrPubsubClient` a `retainedEventReader` to serve its local event
+index through the same FIPS node used by Hashtree files. Queries are bounded by
+the configured replay count, two seconds, and 32 concurrent requests. The reader
+must be local-only; incoming peer requests must not trigger network fetches.
+Existing peer admission and kind policy still apply. This hook neither discovers
+peers nor changes application sharing permissions.
+
 ## Event readers and dataset routing
 
 `NostrEventReader`, `NostrEventPublisher`, and `NostrEventSubscriber` let

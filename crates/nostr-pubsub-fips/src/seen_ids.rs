@@ -83,6 +83,8 @@ impl ScopedSeenIds {
             .map(|(_, window)| window.ids.len())
             .sum::<usize>();
         self.total = self.total.saturating_sub(removed);
+        self.global_order
+            .retain(|(scope, _, _)| scope.peer_npub != peer_npub);
     }
 
     pub(super) fn clear_subscription(&mut self, subscription_id: &str) {
@@ -92,6 +94,8 @@ impl ScopedSeenIds {
             .map(|(_, window)| window.ids.len())
             .sum::<usize>();
         self.total = self.total.saturating_sub(removed);
+        self.global_order
+            .retain(|(scope, _, _)| scope.subscription_id != subscription_id);
     }
 
     fn evict_global(&mut self) {
@@ -105,33 +109,29 @@ impl ScopedSeenIds {
             {
                 window.ids.remove(&event_id);
                 self.total -= 1;
+                while window
+                    .order
+                    .front()
+                    .is_some_and(|(id, generation)| window.ids.get(id) != Some(generation))
+                {
+                    window.order.pop_front();
+                }
                 remove_scope = window.ids.is_empty();
             }
             if remove_scope {
                 self.scopes.remove(&scope);
             }
         }
+        // Per-scope eviction leaves stale global records, including behind a
+        // live oldest entry. Compact in batches while preserving FIFO order.
+        if self.global_order.len() > self.max_total.saturating_mul(2) {
+            self.global_order.retain(|(scope, id, generation)| {
+                self.scopes.get(scope).and_then(|window| window.ids.get(id)) == Some(generation)
+            });
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::ScopedSeenIds;
-
-    #[test]
-    fn observations_are_bounded_and_scoped_by_authenticated_peer() {
-        let mut seen = ScopedSeenIds::new(2, 3);
-        assert!(seen.observe("peer-a", "sub", "one"));
-        assert!(!seen.observe("peer-a", "sub", "one"));
-        assert!(seen.observe("peer-b", "sub", "one"));
-        assert!(seen.observe("peer-a", "sub", "two"));
-        assert!(seen.observe("peer-a", "sub", "three"));
-        assert!(seen.observe("peer-a", "sub", "one"));
-
-        seen.clear_peer("peer-a");
-        assert!(seen.observe("peer-a", "sub", "three"));
-        assert!(!seen.observe("peer-b", "sub", "one"));
-        seen.clear_subscription("sub");
-        assert!(seen.observe("peer-b", "sub", "one"));
-    }
-}
+#[path = "seen_ids/tests.rs"]
+mod tests;

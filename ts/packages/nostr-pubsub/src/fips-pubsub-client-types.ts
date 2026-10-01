@@ -30,6 +30,8 @@ export interface FipsNostrPubsubClientOptions {
   localPeerId: string;
   /** Explicit application-admitted FIPS identities. Connected peers are not inferred. */
   peers: () => readonly string[];
+  /** Local retained event index only. Never pass a reader which fetches from remote peers. */
+  retainedEventReader?: import('./event-bus.js').NostrEventReader;
   allowedKinds?: readonly number[];
   limits?: Partial<FipsNostrPubsubClientLimits>;
   onError?: (error: Error, context: FipsNostrPubsubClientErrorContext) => void;

@@ -136,7 +136,20 @@ export class SimplePoolNostrRelayTransport {
         const relays = uniqueRelays(this.getRelays());
         if (relays.length === 0)
             throw new Error('No Nostr relays configured');
-        const attempts = this.pool.publish(relays, verified, { maxWait: this.publishTimeoutMs });
+        // Pool.publish can resolve a connection-failure message instead of rejecting.
+        // A concrete relay publish resolves only after its positive OK response.
+        const attempts = this.pool.ensureRelay
+            ? relays.map(async (url) => {
+                const relay = await this.pool.ensureRelay(url, { connectionTimeout: this.publishTimeoutMs });
+                relay.publishTimeout = this.publishTimeoutMs;
+                return relay.publish(verified);
+            })
+            : this.pool.publish(relays, verified, { maxWait: this.publishTimeoutMs }).map(async (attempt) => {
+                const result = await attempt;
+                if (result.startsWith('connection failure:'))
+                    throw new Error(result);
+                return result;
+            });
         const results = await Promise.allSettled(attempts.map((attempt) => withTimeout(attempt, this.publishTimeoutMs)));
         if (results.some((result) => result.status === 'fulfilled'))
             return;

@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.5.13 - 2026-09-30
+
+- Default relay requests to at most 20 exact OR filters so ordinary batches work
+  with common relay limits. Larger batches remain an explicit application option.
+- Cover rejected over-limit history and explicit larger limits with real socket
+  tests; retain exact recipient matching and bounded subscription teardown.
+
+## 0.5.12 - 2026-09-30
+
+- Wait for event admissions queued during earlier cache writes before completing
+  history. Queries retain all received events even when relay EOSE arrives while
+  the persistent index is busy; cancellation and deadlines remain prompt.
+
+## 0.5.11 - 2026-09-30
+
+- Keep requested peer responses eligible during finite CPU/transport backlogs
+  while trying alternate providers. The first valid requested response wins;
+  unanswered work expires after ten seconds and remains capacity-bounded.
+
+- Reject unadmitted peer datagrams before TCP allocates connection state, and
+  treat a remote half-close released by a concurrent reset as already closed.
+
+- Batch distinct FIPS interests as exact OR filters within the configured peer
+  filter and frame bounds. Preserve independent local matching, recent history,
+  and cancellation while sharing live/history interests on the same connection.
+- Coalesce peer subscription changes across worker tasks and retire empty
+  batches immediately. Async source subscription failures propagate to queries
+  instead of leaking pending interests or claiming complete history.
+- Exercise 512 peer interests and deliveries under a 128-subscription carrier
+  cap, including recipient isolation, bounded teardown, frame limits, and aborts.
+
+## 0.5.10 - 2026-09-30
+
+- Enforce explicit relay/source delivery scopes and optional local-echo exclusion
+  before event deduplication. Concurrent copies retain their separate source
+  evidence while sharing one durable admission.
+
+- Allow explicitly requested network history to return superseded replaceable
+  versions without changing the latest-value cache or bypassing deletion and
+  expiration checks.
+
+- Report incomplete history when durable event admission fails, including every
+  overlapping query sharing the failed write. Relay EOSE cannot hide an index error.
+
+## 0.5.9 - 2026-09-30
+
+- Coalesce relay subscription removals across worker tasks, retiring empty
+  batches immediately so closing hundreds of interests does not send hundreds
+  of replacement requests. Surviving interests retain exact local matching.
+
+## 0.5.8 - 2026-09-30
+
+- Bound FIPS historical queries by their configured observation window even
+  when the caller allows a later overall deadline; empty peer history remains
+  explicitly incomplete and does not delay relay-backed app queries.
+
+## 0.5.7 - 2026-09-30
+
+- Add a shared browser/worker Nostr runtime with exact-filter relay batching,
+  explicit historical completion, overlapping reconnect recovery, authenticated
+  relay support, scoped publication, and truthful remote acknowledgments.
+- Add an application-owned persistent event store/outbox contract with
+  replacement, expiration, and authorized deletion handling.
+- Coalesce concurrent peer connection attempts and share matching live/history
+  interests so application startup does not exhaust TCP or peer subscription bounds.
+- Serve bounded retained local event history over the existing FIPS node,
+  alongside other services such as Hashtree file sharing.
+- Exercise 1,200 live interests over real relay sockets without widening
+  recipient filters or duplicating matching deliveries.
+
 ## 0.5.6 - 2026-08-19
 
 - Treat an authenticated TCP/FIPS stream that closes between a cleanup state

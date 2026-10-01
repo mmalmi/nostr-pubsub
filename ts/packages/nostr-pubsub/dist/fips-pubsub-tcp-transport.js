@@ -2,7 +2,7 @@ import { FipsTcpEndpoint, State, } from '@fips/tcp';
 import { encodeInvWantRecord, InvWantRecordDecoder } from './fips-invwant-record.js';
 import { InvWantRecordQueues } from './fips-invwant-tcp-queue.js';
 import { fipsInvWantTcpPeerOrderKey } from './fips-invwant-tcp-types.js';
-import { abortTcpConnectionIfPresent } from './fips-tcp-cleanup.js';
+import { abortTcpConnectionIfPresent, closeTcpConnectionIfPresent } from './fips-tcp-cleanup.js';
 import { PubsubError } from './types.js';
 const STREAM_IO_CHUNK_BYTES = 16 * 1024;
 const TCP_POLL_INTERVAL_MS = 50;
@@ -25,6 +25,7 @@ export class FipsPubsubTcpTransport {
     inputs = new Map();
     localPeerOrderKey;
     operation = Promise.resolve();
+    connecting = new Map();
     timer;
     disposed = false;
     constructor(endpoint, localPeerId, options, callbacks, isnSeed = 1n) {
@@ -33,7 +34,7 @@ export class FipsPubsubTcpTransport {
         validateOptions(options);
         if (localPeerId.trim() === '')
             throw validation('local peer identity must not be empty');
-        const notifying = new NotifyingEndpoint(endpoint, () => this.scheduleDrive(false));
+        const notifying = new NotifyingEndpoint(endpoint, () => this.scheduleDrive(false), peerId => this.callbacks.admitsPeer?.(peerId) !== false);
         this.tcp = new FipsTcpEndpoint(notifying, options.servicePort, {
             receiveBuffer: 0xffff,
             sendBuffer: options.maxQueuedBytesPerPeer,
@@ -51,7 +52,21 @@ export class FipsPubsubTcpTransport {
         });
         this.localPeerOrderKey = fipsInvWantTcpPeerOrderKey(localPeerId);
     }
-    async connectPeer(peer, nowMs = Date.now()) {
+    connectPeer(peer, nowMs = Date.now()) {
+        this.ensureOpen();
+        const existing = this.connecting.get(peer);
+        if (existing)
+            return existing;
+        // Subscription setup and peer notifications can request the same connection
+        // before TCP's async connect returns. Share the attempt and serialize it with
+        // stream maintenance so no untracked SYN consumes the per-peer capacity.
+        const next = this.operation.then(() => this.connectPeerOnce(peer, nowMs));
+        this.operation = next.catch(() => undefined);
+        const pending = next.finally(() => this.connecting.delete(peer));
+        this.connecting.set(peer, pending);
+        return pending;
+    }
+    async connectPeerOnce(peer, nowMs) {
         this.ensureOpen();
         for (const [id, connection] of this.connections) {
             const state = await this.tcp.state(id);
@@ -74,8 +89,15 @@ export class FipsPubsubTcpTransport {
         this.queues.enqueue([{ peerId, record }]);
         this.scheduleDrive(false);
     }
-    async abortPeer(peer) {
+    abortPeer(peer) {
         this.ensureOpen();
+        const next = this.operation.then(() => this.abortPeerOnce(peer));
+        this.operation = next.catch(() => undefined);
+        return next;
+    }
+    async abortPeerOnce(peer) {
+        if (this.disposed)
+            return;
         const ids = [...this.connections]
             .filter(([, connection]) => connection.peer === peer)
             .map(([id]) => id);
@@ -266,7 +288,7 @@ export class FipsPubsubTcpTransport {
     async finishRemoteCloses(nowMs) {
         for (const [peer, id] of this.active) {
             if (await this.tcp.isReadClosed(id) && !this.queues.has(peer)) {
-                await this.tcp.close(id, nowMs);
+                await closeTcpConnectionIfPresent(this.tcp, id, nowMs);
             }
         }
     }
@@ -298,12 +320,16 @@ export class FipsPubsubTcpTransport {
 class NotifyingEndpoint {
     endpoint;
     received;
-    constructor(endpoint, received) {
+    admitsPeer;
+    constructor(endpoint, received, admitsPeer) {
         this.endpoint = endpoint;
         this.received = received;
+        this.admitsPeer = admitsPeer;
     }
     registerService(port, handler) {
         return this.endpoint.registerService(port, async (context) => {
+            if (!this.admitsPeer(context.src))
+                return;
             await handler(context);
             this.received();
         });

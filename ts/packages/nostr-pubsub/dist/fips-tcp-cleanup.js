@@ -15,4 +15,17 @@ export async function abortTcpConnectionIfPresent(tcp, id) {
         throw error;
     }
 }
+/** Finish a remote half-close while allowing a concurrent reset to release it. */
+export async function closeTcpConnectionIfPresent(tcp, id, nowMs) {
+    if (await tcp.state(id) === undefined)
+        return;
+    try {
+        await tcp.close(id, nowMs);
+    }
+    catch (error) {
+        if (await tcp.state(id) === undefined)
+            return;
+        throw error;
+    }
+}
 //# sourceMappingURL=fips-tcp-cleanup.js.map

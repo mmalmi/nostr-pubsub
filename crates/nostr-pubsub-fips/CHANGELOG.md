@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.11 - 2026-10-01
+
+- Bound deduplication bookkeeping during event, peer, and subscription churn.
+  Preserve FIFO eviction, generation checks, and peer/subscription scoping.
+
+## 0.5.10 - 2026-10-01
+
+- Update to FIPS core 0.4.89 and TCP endpoint 0.2.22. Pubsub wire behavior
+  is unchanged.
+
+## 0.5.9 - 2026-10-01
+
+- Update to FIPS core 0.4.88 and TCP endpoint 0.2.21 for incremental pending
+  Bloom deadlines under peer load. Pubsub wire behavior is unchanged.
+
+## 0.5.8 - 2026-09-30
+
+- Update to FIPS core 0.4.87 and TCP endpoint 0.2.20 for shared Bloom-filter
+  aggregation under peer load. Pubsub wire behavior is unchanged.
+
+## 0.5.7 - 2026-09-30
+
+- Update to FIPS core 0.4.86 and TCP endpoint 0.2.19 for linear peer snapshots
+  and routing recovery under load. Pubsub wire behavior is unchanged.
+
 ## 0.5.6 - 2026-09-28
 
 - Update to FIPS core 0.4.83 and TCP endpoint 0.2.18 for connection lifecycle,

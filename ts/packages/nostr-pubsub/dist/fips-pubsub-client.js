@@ -1,3 +1,4 @@
+import { FipsRetainedReplay } from './fips-pubsub-retained.js';
 import { cloneFilter } from './filter.js';
 import { verifyNostrEvent, } from './types.js';
 import { FipsPubsubWireCodec, } from './wire.js';
@@ -18,6 +19,7 @@ export class FipsNostrPubsubClient {
     peerSubscriptions;
     subscriptions = new Map();
     events;
+    retained;
     invWant;
     pending = new Set();
     transport;
@@ -37,6 +39,7 @@ export class FipsNostrPubsubClient {
         this.codec = new FipsPubsubWireCodec(this.limits.maxFrameBytes);
         this.allowedKinds = normalizeAllowedKinds(options.allowedKinds);
         this.peerSubscriptions = createClientPeerSubscriptionStore(this.limits);
+        this.retained = new FipsRetainedReplay(this.events, options.retainedEventReader, this.limits.maxReplayEvents, this.limits.maxHops, (event) => this.admitEvent(event), (peer, id, event) => this.currentPeers().includes(peer) && this.peerSubscriptions.matchingSubscriptions(peer, event).some((sub) => sub.subscriptionId === id), (peer, message) => this.send(peer, message));
     }
     start() {
         if (this.transport !== undefined)
@@ -52,6 +55,7 @@ export class FipsNostrPubsubClient {
             maxIoBytesPerDrive: 512 * 1024,
             maxFramesPerDrive: this.limits.receiveBatchSize,
         }, {
+            admitsPeer: peerId => this.currentPeers().includes(normalizePeerId(peerId) ?? ''),
             frame: (peerId, frame) => this.handleFrame(peerId, frame),
             connected: (peerId) => this.handleTransportConnected(peerId),
             disconnected: (peerId) => this.handleTransportDisconnected(peerId),
@@ -64,6 +68,7 @@ export class FipsNostrPubsubClient {
         return this;
     }
     async stop() {
+        this.retained.close();
         for (const subscriptionId of [...this.subscriptions.keys()]) {
             this.closeSubscription(subscriptionId);
         }
@@ -184,9 +189,7 @@ export class FipsNostrPubsubClient {
         }
         if (message.type === 'req') {
             this.peerSubscriptions.upsertFilters(peerId, message.subscriptionId, message.filters);
-            for (const cached of this.events.replay(message.filters, this.limits.maxReplayEvents)) {
-                this.background(this.send(peerId, inventoryMessage(cached.event, [message.subscriptionId], cached.hopLimit)), { operation: 'send', peerId, subscriptionId: message.subscriptionId });
-            }
+            this.background(this.retained.replay(peerId, message.subscriptionId, message.filters), { operation: 'send', peerId, subscriptionId: message.subscriptionId });
             return;
         }
         if (message.type === 'close') {
