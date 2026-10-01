@@ -59,3 +59,87 @@ async fn local_outbox_retry_restores_a_payload_evicted_before_peer_arrival() {
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_subscriber_reobserves_cached_events_and_stays_quiet_offline() {
+    let a = udp_endpoint([93; 32], Vec::new()).await;
+    let publisher = FipsPubsubClient::start(a.clone(), FipsPubsubClientOptions::default())
+        .await
+        .unwrap();
+    let event = signed_note("retained signed announcement");
+    publisher
+        .publish(event.clone(), EventSource::local_index("release"))
+        .await
+        .unwrap();
+    let addr = a.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+    let b = udp_endpoint([94; 32], vec![PeerConfig::new(a.npub(), "udp", &addr)]).await;
+    let receiver = FipsPubsubClient::start(b.clone(), FipsPubsubClientOptions::default())
+        .await
+        .unwrap();
+    let filter = Filter::new().kind(Kind::TextNote);
+    let baseline = receiver.active_subscription_count().unwrap();
+    let mut cached = receiver.subscribe(vec![filter.clone()]).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(5), cached.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .event,
+        event
+    );
+    drop(cached);
+    // Each check uses the same transport and preexisting cache. A fresh REQ
+    // must get a fresh peer response even when the signed event has not changed.
+    for _ in 0..2 {
+        let (sender, mut deliveries) = mpsc::unbounded_channel();
+        let subscription = receiver
+            .fresh_subscriber()
+            .subscribe(
+                vec![filter.clone()],
+                Arc::new(move |incoming| {
+                    let _ = sender.send(incoming);
+                }),
+            )
+            .await
+            .unwrap();
+        let incoming = timeout(Duration::from_secs(5), deliveries.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(incoming.event, event);
+        assert_eq!(incoming.source, EventSource::fips_endpoint(a.npub()));
+        assert!(
+            timeout(Duration::from_millis(50), deliveries.recv())
+                .await
+                .is_err()
+        );
+        subscription.close().await.unwrap();
+        assert_eq!(receiver.active_subscription_count().unwrap(), baseline);
+    }
+    publisher.shutdown().await;
+    a.shutdown().await.unwrap();
+    // Ordinary subscription replay is unchanged, including the original source.
+    let mut cached = receiver.subscribe(vec![filter.clone()]).await.unwrap();
+    assert_eq!(cached.recv().await.unwrap().event, event);
+    drop(cached);
+    let (sender, mut deliveries) = mpsc::unbounded_channel();
+    let subscription = receiver
+        .fresh_subscriber()
+        .subscribe(
+            vec![filter],
+            Arc::new(move |incoming| {
+                let _ = sender.send(incoming);
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        timeout(Duration::from_millis(300), deliveries.recv())
+            .await
+            .is_err()
+    );
+    subscription.close().await.unwrap();
+    assert_eq!(receiver.active_subscription_count().unwrap(), baseline);
+    receiver.shutdown().await;
+    b.shutdown().await.unwrap();
+}

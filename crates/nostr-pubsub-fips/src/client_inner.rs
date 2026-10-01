@@ -87,6 +87,7 @@ impl ClientInner {
     pub(super) async fn subscribe(
         self: &Arc<Self>,
         mut filters: Vec<Filter>,
+        replay_local: bool,
     ) -> Result<FipsPubsubSubscription> {
         drop(self.admit()?);
         if filters.is_empty() {
@@ -136,6 +137,7 @@ impl ClientInner {
                 key.clone(),
                 ActiveSubscription {
                     filters,
+                    fresh: !replay_local,
                     peers: subscribed_peers,
                     recent_event_ids: HashSet::new(),
                     recent_event_order: VecDeque::new(),
@@ -144,7 +146,9 @@ impl ClientInner {
             );
         }
 
-        self.replay_local_events(&key)?;
+        if replay_local {
+            self.replay_local_events(&key)?;
+        }
 
         let mut sent = 0usize;
         let mut last_error = None;
@@ -659,14 +663,11 @@ impl ClientInner {
             return Ok(None);
         }
         let event_id_hex = event_id.to_hex();
-        if self
+        let cached = self
             .recent_events
             .lock()
             .map_err(|_| poisoned("FIPS recent event cache"))?
-            .contains(&event_id_hex)
-        {
-            return Ok(None);
-        }
+            .contains(&event_id_hex);
         let subscriptions = self.lock_subscriptions()?;
         let candidate_subscription_ids = subscription_ids
             .into_iter()
@@ -674,7 +675,10 @@ impl ClientInner {
                 subscriptions
                     .get(&subscription_id.to_string())
                     .is_some_and(|active| {
-                        active.peers.contains(source_npub)
+                        // Fresh observations must re-fetch a cached body from
+                        // the peer, including normal filter/signature/policy checks.
+                        (!cached || active.fresh)
+                            && active.peers.contains(source_npub)
                             && !active.recent_event_ids.contains(&event_id_hex)
                     })
             })
@@ -958,6 +962,7 @@ pub(super) struct ConnectedPeerLink {
 
 pub(super) struct ActiveSubscription {
     pub(super) filters: Vec<Filter>,
+    pub(super) fresh: bool,
     pub(super) peers: HashSet<String>,
     pub(super) recent_event_ids: HashSet<String>,
     pub(super) recent_event_order: VecDeque<String>,

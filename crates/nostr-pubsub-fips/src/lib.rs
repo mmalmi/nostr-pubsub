@@ -447,7 +447,9 @@ impl FipsPubsubClient {
                 max_pending_alternatives,
             )),
         });
-        let peerfinding_subscription = inner.subscribe(vec![default_peerfinding_filter()]).await?;
+        let peerfinding_subscription = inner
+            .subscribe(vec![default_peerfinding_filter()], true)
+            .await?;
         let transport_task =
             tokio::spawn(transport_loop(Arc::downgrade(&inner), driver, transport_rx));
         let peerfinding_task = Some(tokio::spawn(run_default_peerfinding(
@@ -505,7 +507,34 @@ impl FipsPubsubClient {
     }
 
     pub async fn subscribe(&self, filters: Vec<Filter>) -> Result<FipsPubsubSubscription> {
-        self.inner.subscribe(filters).await
+        self.inner.subscribe(filters, true).await
+    }
+
+    /// A subscription provider that requires new peer observations. It shares
+    /// this client's connections, but never satisfies a subscription by replaying
+    /// its local cache. Useful when a cached announcement cannot confirm freshness.
+    #[must_use]
+    pub fn fresh_subscriber(&self) -> FipsFreshEventSubscriber {
+        FipsFreshEventSubscriber {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+/// Live peer observations over an existing FIPS client, without local replay.
+#[derive(Clone)]
+pub struct FipsFreshEventSubscriber {
+    inner: Arc<ClientInner>,
+}
+
+#[async_trait]
+impl NostrEventSubscriber for FipsFreshEventSubscriber {
+    async fn subscribe(
+        &self,
+        filters: Vec<Filter>,
+        handler: NostrEventHandler,
+    ) -> Result<Box<dyn NostrEventSubscription>> {
+        forward_subscription(self.inner.subscribe(filters, false).await?, handler)
     }
 }
 
@@ -553,24 +582,30 @@ impl NostrEventSubscriber for FipsPubsubClient {
         filters: Vec<Filter>,
         handler: NostrEventHandler,
     ) -> Result<Box<dyn NostrEventSubscription>> {
-        let mut subscription = FipsPubsubClient::subscribe(self, filters).await?;
-        let (close_sender, close_receiver) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            tokio::select! {
-                _ = close_receiver => {}
-                () = async {
-                    while let Some(event) = subscription.recv().await {
-                        handler(event);
-                    }
-                } => {}
-            }
-            subscription.close();
-        });
-        Ok(Box::new(FipsRoutedSubscription {
-            close_sender: Some(close_sender),
-            task: Some(task),
-        }))
+        forward_subscription(FipsPubsubClient::subscribe(self, filters).await?, handler)
     }
+}
+
+fn forward_subscription(
+    mut subscription: FipsPubsubSubscription,
+    handler: NostrEventHandler,
+) -> Result<Box<dyn NostrEventSubscription>> {
+    let (close_sender, close_receiver) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        tokio::select! {
+            _ = close_receiver => {}
+            () = async {
+                while let Some(event) = subscription.recv().await {
+                    handler(event);
+                }
+            } => {}
+        }
+        subscription.close();
+    });
+    Ok(Box::new(FipsRoutedSubscription {
+        close_sender: Some(close_sender),
+        task: Some(task),
+    }))
 }
 
 struct FipsRoutedSubscription {
