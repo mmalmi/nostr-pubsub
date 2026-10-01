@@ -73,9 +73,11 @@ async fn fresh_subscriber_reobserves_cached_events_and_stays_quiet_offline() {
         .unwrap();
     let addr = a.bound_udp_listen_addrs().await.unwrap()[0].to_string();
     let b = udp_endpoint([94; 32], vec![PeerConfig::new(a.npub(), "udp", &addr)]).await;
-    let receiver = FipsPubsubClient::start(b.clone(), FipsPubsubClientOptions::default())
-        .await
-        .unwrap();
+    let receiver = Arc::new(
+        FipsPubsubClient::start(b.clone(), FipsPubsubClientOptions::default())
+            .await
+            .unwrap(),
+    );
     let filter = Filter::new().kind(Kind::TextNote);
     let baseline = receiver.active_subscription_count().unwrap();
     let mut cached = receiver.subscribe(vec![filter.clone()]).await.unwrap();
@@ -147,6 +149,6 @@ async fn fresh_subscriber_reobserves_cached_events_and_stays_quiet_offline() {
     );
     subscription.close().await.unwrap();
     assert_eq!(receiver.active_subscription_count().unwrap(), baseline);
-    receiver.shutdown().await;
+    receiver.shutdown_shared().await;
     b.shutdown().await.unwrap();
 }

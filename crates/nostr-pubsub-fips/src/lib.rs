@@ -514,9 +514,9 @@ impl FipsPubsubClient {
     /// this client's connections, but never satisfies a subscription by replaying
     /// its local cache. Useful when a cached announcement cannot confirm freshness.
     #[must_use]
-    pub fn fresh_subscriber(&self) -> FipsFreshEventSubscriber {
+    pub fn fresh_subscriber(self: &Arc<Self>) -> FipsFreshEventSubscriber {
         FipsFreshEventSubscriber {
-            inner: self.inner.clone(),
+            client: self.clone(),
         }
     }
 }
@@ -524,7 +524,7 @@ impl FipsPubsubClient {
 /// Live peer observations over an existing FIPS client, without local replay.
 #[derive(Clone)]
 pub struct FipsFreshEventSubscriber {
-    inner: Arc<ClientInner>,
+    client: Arc<FipsPubsubClient>,
 }
 
 #[async_trait]
@@ -534,7 +534,7 @@ impl NostrEventSubscriber for FipsFreshEventSubscriber {
         filters: Vec<Filter>,
         handler: NostrEventHandler,
     ) -> Result<Box<dyn NostrEventSubscription>> {
-        forward_subscription(self.inner.subscribe(filters, false).await?, handler)
+        forward_subscription(self.client.inner.subscribe(filters, false).await?, handler)
     }
 }
 
