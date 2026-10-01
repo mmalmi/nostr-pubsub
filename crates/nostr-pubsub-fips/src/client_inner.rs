@@ -354,8 +354,7 @@ impl ClientInner {
         if let Some(event) = cached {
             let source = EventSource::fips_endpoint(source_npub);
             if event.as_event().kind.as_u16() != inventory.event_kind
-                || u32::try_from(event.as_event().as_json().len()).ok()
-                    != Some(inventory.payload_bytes)
+                || event_payload_bytes(&event).ok() != Some(inventory.payload_bytes)
                 || !self.event_is_admitted(&event, &source).await
             {
                 return;
