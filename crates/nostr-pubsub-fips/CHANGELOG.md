@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.12 - 2026-10-01
+
+- Add `fresh_subscriber()` to observe new peer responses over an existing client
+  without replaying its local cache. Matching new peer inventory can confirm a
+  cached signed event; ordinary subscription replay and deduplication are unchanged.
+- Keep the shared client alive while the fresh subscription provider is retained.
+
 ## 0.5.11 - 2026-10-01
 
 - Bound deduplication bookkeeping during event, peer, and subscription churn.
