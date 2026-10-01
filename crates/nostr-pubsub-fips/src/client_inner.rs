@@ -243,17 +243,20 @@ impl ClientInner {
                 event_kind,
                 payload_bytes,
                 hop_limit,
-            } => self.handle_inv(
-                source_peer,
-                &source_npub,
-                InventoryAdvertisement {
-                    subscription_ids,
-                    event_id,
-                    event_kind,
-                    payload_bytes,
-                    hop_limit,
-                },
-            ),
+            } => {
+                self.handle_inv(
+                    source_peer,
+                    &source_npub,
+                    InventoryAdvertisement {
+                        subscription_ids,
+                        event_id,
+                        event_kind,
+                        payload_bytes,
+                        hop_limit,
+                    },
+                )
+                .await
+            }
             FipsPubsubWireMessage::Want { event_id } => {
                 self.want_frames_received.fetch_add(1, Ordering::Relaxed);
                 self.handle_want(source_peer, &source_id, &event_id);
@@ -330,13 +333,61 @@ impl ClientInner {
         }
     }
 
-    pub(super) fn handle_inv(
+    pub(super) async fn handle_inv(
         &self,
         source_peer: PeerIdentity,
         source_npub: &str,
         inventory: InventoryAdvertisement,
     ) {
         self.inv_frames_received.fetch_add(1, Ordering::Relaxed);
+        if inventory.subscription_ids.len()
+            > self.options.max_active_subscriptions.saturating_add(1)
+        {
+            return;
+        }
+        let event_id = inventory.event_id.to_hex();
+        let cached = self
+            .recent_events
+            .lock()
+            .ok()
+            .and_then(|events| events.event(&event_id).cloned());
+        if let Some(event) = cached {
+            let source = EventSource::fips_endpoint(source_npub);
+            if event.as_event().kind.as_u16() != inventory.event_kind
+                || u32::try_from(event.as_event().as_json().len()).ok()
+                    != Some(inventory.payload_bytes)
+                || !self.event_is_admitted(&event, &source).await
+            {
+                return;
+            }
+            // A peer has freshly advertised this authenticated body. Scope the
+            // observation to its fresh subscriptions; replay and dedup on ordinary
+            // subscriptions stay unchanged. WANT has no subscription ID, so a
+            // redundant refetch could be answered under an older subscription.
+            let Ok(mut subscriptions) = self.lock_subscriptions() else {
+                return;
+            };
+            for id in inventory.subscription_ids {
+                let Some(active) = subscriptions.get_mut(&id.to_string()) else {
+                    continue;
+                };
+                if active.fresh
+                    && active.peers.contains(source_npub)
+                    && !active.recent_event_ids.contains(&event_id)
+                    && PubsubPeerInterest::from_filters(&active.filters, &event)
+                        == PubsubPeerInterest::Subscribed
+                {
+                    deliver_local(
+                        active,
+                        event.clone(),
+                        source.clone(),
+                        &event_id,
+                        FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS,
+                    );
+                }
+            }
+            return;
+        }
         let Ok(Some(frame)) = self.accept_inventory(source_npub, inventory) else {
             return;
         };
@@ -663,11 +714,14 @@ impl ClientInner {
             return Ok(None);
         }
         let event_id_hex = event_id.to_hex();
-        let cached = self
+        if self
             .recent_events
             .lock()
             .map_err(|_| poisoned("FIPS recent event cache"))?
-            .contains(&event_id_hex);
+            .contains(&event_id_hex)
+        {
+            return Ok(None);
+        }
         let subscriptions = self.lock_subscriptions()?;
         let candidate_subscription_ids = subscription_ids
             .into_iter()
@@ -675,10 +729,7 @@ impl ClientInner {
                 subscriptions
                     .get(&subscription_id.to_string())
                     .is_some_and(|active| {
-                        // Fresh observations must re-fetch a cached body from
-                        // the peer, including normal filter/signature/policy checks.
-                        (!cached || active.fresh)
-                            && active.peers.contains(source_npub)
+                        active.peers.contains(source_npub)
                             && !active.recent_event_ids.contains(&event_id_hex)
                     })
             })

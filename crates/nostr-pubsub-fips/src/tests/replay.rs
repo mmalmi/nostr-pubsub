@@ -87,7 +87,8 @@ async fn fresh_subscriber_reobserves_cached_events_and_stays_quiet_offline() {
             .event,
         event
     );
-    drop(cached);
+    // Keep the ordinary app subscription alive: cached peer replies must not
+    // get lost to its preexisting event-ID deduplication.
     // Each check uses the same transport and preexisting cache. A fresh REQ
     // must get a fresh peer response even when the signed event has not changed.
     for _ in 0..2 {
@@ -114,8 +115,14 @@ async fn fresh_subscriber_reobserves_cached_events_and_stays_quiet_offline() {
                 .is_err()
         );
         subscription.close().await.unwrap();
-        assert_eq!(receiver.active_subscription_count().unwrap(), baseline);
+        assert_eq!(receiver.active_subscription_count().unwrap(), baseline + 1);
+        assert!(
+            timeout(Duration::from_millis(50), cached.recv())
+                .await
+                .is_err()
+        );
     }
+    drop(cached);
     publisher.shutdown().await;
     a.shutdown().await.unwrap();
     // Ordinary subscription replay is unchanged, including the original source.
