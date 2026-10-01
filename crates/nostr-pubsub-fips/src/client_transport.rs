@@ -22,49 +22,93 @@ pub(super) async fn transport_loop(
         let Some(inner) = inner.upgrade() else {
             break;
         };
-        tokio::select! {
+        let (first, already_written) = tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else {
                     break;
                 };
-                match command {
-                    TransportCommand::Send { peer, frame } => {
-                        if inner.peer_is_in_cooldown(&peer.npub(), now_ms()) {
-                            continue;
-                        }
-                        if driver.queue_frame(peer, &frame).is_err()
-                            || driver.connect_peer(&peer.npub(), now_ms()).await.is_err()
-                        {
-                            inner.transport_errors.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    TransportCommand::Cooldown { peer } => {
-                        known_links.remove(&peer.npub());
-                        forget_peer_state(&inner, &peer.npub());
-                        let _ = driver.forget_peer(peer).await;
-                    }
-                }
+                (Some(command), 0)
             }
             report = driver.receive(now_ms()) => {
                 if let Ok(report) = report {
                     inner.tcp_receive_batches.fetch_add(1, Ordering::Relaxed);
+                    let written = report.written_bytes;
                     process_wire_report(&inner, &mut driver, report).await;
+                    (None, written)
                 } else {
                     inner.transport_errors.fetch_add(1, Ordering::Relaxed);
+                    // A failed drive may already have written before a later
+                    // read/close error. Do not spend its unknown budget twice.
+                    (None, usize::MAX)
                 }
             }
             _ = poll_tick.tick() => {
                 sync_transport_peers(&inner, &mut driver, &mut known_links).await;
+                let mut written = 0;
                 if tcp_driver_poll_needed(driver.connection_count()) {
                     inner.tcp_poll_turns.fetch_add(1, Ordering::Relaxed);
                     if let Ok(report) = driver.poll(now_ms()).await {
+                        written = report.written_bytes;
                         process_wire_report(&inner, &mut driver, report).await;
                     } else {
                         inner.transport_errors.fetch_add(1, Ordering::Relaxed);
+                        written = usize::MAX;
                     }
                 }
+                (None, written)
+            }
+        };
+        finish_ready_turn(
+            &inner,
+            &mut driver,
+            &mut commands,
+            &mut known_links,
+            first,
+            already_written,
+        )
+        .await;
+    }
+}
+
+// One bounded batch includes the command selected above. Responses queued by
+// report handling share this batch, so an already-writable stream does not wait
+// for the retransmission timer. A full TCP window never self-schedules a retry.
+pub(super) async fn finish_ready_turn(
+    inner: &ClientInner,
+    driver: &mut WireTcpDriver,
+    commands: &mut mpsc::Receiver<TransportCommand>,
+    known_links: &mut HashMap<String, u64>,
+    mut first: Option<TransportCommand>,
+    already_written: usize,
+) {
+    for _ in 0..inner.options.receive_batch_size {
+        let Some(command) = first.take().or_else(|| commands.try_recv().ok()) else {
+            break;
+        };
+        match command {
+            TransportCommand::Send { peer, frame } => {
+                if inner.peer_is_in_cooldown(&peer.npub(), now_ms()) {
+                    continue;
+                }
+                if driver.queue_frame(peer, &frame).is_err()
+                    || driver.connect_peer(&peer.npub(), now_ms()).await.is_err()
+                {
+                    inner.transport_errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            TransportCommand::Cooldown { peer } => {
+                known_links.remove(&peer.npub());
+                forget_peer_state(inner, &peer.npub());
+                let _ = driver.forget_peer(peer).await;
             }
         }
+    }
+    if driver
+        .flush_queues(now_ms(), already_written)
+        .await
+        .is_err()
+    {
+        inner.transport_errors.fetch_add(1, Ordering::Relaxed);
     }
 }
 

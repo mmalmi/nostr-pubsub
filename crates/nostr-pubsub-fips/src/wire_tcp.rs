@@ -32,6 +32,7 @@ pub(crate) struct WireTcpReport {
     pub tcp_datagrams: usize,
     pub rejected_tcp_datagrams: usize,
     pub rejected_frames: usize,
+    pub written_bytes: usize,
 }
 
 pub(crate) struct WireTcpDriver {
@@ -239,7 +240,7 @@ impl WireTcpDriver {
         self.accept_connections().await?;
         let newly_connected = self.refresh_active().await?;
         let (frames, rejected_frames) = self.read_active(now_ms).await?;
-        self.flush_queues(now_ms).await?;
+        let written_bytes = self.flush_queues(now_ms, 0).await?;
         self.finish_remote_closes(now_ms).await?;
         let more_connected = self.refresh_active().await?;
         let mut newly_connected = newly_connected;
@@ -253,6 +254,7 @@ impl WireTcpDriver {
             tcp_datagrams: 0,
             rejected_tcp_datagrams: 0,
             rejected_frames,
+            written_bytes,
         })
     }
 
@@ -396,13 +398,21 @@ impl WireTcpDriver {
         Ok((frames, rejected))
     }
 
-    async fn flush_queues(&mut self, now_ms: u64) -> Result<()> {
+    pub(crate) async fn flush_queues(
+        &mut self,
+        now_ms: u64,
+        already_written: usize,
+    ) -> Result<usize> {
+        let initial_budget = self.options.drive_io_bytes.saturating_sub(already_written);
+        if self.queues.is_empty() || initial_budget == 0 {
+            return Ok(0);
+        }
         let streams = self
             .active
             .iter()
             .map(|(peer, id)| (peer.clone(), *id))
             .collect::<Vec<_>>();
-        let mut budget = self.options.drive_io_bytes;
+        let mut budget = initial_budget;
         for (peer, id) in streams {
             while budget > 0 {
                 let chunk = self
@@ -444,7 +454,7 @@ impl WireTcpDriver {
                 self.queues.remove(&peer);
             }
         }
-        Ok(())
+        Ok(initial_budget - budget)
     }
 
     async fn finish_remote_closes(&mut self, now_ms: u64) -> Result<()> {
@@ -605,6 +615,9 @@ fn storage(message: impl Into<String>) -> PubsubError {
 fn storage_error(context: &str, error: impl std::fmt::Display) -> PubsubError {
     storage(format!("{context}: {error}"))
 }
+
+#[cfg(test)]
+mod ready_output;
 
 #[cfg(test)]
 mod tests {
