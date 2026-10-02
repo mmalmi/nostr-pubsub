@@ -27,8 +27,7 @@ pub use {delivery::VerifiedDeliveryRecord, error::SimulationError, mode::PeerSel
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, Timestamp};
 use nostr_pubsub::{
@@ -410,13 +409,7 @@ fn poll_ready<F>(future: F) -> Result<F::Output>
 where
     F: Future,
 {
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = pin!(future);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(output) => Ok(output),
