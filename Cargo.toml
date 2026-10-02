@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/nostr-pubsub-reconcile",
   "crates/nostr-pubsub",
   "crates/nostr-pubsub-fips",
   "crates/nostr-pubsub-relay",
