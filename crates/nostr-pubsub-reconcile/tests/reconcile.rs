@@ -190,3 +190,21 @@ fn bounded_dense_difference_does_not_skip_ranges() {
     assert_eq!(have.len(), expected_have);
     assert_eq!(need.len(), expected_need);
 }
+
+#[test]
+fn validates_the_tail_even_when_an_earlier_range_fills_the_output() {
+    let records = (0..1000).map(|n| record(100 + n / 3, n));
+    let mut peer = Session::new(
+        records,
+        Filter {
+            since: 0,
+            until: 1000,
+        },
+        Limits {
+            max_frame_bytes: 4096,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert!(peer.respond(&[0x61, 0, 0, 2, 0, 0xff]).is_err());
+}
