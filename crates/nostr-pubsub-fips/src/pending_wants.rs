@@ -8,6 +8,7 @@ use crate::now_ms;
 pub(super) struct InventoryProvider {
     pub(super) peer_npub: String,
     pub(super) subscription_ids: Vec<String>,
+    pub(super) requested: bool,
 }
 
 pub(super) struct PendingInventory {
@@ -18,6 +19,14 @@ pub(super) struct PendingInventory {
     pub(super) hop_limit: u8,
     pub(super) requested_at_ms: u64,
     pub(super) retry_count: u8,
+}
+
+impl PendingInventory {
+    pub(super) fn requested_provider(&self, peer_npub: &str) -> Option<&InventoryProvider> {
+        std::iter::once(&self.selected)
+            .chain(&self.alternatives)
+            .find(|provider| provider.requested && provider.peer_npub == peer_npub)
+    }
 }
 
 const MAX_WANT_RETRIES: u8 = 5;
@@ -68,6 +77,7 @@ impl PendingWants {
             {
                 merge_subscription_ids(&mut existing.subscription_ids, provider.subscription_ids);
             } else if pending.alternatives.len() < self.max_alternatives {
+                provider.requested = false;
                 provider.subscription_ids.sort_unstable();
                 provider.subscription_ids.dedup();
                 pending.alternatives.push_back(provider);
@@ -95,12 +105,11 @@ impl PendingWants {
         payload_bytes: u32,
     ) -> Option<PendingInventory> {
         let pending = self.entries.get(event_id)?;
-        if pending.selected.peer_npub != source_npub
-            || !pending
-                .selected
-                .subscription_ids
-                .iter()
-                .any(|candidate| candidate == subscription_id)
+        let provider = pending.requested_provider(source_npub)?;
+        if !provider
+            .subscription_ids
+            .iter()
+            .any(|candidate| candidate == subscription_id)
             || pending.event_kind != event_kind
             || pending.payload_bytes != payload_bytes
         {
@@ -146,10 +155,12 @@ impl PendingWants {
             }
             if pending.retry_count >= MAX_WANT_RETRIES {
                 batch.expired_event_count += 1;
-                batch.expired_providers.push(pending.selected.clone());
-                batch
-                    .expired_providers
-                    .extend(pending.alternatives.iter().cloned());
+                batch.expired_providers.extend(
+                    std::iter::once(&pending.selected)
+                        .chain(&pending.alternatives)
+                        .filter(|provider| provider.requested)
+                        .cloned(),
+                );
                 expired_ids.push(event_id.clone());
                 continue;
             }
@@ -157,6 +168,9 @@ impl PendingWants {
                 let previous = std::mem::replace(&mut pending.selected, next);
                 pending.alternatives.push_back(previous);
             }
+            // Rotating providers does not cancel a reliable response already
+            // in flight. Keep its evidence within the existing candidate bound.
+            pending.selected.requested = true;
             pending.requested_at_ms = now_ms;
             pending.retry_count += 1;
             batch

@@ -83,15 +83,14 @@ impl crate::ClientInner {
         let id = event.as_event().id.to_hex();
         let pending = self.pending_wants.lock().ok()?;
         let request = pending.entries.get(&id)?;
-        if request.selected.peer_npub != peer
-            || request.event_kind != event.as_event().kind.as_u16()
+        let provider = request.requested_provider(peer)?;
+        if request.event_kind != event.as_event().kind.as_u16()
             || request.payload_bytes != crate::event_payload_bytes(event).ok()?
         {
             return None;
         }
         let subscriptions = self.lock_subscriptions().ok()?;
-        request
-            .selected
+        provider
             .subscription_ids
             .iter()
             .find_map(|subscription_id| {

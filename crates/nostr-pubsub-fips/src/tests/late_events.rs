@@ -2,6 +2,116 @@ use super::routed::{signed_note, udp_endpoint};
 use super::*;
 
 #[tokio::test]
+async fn delayed_requested_answer_keeps_propagation_after_provider_rotation() {
+    check_delayed_requested_answer(false).await;
+}
+
+#[tokio::test]
+async fn delayed_requested_answer_keeps_fresh_subscription_after_provider_rotation() {
+    check_delayed_requested_answer(true).await;
+}
+
+async fn check_delayed_requested_answer(fresh: bool) {
+    let endpoint = udp_endpoint([116; 32], Vec::new()).await;
+    let client = FipsPubsubClient::start(endpoint.clone(), FipsPubsubClientOptions::default())
+        .await
+        .unwrap();
+    let peers = [117, 118].map(|seed| {
+        PeerIdentity::from_npub(&Identity::from_secret_bytes(&[seed; 32]).unwrap().npub()).unwrap()
+    });
+    let event = signed_note("delayed original provider response");
+    let filters = vec![Filter::new().id(event.as_event().id)];
+    let older = if fresh {
+        Some(client.subscribe(filters.clone()).await.unwrap())
+    } else {
+        None
+    };
+    let mut subscription = client.inner.subscribe(filters, !fresh).await.unwrap();
+    client
+        .inner
+        .lock_subscriptions()
+        .unwrap()
+        .get_mut(&subscription.key)
+        .unwrap()
+        .peers
+        .extend(peers.iter().map(PeerIdentity::npub));
+    if let Some(older) = &older {
+        client
+            .inner
+            .lock_subscriptions()
+            .unwrap()
+            .get_mut(&older.key)
+            .unwrap()
+            .peers
+            .extend(peers.iter().map(PeerIdentity::npub));
+    }
+    for (index, peer) in peers.iter().enumerate() {
+        let request = client
+            .inner
+            .accept_inventory(
+                &peer.npub(),
+                crate::client_inner::InventoryAdvertisement {
+                    subscription_ids: vec![SubscriptionId::new(subscription.key.clone())],
+                    event_id: event.as_event().id,
+                    event_kind: event.as_event().kind.as_u16(),
+                    payload_bytes: event_payload_bytes(&event).unwrap(),
+                    hop_limit: 3,
+                },
+            )
+            .unwrap();
+        assert_eq!(request.is_some(), index == 0);
+    }
+    let requested_at = client.inner.pending_wants.lock().unwrap().entries
+        [&event.as_event().id.to_hex()]
+        .requested_at_ms;
+    let retries = client.inner.retry_pending_frames(requested_at + 500);
+    assert_eq!(retries.len(), 1);
+    assert_eq!(retries[0].0, peers[1]);
+    if fresh {
+        assert_eq!(
+            client
+                .inner
+                .fresh_response_subscription(&peers[0].npub(), &event),
+            Some(SubscriptionId::new(subscription.key.clone()))
+        );
+    }
+    let wire_key = older.as_ref().map_or(&subscription.key, |older| &older.key);
+    let frame = client
+        .inner
+        .codec
+        .encode_frame(&FipsPubsubWireMessage::deliver(
+            SubscriptionId::new(wire_key.clone()),
+            event.clone(),
+        ))
+        .unwrap();
+    client.inner.handle_frame(peers[0], &frame).await;
+    assert_eq!(subscription.try_recv().unwrap().event, event);
+    let remaining_hops = client
+        .inner
+        .recent_events
+        .lock()
+        .unwrap()
+        .entries
+        .iter()
+        .find(|cached| cached.event == event)
+        .unwrap()
+        .hop_limit;
+    let pending_count = client.inner.pending_wants.lock().unwrap().entries.len();
+    subscription.close();
+    drop(older);
+    client.shutdown().await;
+    endpoint.shutdown().await.unwrap();
+    assert_eq!(
+        remaining_hops, 2,
+        "the first requested response must retain its propagation budget"
+    );
+    assert_eq!(
+        pending_count, 0,
+        "a valid late answer fulfills the pending WANT"
+    );
+}
+
+#[tokio::test]
 async fn repeated_answers_after_subscription_close_do_not_penalize_an_honest_peer() {
     check_late_answers(false).await;
 }

@@ -732,6 +732,7 @@ impl ClientInner {
         let provider = InventoryProvider {
             peer_npub: source_npub.to_string(),
             subscription_ids: valid_subscription_ids,
+            requested: true,
         };
         let inventory = PendingInventory {
             selected: provider,
