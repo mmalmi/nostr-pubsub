@@ -38,6 +38,79 @@ async fn wait_for_local_service(
     .expect("local service advertisement should converge");
 }
 
+async fn reject_inexact_local_services(
+    provider: &FipsEndpoint,
+    receiver: &FipsEndpoint,
+    client: &FipsPubsubClient,
+) {
+    for capability in [
+        LocalInstanceCapability::service("other.service/1", FIPS_NOSTR_PUBSUB_SERVICE_PORT),
+        LocalInstanceCapability::service(
+            FIPS_NOSTR_PUBSUB_CAPABILITY,
+            FIPS_NOSTR_PUBSUB_SERVICE_PORT + 1,
+        ),
+    ] {
+        let service = provider
+            .register_service_receiver_with_capability(capability.clone())
+            .await
+            .unwrap();
+        wait_for_local_service(receiver, provider.npub(), &capability, true).await;
+        assert!(
+            client
+                .inner
+                .connected_peer_links()
+                .await
+                .unwrap()
+                .is_empty(),
+            "self and providers without the exact service must not be selected, even over a direct link"
+        );
+        drop(service);
+        wait_for_local_service(receiver, provider.npub(), &capability, false).await;
+    }
+}
+
+async fn assert_transport_selection(
+    receiver: &Arc<FipsEndpoint>,
+    options: FipsPubsubClientOptions,
+    provider_npub: &str,
+) {
+    let tcp_only = FipsPubsubClient::start_for_transport(receiver.clone(), options.clone(), "tcp")
+        .await
+        .unwrap();
+    assert!(
+        tcp_only
+            .inner
+            .connected_peer_links()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    tcp_only.shutdown().await;
+    wait_for_local_capability(receiver, false).await;
+    let excludes_udp = FipsPubsubClient::start_excluding_peer_transports(
+        receiver.clone(),
+        options.clone(),
+        ["udp"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        excludes_udp
+            .inner
+            .connected_peer_links()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    excludes_udp.shutdown().await;
+    wait_for_local_capability(receiver, false).await;
+    let udp_only = FipsPubsubClient::start_for_transport(receiver.clone(), options, "udp")
+        .await
+        .unwrap();
+    routed::wait_for_selected_peers(&udp_only, &[provider_npub]).await;
+    udp_only.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_service_selection_respects_capabilities_policy_capacity_and_restart() {
     use super::routed::{
@@ -65,30 +138,7 @@ async fn local_service_selection_respects_capabilities_policy_capacity_and_resta
     .await
     .unwrap();
     wait_for_local_capability(&receiver, true).await;
-    for capability in [
-        LocalInstanceCapability::service("other.service/1", FIPS_NOSTR_PUBSUB_SERVICE_PORT),
-        LocalInstanceCapability::service(
-            FIPS_NOSTR_PUBSUB_CAPABILITY,
-            FIPS_NOSTR_PUBSUB_SERVICE_PORT + 1,
-        ),
-    ] {
-        let service = provider
-            .register_service_receiver_with_capability(capability.clone())
-            .await
-            .unwrap();
-        wait_for_local_service(&receiver, provider.npub(), &capability, true).await;
-        assert!(
-            client
-                .inner
-                .connected_peer_links()
-                .await
-                .unwrap()
-                .is_empty(),
-            "self and providers without the exact service must not be selected, even over a direct link"
-        );
-        drop(service);
-        wait_for_local_service(&receiver, provider.npub(), &capability, false).await;
-    }
+    reject_inexact_local_services(&provider, &receiver, &client).await;
     let capability = LocalInstanceCapability::service(
         FIPS_NOSTR_PUBSUB_CAPABILITY,
         FIPS_NOSTR_PUBSUB_SERVICE_PORT,
@@ -148,41 +198,7 @@ async fn local_service_selection_respects_capabilities_policy_capacity_and_resta
     client.shutdown().await;
     wait_for_local_capability(&receiver, false).await;
 
-    let tcp_only = FipsPubsubClient::start_for_transport(receiver.clone(), options.clone(), "tcp")
-        .await
-        .unwrap();
-    assert!(
-        tcp_only
-            .inner
-            .connected_peer_links()
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    tcp_only.shutdown().await;
-    wait_for_local_capability(&receiver, false).await;
-    let excludes_udp = FipsPubsubClient::start_excluding_peer_transports(
-        receiver.clone(),
-        options.clone(),
-        ["udp"],
-    )
-    .await
-    .unwrap();
-    assert!(
-        excludes_udp
-            .inner
-            .connected_peer_links()
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    excludes_udp.shutdown().await;
-    wait_for_local_capability(&receiver, false).await;
-    let udp_only = FipsPubsubClient::start_for_transport(receiver.clone(), options, "udp")
-        .await
-        .unwrap();
-    wait_for_selected_peers(&udp_only, &[restarted.npub()]).await;
-    udp_only.shutdown().await;
+    assert_transport_selection(&receiver, options, restarted.npub()).await;
     drop(service);
     receiver.shutdown().await.unwrap();
     restarted.shutdown().await.unwrap();
