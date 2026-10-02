@@ -235,6 +235,6 @@ export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runti
 export type {
   NostrRuntimeOptions, RuntimeCacheMode, RuntimeCompletion, RuntimeEventInfo, RuntimeEventStore,
   RuntimeMetrics, RuntimeOutboxEntry, RuntimePublishOptions, RuntimePublishResult, RuntimeQueryOptions,
-  RuntimeQueryResult, RuntimeRelayStats, RuntimeSource, RuntimeSubscribeOptions,
+  RuntimeQueryResult, RuntimeRelayStats, RuntimeReconciliationOptions, RuntimeSource, RuntimeSubscribeOptions,
   RuntimeSubscription, RuntimeSubscriptionHandlers,
 } from './runtime-types.js';

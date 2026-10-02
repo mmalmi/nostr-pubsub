@@ -37,7 +37,8 @@
     "CHANGELOG.md"
   ],
   "dependencies": {
-    "@fips/tcp": "https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz"
+    "@fips/tcp": "https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz",
+    "nostr-pubsub-reconcile": "workspace:^0.1.0"
   },
   "peerDependencies": {
     "nostr-tools": ">=2.23.3 <3"

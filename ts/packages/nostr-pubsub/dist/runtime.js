@@ -22,7 +22,7 @@ export class NostrRuntime {
     constructor(options = {}) {
         this.options = options;
         this.store = options.store ?? new MemoryEventStore();
-        this.relays = new RuntimeRelays(options);
+        this.relays = new RuntimeRelays({ ...options, store: this.store });
         for (const source of options.sources ?? [])
             this.sources.set(source.id, source);
         this.scheduleRetry();

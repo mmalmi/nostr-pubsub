@@ -33,7 +33,7 @@ export class NostrRuntime {
   private readonly counters = { receivedEvents: 0, deliveredEvents: 0, duplicateEvents: 0, verificationFailures: 0 };
   constructor(private readonly options: NostrRuntimeOptions = {}) {
     this.store = options.store ?? new MemoryEventStore();
-    this.relays = new RuntimeRelays(options);
+    this.relays = new RuntimeRelays({ ...options, store: this.store });
     for (const source of options.sources ?? []) this.sources.set(source.id, source);
     this.scheduleRetry();
   }

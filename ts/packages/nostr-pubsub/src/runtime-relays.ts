@@ -4,6 +4,7 @@ import { matchFilters } from 'nostr-tools/filter';
 import { createSimplePoolNostrRelayVerificationBoundary } from './simple-pool-relay-transport.js';
 import { verifyNostrEvent, type NostrEvent, type NostrFilter, type NostrVerifiedEvent } from './types.js';
 import type { NostrRuntimeOptions, RuntimeRelayStats } from './runtime-types.js';
+import { RuntimeReconciliation } from './runtime-reconciliation.js';
 
 type Entry = { relays?: readonly string[]; filters: NostrFilter[]; event: (event: NostrEvent, relay: string) => void; state: (relay: string, complete: boolean, error?: string) => void; closed: boolean; batch?: Batch };
 type Link = { generation: number; close?: () => void; timer?: ReturnType<typeof setTimeout>; attempts: number; eosed: boolean; latest: Map<string, number> };
@@ -13,6 +14,7 @@ type Batch = { entries: Entry[]; links: Map<string, Link>; closed: boolean; reop
 export class RuntimeRelays {
   private readonly pool: AbstractSimplePool;
   private readonly boundary: ReturnType<typeof createSimplePoolNostrRelayVerificationBoundary>;
+  private readonly reconciliation?: RuntimeReconciliation;
   private relays: string[];
   private readonly batches = new Set<Batch>();
   private pending: Entry[] = [];
@@ -22,6 +24,7 @@ export class RuntimeRelays {
   private readonly maxFilters: number;
   private readonly maxBytes: number;
   constructor(private readonly options: NostrRuntimeOptions) {
+    if (options.reconciliation && options.store) this.reconciliation = new RuntimeReconciliation(options.reconciliation, options.store);
     this.boundary = createSimplePoolNostrRelayVerificationBoundary(boundedVerifier(options.verifyEvent ?? verifyEvent));
     this.relays = normalizeRelays(options.relays ?? []);
     this.maxFilters = positive(options.maxFiltersPerBatch, 20);
@@ -95,6 +98,7 @@ export class RuntimeRelays {
     if (this.timer) clearTimeout(this.timer);
     this.pending = [];
     for (const batch of [...this.batches]) this.closeBatch(batch);
+    this.reconciliation?.close();
     this.pool.destroy();
   }
   private flush(): void {
@@ -145,17 +149,18 @@ export class RuntimeRelays {
       });
       // prepareSubscription is public. Sending REQ ourselves avoids nostr-tools' timer
       // which labels a timeout as EOSE; only a relay's actual EOSE is complete here.
+      const deliver = (raw: NostrEvent): void => {
+        if (!current()) return;
+        const event = this.boundary.admitEvent(raw);
+        for (const filter of original) if (matchFilters([filter], event)) {
+          const key = filterKey(filter);
+          link.latest.set(key, Math.max(link.latest.get(key) ?? 0, event.created_at));
+        }
+        for (const entry of batch.entries) if (!entry.closed && matchFilters(entry.filters, event)) entry.event(event, url);
+      };
       const subscription = relay.prepareSubscription(filters, {
         id: `pubsub-${++this.serial}`,
-        onevent: (raw) => {
-          if (!current()) return;
-          const event = this.boundary.admitEvent(raw);
-          for (const filter of original) if (matchFilters([filter], event)) {
-            const key = filterKey(filter);
-            link.latest.set(key, Math.max(link.latest.get(key) ?? 0, event.created_at));
-          }
-          for (const entry of batch.entries) if (!entry.closed && matchFilters(entry.filters, event)) entry.event(event, url);
-        },
+        onevent: deliver,
         oneose: () => {
           if (!current()) return;
           link.eosed = true; link.attempts = 0;
@@ -167,6 +172,11 @@ export class RuntimeRelays {
       relay.idleSince = undefined;
       link.close = () => { if (relay.openSubs.has(subscription.id)) subscription.close('Nostr runtime subscription closed'); };
       await relay.send(JSON.stringify(['REQ', subscription.id, ...filters]));
+      if (current() && this.reconciliation) {
+        const stop = this.reconciliation.start(relay, original, deliver);
+        const close = link.close;
+        link.close = () => { stop(); close?.(); };
+      }
     } catch (error) { if (current()) this.retry(batch, url, link, errorText(error)); }
   }
   private retry(batch: Batch, url: string, link: Link, reason: string): void {

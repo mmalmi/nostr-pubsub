@@ -26,6 +26,24 @@ security boundaries.
 
 ## Shared application runtime
 
+Enable optional NIP-77 gap recovery with `reconciliation: {}` in the runtime
+options. Cached events and ordinary live `REQ` start immediately. After NIP-11
+advertises support, a bounded comparison runs on the same relay connection;
+missing IDs are fetched by ordinary `REQ` and use the same signature, deletion,
+expiration and replacement admission rules. It never uploads local-only events.
+
+The default comparison covers at most 24 hours ending at the original filter's
+`until` (or now). An explicitly requested older page stays in that older time
+range. Original relay filters and their history completion remain unchanged:
+this is best-effort gap recovery for a slice, not an all-history sync claim.
+ID-only reads, cache-only reads and subscriptions without relays skip it.
+Unsupported relays, malformed frames, inventory limits and timeouts leave normal
+subscriptions running. Defaults limit the snapshot to 2048 records, missing IDs
+to 256, frames to 8192 bytes, rounds to 8 and total work to 3 seconds. At most two
+comparisons run at once, with one per relay and a five-minute relay/filter cooldown.
+`RuntimeReconciliationOptions` exposes these bounds and an optional NIP-11 fetch
+adapter; reconciliation is disabled unless explicitly configured.
+
 `NostrRuntime` owns one relay pool, batches concurrent interests as exact OR
 filters, and composes additional `RuntimeSource` implementations such as
 `FipsNostrPubsubEventSource`. Filters retain their author/recipient intersections;

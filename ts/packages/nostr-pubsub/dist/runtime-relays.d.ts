@@ -28,6 +28,7 @@ export declare class RuntimeRelays {
     private readonly options;
     private readonly pool;
     private readonly boundary;
+    private readonly reconciliation?;
     private relays;
     private readonly batches;
     private pending;

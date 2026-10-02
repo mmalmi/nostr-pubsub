@@ -97,11 +97,30 @@ export interface RuntimeMetrics {
     duplicateEvents: number;
     verificationFailures: number;
 }
+/** Optional, best-effort NIP-77 gap recovery alongside normal cache/live subscriptions.
+ * Inventory comparison never changes history-completion status or publishes events. */
+export interface RuntimeReconciliationOptions {
+    /** Bound each comparison to this many recent seconds within the original filter (default 86400). */
+    lookbackSeconds?: number;
+    /** Overall comparison and missing-event download deadline (default 3000 ms). */
+    timeoutMs?: number;
+    capabilityTimeoutMs?: number;
+    /** Minimum delay before retrying the same relay/filter (default 300000 ms). */
+    cooldownMs?: number;
+    maxConcurrent?: number;
+    maxRecords?: number;
+    maxNeedIds?: number;
+    maxFrameBytes?: number;
+    maxRounds?: number;
+    /** Override NIP-11 retrieval, e.g. in a worker with a controlled network adapter. */
+    fetch?: typeof globalThis.fetch;
+}
 export interface NostrRuntimeOptions {
     relays?: readonly string[];
     store?: RuntimeEventStore;
     sources?: readonly RuntimeSource[];
     websocketImplementation?: typeof WebSocket;
+    reconciliation?: RuntimeReconciliationOptions;
     verifyEvent?: NostrEventVerifier;
     signAuthEvent?: (relay: string, event: import('nostr-tools').EventTemplate) => Promise<NostrEvent>;
     batchWindowMs?: number;

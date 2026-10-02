@@ -13,6 +13,9 @@ importers:
       '@fips/tcp':
         specifier: https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz
         version: https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz
+      nostr-pubsub-reconcile:
+        specifier: workspace:^0.1.0
+        version: link:../nostr-pubsub-reconcile
     devDependencies:
       '@types/node':
         specifier: ^24.10.1
