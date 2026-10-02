@@ -2,6 +2,7 @@
 // reference implementation. See LICENSE. BigInt preserves the full u64 clock.
 import { compare, compareIds, INFINITY, key, Reader, Writer, type Bound } from './encoding.js';
 import { Storage } from './storage.js';
+import { validateFrame } from './validation.js';
 
 /** IDs must be cryptographic hashes, e.g. Nostr event IDs, not padded counters. */
 export interface ReconciliationRecord { timestamp: bigint; id: Uint8Array }
@@ -64,7 +65,10 @@ export class Reconciliation {
     this.enter();
     try {
       if (frame.length > this.frameBytes) throw new Error('frame exceeds byte limit');
-      const input = new Reader(frame.slice());
+      // Buffer.slice() aliases, so use the typed-array copy constructor.
+      const owned = new Uint8Array(frame);
+      validateFrame(owned);
+      const input = new Reader(owned);
       if (input.take(1)[0] !== 0x61) throw new Error('unsupported Negentropy version');
       const output = new Writer(); output.append([0x61]);
       const have: Uint8Array[] = [], need: Uint8Array[] = [];

@@ -78,3 +78,48 @@ it('rejects malformed frames, excessive history and conflicting IDs', async () =
     await expect(peer.respond(frame)).rejects.toThrow();
   }
 });
+
+it('owns Buffer record IDs and frames across asynchronous fingerprinting', async () => {
+  const original = Array.from({length: 1000}, (_, n) => record(n));
+  const mutable = [original[0]].map(r => ({...r, id: Buffer.from(r.id)}));
+  const filter = {since: 0n, until: 10_000_000_000n};
+  const snapshot = new Reconciliation(mutable, filter, {maxFrameBytes: 4096});
+  for (const r of mutable) r.id.fill(0);
+  const expected = new Reconciliation([original[0]], filter, {maxFrameBytes: 4096});
+  expect(await snapshot.initiate()).toEqual(await expected.initiate());
+
+  const query = await new Reconciliation(original.filter((_, n) => n % 2), filter, {maxFrameBytes: 4096}).initiate();
+  const fromBuffer = new Reconciliation(original, filter, {maxFrameBytes: 4096});
+  const queryBuffer = Buffer.from(query);
+  const response = fromBuffer.respond(queryBuffer);
+  queryBuffer.fill(0xff);
+  const reference = await new Reconciliation(original, filter, {maxFrameBytes: 4096}).respond(query);
+  expect(await response).toEqual(reference);
+});
+
+it('rejects a malformed tail even when an earlier range fills the response frame', async () => {
+  const records = Array.from({length:1000}, (_, n) => record(n));
+  const peer = new Reconciliation(records, {since:0n,until:10_000_000_000n}, {maxFrameBytes:4096});
+  await expect(peer.respond(new Uint8Array([0x61,0,0,2,0,0xff]))).rejects.toThrow('truncated');
+});
+
+it('reconciles distinct Buffer subarrays with nonzero offsets correctly', async () => {
+  const slab = Buffer.alloc(64 * 32);
+  for (let n = 0; n < 64; n++) Buffer.from(record(n).id).copy(slab, n * 32);
+  const records = Array.from({length:64}, (_, n) => ({
+    timestamp:BigInt(n % 32), id:slab.subarray(n * 32, (n + 1) * 32),
+  }));
+  const filter = {since:0n,until:31n};
+  const a = new Reconciliation(records.slice(0,32), filter);
+  const b = new Reconciliation(records.slice(32), filter);
+  let query = await a.initiate();
+  const have: string[] = [], need: string[] = [];
+  for (;;) {
+    const step = await a.reconcile(await b.respond(query));
+    have.push(...step.have.map(hex)); need.push(...step.need.map(hex));
+    if (!step.next) break;
+    query = step.next;
+  }
+  expect(have.sort()).toEqual(records.slice(0,32).map(r=>hex(r.id)).sort());
+  expect(need.sort()).toEqual(records.slice(32).map(r=>hex(r.id)).sort());
+});

@@ -9,7 +9,7 @@ export class Storage {
       if (record.timestamp < since || record.timestamp > until) continue;
       const id = key(record.id);
       if (unique.has(id) && unique.get(id)!.timestamp !== record.timestamp) throw new Error('conflicting timestamp');
-      unique.set(id, { timestamp: record.timestamp, id: record.id.slice() });
+      unique.set(id, { timestamp: record.timestamp, id: new Uint8Array(record.id) });
       if (unique.size > maxRecords) throw new Error('reconciliation window exceeds record limit');
     }
     this.items = [...unique.values()].sort(compare);
