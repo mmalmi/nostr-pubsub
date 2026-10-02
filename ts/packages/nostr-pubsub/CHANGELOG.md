@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.14 - 2026-10-02
+
+- Add opt-in NIP-77 gap recovery alongside immediate cache reads and ordinary
+  live relay requests, using the same socket and verified event admission.
+- Bound capability lookup, inventory, missing IDs, frames, rounds, concurrency
+  and deadlines; unsupported or failing relays retain ordinary subscriptions.
+- Preserve requested historical windows and cancellation without claiming
+  all-history sync or uploading local-only events.
+
 ## 0.5.13 - 2026-09-30
 
 - Default relay requests to at most 20 exact OR filters so ordinary batches work
