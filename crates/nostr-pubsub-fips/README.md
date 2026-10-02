@@ -78,6 +78,16 @@ expose every transport along an indirect path.
 The supplied roster must fit `max_connected_peers`; temporarily unreachable
 configured identities retain their slots until the application removes them.
 
+Endpoints participating in FIPS same-host rendezvous also discover local
+`nostr.pubsub/1` providers automatically, including providers reached through
+an anchor that runs no pubsub service. The exact service port must match.
+Explicit routed identities retain priority; discovered providers and direct
+peers share the remaining connection limit and application peer policy.
+Service withdrawal removes discovered candidates, and a provider's new startup
+epoch resets its stream. Transport-restricted clients use only eligible direct
+links, since an indirect route cannot prove every transport it traverses.
+Discovery does not grant access to application data or alter endpoint links.
+
 Live mesh delivery is inventory-first. For every new event, providers send a
 small `INV` containing every matching open `REQ` subscription ID for that peer.
 A receiver dedupes the event ID across all peers and all of its live

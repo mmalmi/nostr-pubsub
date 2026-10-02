@@ -1,4 +1,5 @@
 use super::*;
+use fips_core::discovery::local::LocalInstanceCapability;
 use std::sync::RwLock;
 
 #[derive(Default)]
@@ -11,6 +12,219 @@ impl MeshPeerPolicy for MutablePeerPolicy {
             Some(None) => None,
             None => Some(nostr_pubsub::MeshPeer::new(peer_id)),
         })
+    }
+}
+
+async fn wait_for_local_service(
+    endpoint: &FipsEndpoint,
+    npub: &str,
+    capability: &LocalInstanceCapability,
+    expected: bool,
+) {
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let advertised = endpoint
+                .local_instance_advertisements()
+                .unwrap()
+                .iter()
+                .any(|advert| advert.npub == npub && advert.capabilities.contains(capability));
+            if advertised == expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("local service advertisement should converge");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_service_selection_respects_capabilities_policy_capacity_and_restart() {
+    use super::routed::{
+        local_endpoint, private_rendezvous_addr, wait_for_local_link, wait_for_selected_peers,
+    };
+
+    let addr = private_rendezvous_addr();
+    let provider = local_endpoint(addr, [94; 32]).await;
+    let receiver = local_endpoint(addr, [95; 32]).await;
+    wait_for_local_link(&receiver, provider.npub()).await;
+    let policy = Arc::new(MutablePeerPolicy::default());
+    let options = FipsPubsubClientOptions {
+        max_connected_peers: 1,
+        fanout: 1,
+        ..Default::default()
+    };
+    let client = FipsPubsubClient::start_with_policies(
+        receiver.clone(),
+        options.clone(),
+        FipsPubsubClientPolicies {
+            peers: Some(policy.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_local_capability(&receiver, true).await;
+    for capability in [
+        LocalInstanceCapability::service("other.service/1", FIPS_NOSTR_PUBSUB_SERVICE_PORT),
+        LocalInstanceCapability::service(
+            FIPS_NOSTR_PUBSUB_CAPABILITY,
+            FIPS_NOSTR_PUBSUB_SERVICE_PORT + 1,
+        ),
+    ] {
+        let service = provider
+            .register_service_receiver_with_capability(capability.clone())
+            .await
+            .unwrap();
+        wait_for_local_service(&receiver, provider.npub(), &capability, true).await;
+        assert!(
+            client
+                .inner
+                .connected_peer_links()
+                .await
+                .unwrap()
+                .is_empty(),
+            "self and providers without the exact service must not be selected, even over a direct link"
+        );
+        drop(service);
+        wait_for_local_service(&receiver, provider.npub(), &capability, false).await;
+    }
+    let capability = LocalInstanceCapability::service(
+        FIPS_NOSTR_PUBSUB_CAPABILITY,
+        FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+    );
+    let service = provider
+        .register_service_receiver_with_capability(capability.clone())
+        .await
+        .unwrap();
+    let first = wait_for_selected_peers(&client, &[provider.npub()]).await;
+    policy
+        .0
+        .write()
+        .unwrap()
+        .insert(provider.npub().to_owned(), None);
+    wait_for_selected_peers(&client, &[]).await;
+    policy.0.write().unwrap().remove(provider.npub());
+    wait_for_selected_peers(&client, &[provider.npub()]).await;
+
+    // Explicit routes retain priority over discovery, and a provider known by
+    // all three routes still occupies exactly one slot.
+    client
+        .set_routed_peers(vec![provider.npub().to_owned()])
+        .unwrap();
+    let selected = wait_for_selected_peers(&client, &[provider.npub()]).await;
+    assert_eq!(selected[0].link_id, 0);
+    let explicit = Identity::from_secret_bytes(&[96; 32]).unwrap().npub();
+    client.set_routed_peers(vec![explicit.clone()]).unwrap();
+    wait_for_selected_peers(&client, &[&explicit]).await;
+    client.set_routed_peers(Vec::new()).unwrap();
+    wait_for_selected_peers(&client, &[provider.npub()]).await;
+
+    drop(service);
+    wait_for_local_service(&receiver, provider.npub(), &capability, false).await;
+    wait_for_selected_peers(&client, &[]).await;
+    assert!(
+        receiver
+            .peers()
+            .await
+            .unwrap()
+            .iter()
+            .any(|peer| peer.connected && peer.npub == provider.npub()),
+        "withdrawal must remove pubsub state without removing the application link"
+    );
+    provider.shutdown().await.unwrap();
+    let restarted = local_endpoint(addr, [94; 32]).await;
+    assert_eq!(restarted.npub(), provider.npub());
+    let service = restarted
+        .register_service_receiver_with_capability(capability)
+        .await
+        .unwrap();
+    wait_for_local_link(&receiver, restarted.npub()).await;
+    let selected = wait_for_selected_peers(&client, &[restarted.npub()]).await;
+    assert_ne!(
+        first[0].link_id, selected[0].link_id,
+        "a new provider process must reset its service stream"
+    );
+    client.shutdown().await;
+    wait_for_local_capability(&receiver, false).await;
+
+    let tcp_only = FipsPubsubClient::start_for_transport(receiver.clone(), options.clone(), "tcp")
+        .await
+        .unwrap();
+    assert!(
+        tcp_only
+            .inner
+            .connected_peer_links()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    tcp_only.shutdown().await;
+    wait_for_local_capability(&receiver, false).await;
+    let excludes_udp = FipsPubsubClient::start_excluding_peer_transports(
+        receiver.clone(),
+        options.clone(),
+        ["udp"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        excludes_udp
+            .inner
+            .connected_peer_links()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    excludes_udp.shutdown().await;
+    wait_for_local_capability(&receiver, false).await;
+    let udp_only = FipsPubsubClient::start_for_transport(receiver.clone(), options, "udp")
+        .await
+        .unwrap();
+    wait_for_selected_peers(&udp_only, &[restarted.npub()]).await;
+    udp_only.shutdown().await;
+    drop(service);
+    receiver.shutdown().await.unwrap();
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_service_indirect_selection_does_not_bypass_transport_exclusions() {
+    let addr = routed::private_rendezvous_addr();
+    let anchor = routed::local_endpoint(addr, [97; 32]).await;
+    let provider = routed::local_endpoint(addr, [98; 32]).await;
+    let receiver = routed::local_endpoint(addr, [99; 32]).await;
+    let capability = LocalInstanceCapability::service(
+        FIPS_NOSTR_PUBSUB_CAPABILITY,
+        FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+    );
+    let service = provider
+        .register_service_receiver_with_capability(capability.clone())
+        .await
+        .unwrap();
+    wait_for_local_service(&receiver, provider.npub(), &capability, true).await;
+    // Even when the first physical hop is allowed, the endpoint does not
+    // expose every transport along an indirect route.
+    let client = FipsPubsubClient::start_excluding_peer_transports(
+        receiver.clone(),
+        FipsPubsubClientOptions::default(),
+        ["nostr"],
+    )
+    .await
+    .unwrap();
+    assert!(
+        client
+            .inner
+            .connected_peer_links()
+            .await
+            .unwrap()
+            .iter()
+            .all(|peer| peer.npub != provider.npub())
+    );
+    client.shutdown().await;
+    drop(service);
+    for endpoint in [receiver, provider, anchor] {
+        endpoint.shutdown().await.unwrap();
     }
 }
 

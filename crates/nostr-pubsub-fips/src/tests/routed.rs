@@ -1,4 +1,184 @@
 use super::*;
+use std::net::SocketAddrV4;
+
+pub(super) fn private_rendezvous_addr() -> SocketAddrV4 {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("reserve private rendezvous address");
+    let SocketAddr::V4(addr) = socket.local_addr().unwrap() else {
+        panic!("expected IPv4 loopback address");
+    };
+    addr
+}
+
+pub(super) async fn local_endpoint(addr: SocketAddrV4, secret: [u8; 32]) -> Arc<FipsEndpoint> {
+    let mut config = Config::new();
+    config.node.identity = IdentityConfig {
+        nsec: Some(hex::encode(secret)),
+        persistent: false,
+    };
+    config.node.routing.mode = fips_core::config::RoutingMode::ReplyLearned;
+    config.node.discovery.local.rendezvous_addr = addr;
+    config.node.discovery.local.retry_interval_ms = 20;
+    config.node.discovery.nostr.enabled = false;
+    config.node.discovery.lan.enabled = false;
+    Arc::new(
+        Box::pin(
+            FipsEndpoint::builder()
+                .config(config)
+                .local_rendezvous()
+                .without_system_tun()
+                .bind(),
+        )
+        .await
+        .expect("bind local rendezvous endpoint"),
+    )
+}
+
+pub(super) async fn wait_for_local_link(endpoint: &FipsEndpoint, npub: &str) {
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(peer) = endpoint
+                .peers()
+                .await
+                .unwrap()
+                .iter()
+                .find(|peer| peer.connected && peer.npub == npub)
+            {
+                assert_eq!(peer.transport_type.as_deref(), Some("udp"));
+                assert!(
+                    peer.transport_addr
+                        .as_ref()
+                        .unwrap()
+                        .parse::<SocketAddr>()
+                        .unwrap()
+                        .ip()
+                        .is_loopback()
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("local rendezvous link should authenticate");
+}
+
+pub(super) async fn wait_for_selected_peers(
+    client: &FipsPubsubClient,
+    expected: &[&str],
+) -> Vec<ConnectedPeerLink> {
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let peers = client.inner.connected_peer_links().await.unwrap();
+            if peers
+                .iter()
+                .map(|peer| peer.npub.as_str())
+                .collect::<Vec<_>>()
+                == expected
+            {
+                return peers;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("selected local pubsub services should converge")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_service_peers_exchange_events_and_survive_anchor_exit_without_routed_peers() {
+    let addr = private_rendezvous_addr();
+    // This endpoint owns only the rendezvous socket and has no pubsub client.
+    let anchor = local_endpoint(addr, [91; 32]).await;
+    let a = local_endpoint(addr, [92; 32]).await;
+    let c = local_endpoint(addr, [93; 32]).await;
+    for endpoint in [&a, &c] {
+        wait_for_local_link(endpoint, anchor.npub()).await;
+    }
+    let options = FipsPubsubClientOptions {
+        max_connected_peers: 1,
+        fanout: 1,
+        ..Default::default()
+    };
+    assert!(options.routed_peers.is_empty());
+    let client_a = FipsPubsubClient::start(a.clone(), options.clone())
+        .await
+        .unwrap();
+    let mut client_c = FipsPubsubClient::start(c.clone(), options.clone())
+        .await
+        .unwrap();
+    let filter = Filter::new().kind(Kind::TextNote);
+    let mut subscription_a = client_a.subscribe(vec![filter.clone()]).await.unwrap();
+    let mut subscription_c = client_c.subscribe(vec![filter]).await.unwrap();
+    wait_for_selected_peers(&client_a, &[c.npub()]).await;
+    wait_for_selected_peers(&client_c, &[a.npub()]).await;
+    wait_for_peer_subscription_count(&client_a, 2).await;
+    wait_for_peer_subscription_count(&client_c, 2).await;
+
+    for phase in ["through anchor", "after automatic anchor replacement"] {
+        for (sender, receiver, direction) in [
+            (&client_a, &mut subscription_c, "A to C"),
+            (&client_c, &mut subscription_a, "C to A"),
+        ] {
+            let event = signed_note(&format!("{direction} {phase}"));
+            sender
+                .publish(event.clone(), EventSource::local_index("local-test"))
+                .await
+                .unwrap();
+            assert_eq!(
+                timeout(Duration::from_secs(10), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .event,
+                event,
+            );
+        }
+        if phase == "through anchor" {
+            for endpoint in [&a, &c] {
+                let peers = endpoint.peers().await.unwrap();
+                let connected = peers
+                    .iter()
+                    .filter(|peer| peer.connected)
+                    .collect::<Vec<_>>();
+                assert_eq!(connected.len(), 1, "leaf has only its physical anchor link");
+                assert_eq!(connected[0].npub, anchor.npub());
+            }
+            anchor.shutdown().await.unwrap();
+            wait_for_local_link(&a, c.npub()).await;
+            wait_for_local_link(&c, a.npub()).await;
+            // The same identities are now both direct and advertised. They
+            // still consume one slot, with the original subscriptions intact.
+            wait_for_selected_peers(&client_a, &[c.npub()]).await;
+            wait_for_selected_peers(&client_c, &[a.npub()]).await;
+            wait_for_peer_subscription_count(&client_a, 2).await;
+            wait_for_peer_subscription_count(&client_c, 2).await;
+        }
+    }
+    drop(subscription_c);
+    client_c.shutdown().await;
+    wait_for_selected_peers(&client_a, &[]).await;
+    client_c = FipsPubsubClient::start(c.clone(), options).await.unwrap();
+    wait_for_selected_peers(&client_a, &[c.npub()]).await;
+    wait_for_peer_subscription_count(&client_c, 2).await;
+    let event = signed_note("original subscription after local service restart");
+    client_c
+        .publish(event.clone(), EventSource::local_index("local-test"))
+        .await
+        .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(10), subscription_a.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .event,
+        event
+    );
+    drop(subscription_a);
+    client_a.shutdown().await;
+    client_c.shutdown().await;
+    a.shutdown().await.unwrap();
+    c.shutdown().await.unwrap();
+}
 
 #[test]
 fn routed_roster_is_validated_bounded_and_canonical() {

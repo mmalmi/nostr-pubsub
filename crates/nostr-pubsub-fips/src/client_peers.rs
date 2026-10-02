@@ -1,5 +1,6 @@
 use super::{ConnectedPeerLink, PeerIdentity, Result, invalid_option, poisoned, storage_error};
 use crate::client_inner::ClientInner;
+use crate::{FIPS_NOSTR_PUBSUB_CAPABILITY, FIPS_NOSTR_PUBSUB_SERVICE_PORT};
 use nostr_pubsub::{MeshPeerPolicy, select_mesh_peers};
 
 pub(super) fn select_policy_peers(
@@ -86,6 +87,26 @@ impl ClientInner {
             .peers()
             .await
             .map_err(|error| storage_error("snapshot FIPS peers", error))?;
+        let local_instances = self
+            .endpoint
+            .local_instance_advertisements()
+            .map_err(|error| storage_error("snapshot local FIPS services", error))?;
+        let local_services = local_instances
+            .iter()
+            .filter(|advert| {
+                advert.npub != self.endpoint.npub()
+                    && advert.capabilities.iter().any(|capability| {
+                        capability.name == FIPS_NOSTR_PUBSUB_CAPABILITY
+                            && capability.fsp_port == Some(FIPS_NOSTR_PUBSUB_SERVICE_PORT)
+                    })
+            })
+            .map(|advert| {
+                (
+                    advert.npub.as_str(),
+                    u64::from_be_bytes(advert.startup_epoch),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let routed = self
             .routed_peers
             .lock()
@@ -99,6 +120,27 @@ impl ClientInner {
                 link_id: 0,
             })
             .collect::<Vec<_>>();
+        // Routed discovery cannot prove which transports a path will use.
+        let unrestricted =
+            self.peer_transport.is_none() && self.excluded_peer_transports.is_empty();
+        let mut discovered = if unrestricted {
+            local_services
+                .iter()
+                .filter(|(npub, _)| {
+                    routed
+                        .binary_search_by(|peer| peer.as_str().cmp(npub))
+                        .is_err()
+                })
+                .map(|(npub, epoch)| ConnectedPeerLink {
+                    npub: (*npub).to_owned(),
+                    // An endpoint restart resets its stream, but changing its
+                    // intermediate anchor does not change the service identity.
+                    link_id: *epoch,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let mut direct = snapshot
             .into_iter()
             .filter(|peer| {
@@ -111,6 +153,10 @@ impl ClientInner {
                         .as_deref()
                         .is_none_or(|transport| !self.excluded_peer_transports.contains(transport))
                     && routed.binary_search(&peer.npub).is_err()
+                    // A known local provider must keep advertising this service.
+                    // Do not undo a withdrawal by falling back to its direct link.
+                    && (!local_instances.iter().any(|advert| advert.npub == peer.npub)
+                        || (!unrestricted && local_services.contains_key(peer.npub.as_str())))
             })
             .map(|peer| ConnectedPeerLink {
                 npub: peer.npub,
@@ -119,6 +165,7 @@ impl ClientInner {
             .collect::<Vec<_>>();
         direct.sort_unstable_by(|left, right| left.npub.cmp(&right.npub));
         direct.dedup_by(|left, right| left.npub == right.npub);
+        discovered.extend(direct);
         drop(routed);
         // Never change application-owned endpoint links to enforce pubsub bounds.
         peers = select_links(
@@ -129,7 +176,7 @@ impl ClientInner {
         )?;
         peers.extend(select_links(
             self.peer_policy.as_deref(),
-            direct,
+            discovered,
             self.options.max_connected_peers.saturating_sub(peers.len()),
             self.unknown_peer_reserve,
         )?);
