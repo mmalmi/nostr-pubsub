@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.5.13 - 2026-10-02
 
+- Accept a valid response from any already-requested provider after retrying
+  another peer, preserving its subscription and propagation budget.
+- Penalize expired requests only for providers that were actually asked.
+- Apply selected-peer and application admission policies before incoming TCP
+  handshakes can allocate connection state.
 - Serve bounded historical peer requests from an application-owned local event
   store without expanding the transport's memory cache or blocking live traffic.
 - Let fresh subscriptions refetch evicted bodies whose IDs are still remembered,
@@ -12,6 +17,12 @@
   the stopped client.
 - Preserve bounded event-ID observations across subscription close, so repeated
   answers already in flight do not penalize an honest provider.
+- Flush ready output after bounded command batches and received frames, avoiding
+  a wait for the next poll while preserving byte limits and backpressure.
+- Allow repeated event-store detachment after shutdown, and release replaced
+  stores outside internal locks.
+- Require FIPS core 0.4.90 and TCP endpoint 0.2.23 for handshake and lookup
+  recovery under load.
 
 ## 0.5.12 - 2026-10-01
 
