@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use fips_core::config::{PeerConfig, TransportInstances};
@@ -9,7 +9,7 @@ use fips_core::{
     register_sim_network, unregister_sim_network,
 };
 use nostr::{EventBuilder, EventId, Keys, Kind};
-use nostr_pubsub::{InvWantMeshOptions, VerifiedEvent};
+use nostr_pubsub::{InvWantMeshOptions, MeshPeer, MeshPeerPolicy, PubsubError, VerifiedEvent};
 use nostr_pubsub_fips::{
     FipsInvWantStream, FipsInvWantStreamOptions, FipsInvWantTcpDriver, FipsInvWantTcpDriverOptions,
 };
@@ -17,6 +17,69 @@ use tokio::time::timeout;
 
 const SERVICE_PORT: u16 = 39_121;
 static NEXT_NETWORK: AtomicU64 = AtomicU64::new(1);
+
+struct AdmissionPolicy(AtomicU8);
+
+impl MeshPeerPolicy for AdmissionPolicy {
+    fn select_mesh_peer(&self, peer_id: &str) -> nostr_pubsub::Result<Option<MeshPeer>> {
+        match self.0.load(Ordering::Relaxed) {
+            0 => Ok(None),
+            1 => Ok(Some(MeshPeer::new(peer_id))),
+            _ => Err(PubsubError::Storage("peer policy unavailable".to_string())),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_policy_rejects_syn_before_tcp_admission_and_recovers_when_allowed() {
+    let policy = Arc::new(AdmissionPolicy(AtomicU8::new(0)));
+    let mut pair = Box::pin(DriverPair::with_bob_policy(
+        driver_options(64, 256 * 1024),
+        64 * 1024,
+        Some(policy.clone()),
+    ))
+    .await;
+    pair.alice.connect_peer(pair.bob_identity, 0).await.unwrap();
+    let rejected = timeout(Duration::from_secs(5), pair.bob.receive(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rejected.fips_datagrams > 0);
+    assert_eq!(rejected.rejected_tcp_segments, rejected.fips_datagrams);
+    assert_eq!(rejected.connected_peers, 0);
+
+    policy.0.store(1, Ordering::Relaxed);
+    pair.alice.abort_peer(pair.bob_identity).await.unwrap();
+    pair.connect().await;
+    let event = signed_event("admitted after peer policy changes");
+    let event_id = event.as_event().id;
+    pair.alice.publish(event, 50).unwrap();
+    pair.pump_until(51, |outcome| outcome.bob_deliveries.contains(&event_id))
+        .await;
+    pair.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_policy_error_rejects_syn_and_remains_visible_to_the_caller() {
+    let policy = Arc::new(AdmissionPolicy(AtomicU8::new(2)));
+    let mut pair = Box::pin(DriverPair::with_bob_policy(
+        driver_options(64, 256 * 1024),
+        64 * 1024,
+        Some(policy),
+    ))
+    .await;
+    pair.alice.connect_peer(pair.bob_identity, 0).await.unwrap();
+    let result = timeout(Duration::from_secs(5), pair.bob.receive(1))
+        .await
+        .unwrap();
+    pair.shutdown().await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("peer policy unavailable")
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn split_large_and_coalesced_records_roundtrip_over_real_tcp_fips_endpoints() {
@@ -156,6 +219,14 @@ struct DriverPair {
 
 impl DriverPair {
     async fn new(options: FipsInvWantTcpDriverOptions, max_event_bytes: usize) -> Self {
+        Self::with_bob_policy(options, max_event_bytes, None).await
+    }
+
+    async fn with_bob_policy(
+        options: FipsInvWantTcpDriverOptions,
+        max_event_bytes: usize,
+        policy: Option<Arc<dyn MeshPeerPolicy>>,
+    ) -> Self {
         let network_id = format!(
             "nostr-pubsub-tcp-driver-{}",
             NEXT_NETWORK.fetch_add(1, Ordering::Relaxed)
@@ -206,14 +277,15 @@ impl DriverPair {
         )
         .await
         .expect("bind Alice driver");
-        let bob = FipsInvWantTcpDriver::bind(
-            Arc::clone(&endpoint_b),
-            stream(max_event_bytes),
-            options,
-            0xb0b0_e001,
-        )
-        .await
-        .expect("bind Bob driver");
+        let bob_stream = stream(max_event_bytes);
+        let bob_stream = match policy {
+            Some(policy) => bob_stream.with_peer_policy(policy),
+            None => bob_stream,
+        };
+        let bob =
+            FipsInvWantTcpDriver::bind(Arc::clone(&endpoint_b), bob_stream, options, 0xb0b0_e001)
+                .await
+                .expect("bind Bob driver");
         let bob_identity = PeerIdentity::from_npub(endpoint_b.npub()).expect("Bob identity");
         Self {
             network_id,

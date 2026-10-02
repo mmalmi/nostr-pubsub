@@ -183,9 +183,10 @@ impl WireTcpDriver {
     }
 
     pub async fn receive(&mut self, now_ms: u64) -> Result<WireTcpReport> {
+        let selected_peers = &self.selected_peers;
         let received = self
             .tcp
-            .receive_report(now_ms)
+            .receive_report_filtered(now_ms, |peer| selected_peers.contains_key(&peer.npub()))
             .await
             .map_err(|error| storage_error("receive TCP/FIPS Nostr pubsub batch", error))?;
         let mut report = self.drive_ready(now_ms).await?;

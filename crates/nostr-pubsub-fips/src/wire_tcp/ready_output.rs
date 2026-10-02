@@ -175,6 +175,57 @@ async fn endpoint(secret: u8, peers: Vec<PeerConfig>) -> Arc<FipsEndpoint> {
 }
 
 #[tokio::test]
+async fn unselected_peer_syn_is_rejected_before_tcp_admission() {
+    let remote = endpoint(124, Vec::new()).await;
+    let local = endpoint(
+        125,
+        vec![PeerConfig::new(
+            remote.npub(),
+            "udp",
+            remote.bound_udp_listen_addrs().await.unwrap()[0].to_string(),
+        )],
+    )
+    .await;
+    let options = || WireTcpOptions {
+        frame_capacity: 1024,
+        peer_capacity: 1,
+        queue_records_per_peer: 4,
+        queue_bytes_per_peer: 4096,
+        drive_io_bytes: 4096,
+        drive_frames: 4,
+    };
+    let mut sender = WireTcpDriver::bind(local.clone(), options(), 124)
+        .await
+        .unwrap();
+    let mut receiver = WireTcpDriver::bind(remote.clone(), options(), 125)
+        .await
+        .unwrap();
+    sender.select_peers([remote.npub().to_owned()].into()).await;
+    sender.connect_peer(remote.npub(), now_ms()).await.unwrap();
+    let report = timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                report = receiver.receive(now_ms()) => break report.unwrap(),
+                () = tokio::time::sleep(Duration::from_millis(10)) => {
+                    sender.poll(now_ms()).await.unwrap();
+                }
+            }
+        }
+    })
+    .await
+    .expect("unselected peer sends an authenticated TCP SYN");
+    let retained = receiver.connection_count();
+    drop(sender);
+    drop(receiver);
+    local.shutdown().await.unwrap();
+    remote.shutdown().await.unwrap();
+    assert!(report.tcp_datagrams > 0);
+    assert_eq!(report.rejected_tcp_datagrams, report.tcp_datagrams);
+    assert_eq!(retained, 0);
+    assert!(report.frames.is_empty());
+}
+
+#[tokio::test]
 async fn established_send_batch_flushes_without_a_sender_poll_and_counts_first_command() {
     let mut fixture = Fixture::new(4096, 4096).await;
     let first = fixture.send(0);

@@ -292,7 +292,7 @@ impl FipsInvWantStream {
             .map(|_| ())
     }
 
-    fn select_peer(&self, peer_id: &str) -> Result<Option<MeshPeer>> {
+    pub(super) fn select_peer(&self, peer_id: &str) -> Result<Option<MeshPeer>> {
         let selected = match self.peer_policy.as_ref() {
             Some(policy) => policy.select_mesh_peer(peer_id),
             None => Ok(Some(MeshPeer::new(peer_id))),

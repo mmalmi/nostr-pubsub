@@ -104,7 +104,7 @@ pub struct FipsInvWantTcpQueueSnapshot {
 pub struct FipsInvWantTcpDriveReport {
     /// FSP datagrams consumed by the TCP adapter in this turn.
     pub fips_datagrams: usize,
-    /// Malformed or over-capacity TCP segments isolated in this turn.
+    /// Malformed, over-capacity, or policy-rejected TCP segments in this turn.
     pub rejected_tcp_segments: usize,
     /// Reliable stream bytes delivered to the Inv/WANT layer.
     pub stream_bytes_read: usize,
@@ -213,11 +213,22 @@ impl FipsInvWantTcpDriver {
     }
 
     pub async fn receive(&mut self, now_ms: u64) -> Result<FipsInvWantTcpDriveReport> {
+        let stream = &self.stream;
+        let mut policy_error = None;
         let received = self
             .tcp
-            .receive_report(now_ms)
+            .receive_report_filtered(now_ms, |peer| match stream.select_peer(&peer.npub()) {
+                Ok(selected) => selected.is_some(),
+                Err(error) => {
+                    policy_error.get_or_insert(error);
+                    false
+                }
+            })
             .await
             .map_err(|error| storage_error("receive TCP/FIPS pubsub batch", error))?;
+        if let Some(error) = policy_error {
+            return Err(error);
+        }
         let mut report = FipsInvWantTcpDriveReport {
             fips_datagrams: received.datagrams,
             rejected_tcp_segments: received.rejected(),
