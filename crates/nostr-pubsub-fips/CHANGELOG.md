@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.14 - 2026-10-03
+
+- Use FIPS core 0.4.91 and TCP endpoint 0.2.24 so unanswered WebRTC offers
+  retry after an authenticated peer restart, retaining their original deadline.
+
 ## 0.5.13 - 2026-10-02
 
 - Accept a valid response from any already-requested provider after retrying
