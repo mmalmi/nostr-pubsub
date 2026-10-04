@@ -15,8 +15,24 @@ pub const DEFAULT_LIVE_DEDUP_EVENTS: usize = 4_096;
 
 pub type NostrEventHandler = Arc<dyn Fn(QueryEvent) + Send + Sync>;
 
+/// Local delivery health. `Lagged` means the bounded subscription could not
+/// admit every matching event. The caller must reconcile missed events against
+/// an authoritative history or event store. Reopening resumes live delivery,
+/// but cannot guarantee recovering an event after the replay cache evicts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionDeliveryStatus {
+    Active,
+    Closed,
+    Lagged,
+}
+
 #[async_trait]
 pub trait NostrEventSubscription: Send {
+    /// `None` means this provider does not report local delivery health.
+    fn delivery_status(&self) -> Option<SubscriptionDeliveryStatus> {
+        None
+    }
+
     async fn close(self: Box<Self>) -> Result<()>;
 }
 
@@ -84,6 +100,27 @@ impl RoutedLiveSubscription {
     #[must_use]
     pub fn route_ids(&self) -> &[String] {
         &self.route_ids
+    }
+
+    #[must_use]
+    pub fn delivery_status(&self) -> Option<SubscriptionDeliveryStatus> {
+        let mut known = None;
+        let mut unknown = false;
+        for subscription in &self.subscriptions {
+            match subscription.delivery_status() {
+                Some(SubscriptionDeliveryStatus::Lagged) => {
+                    return Some(SubscriptionDeliveryStatus::Lagged);
+                }
+                Some(SubscriptionDeliveryStatus::Active) => {
+                    known = Some(SubscriptionDeliveryStatus::Active);
+                }
+                Some(SubscriptionDeliveryStatus::Closed) => {
+                    known.get_or_insert(SubscriptionDeliveryStatus::Closed);
+                }
+                None => unknown = true,
+            }
+        }
+        if unknown { None } else { known }
     }
 
     pub async fn close(mut self) -> Result<()> {

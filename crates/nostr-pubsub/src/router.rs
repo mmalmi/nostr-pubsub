@@ -247,6 +247,12 @@ struct RouterEventSubscription {
 
 #[async_trait]
 impl NostrEventSubscription for RouterEventSubscription {
+    fn delivery_status(&self) -> Option<crate::SubscriptionDeliveryStatus> {
+        self.inner
+            .as_ref()
+            .and_then(RoutedLiveSubscription::delivery_status)
+    }
+
     async fn close(mut self: Box<Self>) -> Result<()> {
         if let Some(subscription) = self.inner.take() {
             subscription.close().await?;

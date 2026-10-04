@@ -2,6 +2,120 @@ use super::routed::{signed_note, udp_endpoint};
 use super::*;
 
 #[tokio::test]
+async fn full_local_subscription_recovers_requested_event_when_receiver_drains() {
+    let endpoint = udp_endpoint([119; 32], Vec::new()).await;
+    let options = FipsPubsubClientOptions {
+        max_replay_events: 1,
+        ..Default::default()
+    };
+    let client = FipsPubsubClient::start(endpoint.clone(), options)
+        .await
+        .unwrap();
+    let peer =
+        PeerIdentity::from_npub(&Identity::from_secret_bytes(&[120; 32]).unwrap().npub()).unwrap();
+    let first = signed_note("fills the local delivery queue");
+    let second = signed_note("arrives before the application drains it");
+    let mut subscription = client
+        .subscribe(vec![Filter::new().kind(Kind::TextNote)])
+        .await
+        .unwrap();
+    client
+        .inner
+        .lock_subscriptions()
+        .unwrap()
+        .get_mut(&subscription.key)
+        .unwrap()
+        .peers
+        .insert(peer.npub());
+    let id = subscription.id().clone();
+    let mut frames = Vec::new();
+    for event in [&first, &second] {
+        assert!(
+            client
+                .inner
+                .accept_inventory(
+                    &peer.npub(),
+                    crate::client_inner::InventoryAdvertisement {
+                        subscription_ids: vec![id.clone()],
+                        event_id: event.as_event().id,
+                        event_kind: event.as_event().kind.as_u16(),
+                        payload_bytes: event_payload_bytes(event).unwrap(),
+                        hop_limit: 2,
+                    },
+                )
+                .unwrap()
+                .is_some()
+        );
+        let frame = client
+            .inner
+            .codec
+            .encode_frame(&FipsPubsubWireMessage::deliver(id.clone(), event.clone()))
+            .unwrap();
+        // Exercise signed frame decoding and normal WANT completion at the
+        // authenticated peer boundary, without draining the application queue.
+        client.inner.handle_frame(peer, &frame).await;
+        frames.push(frame);
+    }
+    assert!(
+        client
+            .inner
+            .pending_wants
+            .lock()
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert_eq!(subscription.try_recv().unwrap().event, first);
+
+    // Receiver progress alone must recover an accepted body. It cannot depend
+    // on a duplicate from the network, another subscription, or reconnecting.
+    let recovered = timeout(Duration::from_millis(500), subscription.recv()).await;
+
+    // Positive control: the second signed body reached the client and remains
+    // replayable even when delivery to the original subscription was full.
+    let mut replay = client
+        .subscribe(vec![Filter::new().id(second.as_event().id)])
+        .await
+        .unwrap();
+    assert_eq!(replay.try_recv().unwrap().event, second);
+    replay.close();
+
+    client.inner.handle_frame(peer, &frames[1]).await;
+    let after_duplicate = subscription.try_recv();
+    client.inner.reset_peer_epoch(&peer.npub());
+    assert_ne!(client.inner.replay_frames_for_peer(&peer.npub()).len(), 0);
+    let inventory = client.inner.inventory_frame(vec![id], &second, 2).unwrap();
+    client.inner.handle_frame(peer, &inventory).await;
+    client.inner.handle_frame(peer, &frames[1]).await;
+    let after_reconnect = subscription.try_recv();
+
+    subscription.close();
+    client.shutdown().await;
+    endpoint.shutdown().await.unwrap();
+    eprintln!(
+        "local delivery recovery: cached_replay=true, receiver_drain={:?}, \
+         same_epoch_retry={after_duplicate:?}, next_epoch_retry={after_reconnect:?}",
+        recovered
+            .as_ref()
+            .map(|event| event.as_ref().map(|event| event.event.as_event().id))
+    );
+    assert!(
+        recovered.is_ok(),
+        "draining a full subscription must recover the requested event; \
+         after duplicate and peer-epoch replay: {after_reconnect:?}"
+    );
+    assert_eq!(recovered.unwrap().unwrap().event, second);
+    assert!(
+        matches!(after_duplicate, Err(mpsc::error::TryRecvError::Empty)),
+        "a duplicate answer must not deliver the recovered event twice"
+    );
+    assert!(
+        matches!(after_reconnect, Err(mpsc::error::TryRecvError::Empty)),
+        "retry and reconnect must not deliver the recovered event twice"
+    );
+}
+
+#[tokio::test]
 async fn delayed_requested_answer_keeps_propagation_after_provider_rotation() {
     check_delayed_requested_answer(false).await;
 }

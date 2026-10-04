@@ -4,14 +4,98 @@ use async_trait::async_trait;
 use nostr::{EventBuilder, Keys, Kind, Timestamp};
 use nostr_pubsub::{
     CAP_HASHTREE_FETCH, EventBus, EventPolicyContext, EventSource, InMemoryEventBus,
-    LiveRouteSource, NostrEventSubscriber, NostrPubsubRouter, PolicyDecision, PubsubPolicy,
-    PubsubProvider, PubsubProviderMode, QueryOptions, Result, RoutedLiveEvent, RoutedLiveOptions,
-    RoutedQueryOptions, RouterLiveSource, RouterPublishSource, RouterQuerySource,
-    SourcePolicyContext, SourceRoute, VerifiedEvent, subscribe_routes_with_policy,
+    LiveRouteSource, NostrEventHandler, NostrEventSubscriber, NostrEventSubscription,
+    NostrPubsubRouter, PolicyDecision, PubsubPolicy, PubsubProvider, PubsubProviderMode,
+    QueryOptions, Result, RoutedLiveEvent, RoutedLiveOptions, RoutedQueryOptions, RouterLiveSource,
+    RouterPublishSource, RouterQuerySource, SourcePolicyContext, SourceRoute,
+    SubscriptionDeliveryStatus, VerifiedEvent, subscribe_routes_with_policy,
 };
 
 #[derive(Default)]
 struct SourcePolicy;
+
+#[derive(Clone)]
+struct StatusSource(Arc<Mutex<Option<SubscriptionDeliveryStatus>>>);
+
+#[async_trait]
+impl NostrEventSubscriber for StatusSource {
+    async fn subscribe(
+        &self,
+        _filters: Vec<nostr::Filter>,
+        _handler: NostrEventHandler,
+    ) -> Result<Box<dyn NostrEventSubscription>> {
+        Ok(Box::new(self.clone()))
+    }
+}
+
+#[async_trait]
+impl NostrEventSubscription for StatusSource {
+    fn delivery_status(&self) -> Option<SubscriptionDeliveryStatus> {
+        *self.0.lock().unwrap()
+    }
+
+    async fn close(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn routed_and_router_delivery_status_preserve_unknown_and_lagged_sources() {
+    use SubscriptionDeliveryStatus::{Active, Closed, Lagged};
+    for (statuses, expected) in [
+        (vec![], None),
+        (vec![None], None),
+        (vec![Some(Closed), Some(Closed)], Some(Closed)),
+        (vec![Some(Closed), Some(Active)], Some(Active)),
+        (vec![Some(Active), None], None),
+        (vec![None, Some(Closed)], None),
+        (vec![None, Some(Lagged)], Some(Lagged)),
+        (vec![Some(Lagged), Some(Active)], Some(Lagged)),
+    ] {
+        let sources = statuses
+            .into_iter()
+            .map(|status| Arc::new(StatusSource(Arc::new(Mutex::new(status)))))
+            .collect::<Vec<_>>();
+        let selected_sources = sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                LiveRouteSource::new(
+                    SourceRoute::fips_peer_default(format!("peer-{index}")),
+                    source.as_ref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let live_subscription = subscribe_routes_with_policy(
+            &selected_sources,
+            vec![],
+            &SourcePolicy,
+            Arc::new(|_| {}),
+            RoutedLiveOptions::default(),
+        )
+        .await
+        .unwrap();
+        let mut router = NostrPubsubRouter::new(Arc::new(SourcePolicy));
+        for (index, source) in sources.iter().enumerate() {
+            router = router.with_live_source(RouterLiveSource::new(
+                SourceRoute::fips_peer_default(format!("peer-{index}")),
+                Arc::clone(source),
+            ));
+        }
+        let subscription = NostrEventSubscriber::subscribe(&router, vec![], Arc::new(|_| {}))
+            .await
+            .unwrap();
+        assert_eq!(live_subscription.delivery_status(), expected);
+        assert_eq!(subscription.delivery_status(), expected);
+        if let Some(first) = sources.first() {
+            *first.0.lock().unwrap() = Some(Lagged);
+            assert_eq!(live_subscription.delivery_status(), Some(Lagged));
+            assert_eq!(subscription.delivery_status(), Some(Lagged));
+        }
+        live_subscription.close().await.unwrap();
+        subscription.close().await.unwrap();
+    }
+}
 
 #[async_trait]
 impl PubsubPolicy for SourcePolicy {

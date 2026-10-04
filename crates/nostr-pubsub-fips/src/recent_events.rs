@@ -3,11 +3,12 @@ use std::sync::atomic::Ordering;
 
 use nostr::Filter;
 use nostr_pubsub::{
-    EventSource, PubsubPeerInterest, QueryEvent, SOURCE_PRIORITY_FIPS_ENDPOINT, VerifiedEvent,
+    EventSource, PubsubPeerInterest, QueryEvent, SOURCE_PRIORITY_FIPS_ENDPOINT,
+    SubscriptionDeliveryStatus, VerifiedEvent,
 };
 
 use crate::client_inner::{ActiveSubscription, InventoryAdvertisement};
-use crate::{FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS, PeerIdentity, event_payload_bytes};
+use crate::{PeerIdentity, event_payload_bytes};
 
 impl crate::ClientInner {
     pub(super) async fn handle_inv(
@@ -43,24 +44,26 @@ impl crate::ClientInner {
             let Ok(mut subscriptions) = self.lock_subscriptions() else {
                 return;
             };
+            let mut lagged = Vec::new();
             for id in inventory.subscription_ids {
                 let Some(active) = subscriptions.get_mut(&id.to_string()) else {
                     continue;
                 };
                 if active.fresh
                     && active.peers.contains(source_npub)
-                    && !active.recent_event_ids.contains(&event_id)
+                    && !active.delivery.contains(&event_id)
                     && PubsubPeerInterest::from_filters(&active.filters, &event)
                         == PubsubPeerInterest::Subscribed
                 {
-                    deliver_local(
-                        active,
-                        event.clone(),
-                        source.clone(),
-                        &event_id,
-                        FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS,
-                    );
+                    deliver_local(active, event.clone(), source.clone());
+                    if active.delivery.status() == SubscriptionDeliveryStatus::Lagged {
+                        lagged.push(id.to_string());
+                    }
                 }
+            }
+            drop(subscriptions);
+            for key in lagged {
+                self.close_subscription(&key);
             }
             return;
         }
@@ -97,7 +100,7 @@ impl crate::ClientInner {
                 let active = subscriptions.get(subscription_id)?;
                 (active.fresh
                     && active.peers.contains(peer)
-                    && !active.recent_event_ids.contains(&id)
+                    && !active.delivery.contains(&id)
                     && PubsubPeerInterest::from_filters(&active.filters, event)
                         == PubsubPeerInterest::Subscribed)
                     .then(|| nostr::SubscriptionId::new(subscription_id.clone()))
@@ -202,19 +205,10 @@ pub(super) fn deliver_local(
     active: &mut ActiveSubscription,
     event: VerifiedEvent,
     source: EventSource,
-    event_id: &str,
-    max_replay_events: usize,
-) {
-    active.recent_event_ids.insert(event_id.to_string());
-    active.recent_event_order.push_back(event_id.to_string());
-    while active.recent_event_order.len() > max_replay_events {
-        if let Some(oldest) = active.recent_event_order.pop_front() {
-            active.recent_event_ids.remove(&oldest);
-        }
-    }
-    let _ = active.sender.try_send(QueryEvent {
+) -> bool {
+    active.delivery.enqueue(QueryEvent {
         event,
         source,
         priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-    });
+    })
 }

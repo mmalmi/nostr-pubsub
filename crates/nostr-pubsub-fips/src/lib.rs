@@ -15,7 +15,8 @@ use nostr_pubsub::{
     NostrEventSubscriber, NostrEventSubscription, PolicyDecision, PublishReport, PubsubError,
     PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy, PubsubProvider,
     PubsubProviderMode, PubsubSubscriptionLimits, QueryEvent, QueryOptions, QueryReport, Result,
-    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, VerifiedEvent,
+    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionDeliveryStatus, SubscriptionId,
+    VerifiedEvent,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -26,6 +27,7 @@ mod client_lifecycle;
 mod client_peers;
 mod client_reputation;
 mod client_transport;
+mod local_delivery;
 mod peerfinding;
 mod pending_wants;
 mod provider_behavior;
@@ -96,7 +98,9 @@ pub struct FipsPubsubClientOptions {
     pub max_active_subscriptions: usize,
     /// Maximum Nostr filters carried by one subscription.
     pub max_filters_per_subscription: usize,
-    /// Replay limit, delivery queue capacity, and recent event ID bound.
+    /// Maximum events retained for replay, in each subscription's channel, and
+    /// in its pending FIFO. Exhausting both delivery bounds stops that wire
+    /// subscription and reports [`SubscriptionDeliveryStatus::Lagged`].
     pub max_replay_events: usize,
     /// Maximum TCP records drained from FIPS in one receive turn.
     pub receive_batch_size: usize,
@@ -636,8 +640,10 @@ fn forward_subscription(
     handler: NostrEventHandler,
 ) -> Box<dyn NostrEventSubscription> {
     let (close_sender, close_receiver) = oneshot::channel();
+    let delivery = Arc::clone(&subscription.delivery);
     let task = tokio::spawn(async move {
         tokio::select! {
+            biased;
             _ = close_receiver => {}
             () = async {
                 while let Some(event) = subscription.recv().await {
@@ -648,12 +654,14 @@ fn forward_subscription(
         subscription.close();
     });
     Box::new(FipsRoutedSubscription {
+        delivery,
         close_sender: Some(close_sender),
         task: Some(task),
     })
 }
 
 struct FipsRoutedSubscription {
+    delivery: Arc<local_delivery::LocalDelivery>,
     close_sender: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
@@ -669,12 +677,21 @@ impl Drop for FipsRoutedSubscription {
 
 #[async_trait]
 impl NostrEventSubscription for FipsRoutedSubscription {
+    fn delivery_status(&self) -> Option<SubscriptionDeliveryStatus> {
+        Some(self.delivery.status())
+    }
+
     async fn close(mut self: Box<Self>) -> Result<()> {
-        self.close_sender.take();
+        // Terminal delivery has stopped accepting bodies, but may still have
+        // an admitted FIFO to drain. Only an active caller explicitly cancels.
+        if self.delivery.status() == SubscriptionDeliveryStatus::Active {
+            self.close_sender.take();
+        }
         if let Some(task) = self.task.take() {
             task.await
                 .map_err(|error| PubsubError::Storage(format!("close FIPS live route: {error}")))?;
         }
+        self.close_sender.take();
         Ok(())
     }
 }
@@ -683,6 +700,7 @@ pub struct FipsPubsubSubscription {
     subscription_id: SubscriptionId,
     key: String,
     receiver: mpsc::Receiver<QueryEvent>,
+    delivery: Arc<local_delivery::LocalDelivery>,
     inner: Arc<ClientInner>,
     closed: bool,
 }
@@ -694,11 +712,26 @@ impl FipsPubsubSubscription {
     }
 
     pub async fn recv(&mut self) -> Option<QueryEvent> {
-        self.receiver.recv().await
+        self.delivery.refill();
+        let event = self.receiver.recv().await;
+        self.delivery.refill();
+        event
     }
 
     pub fn try_recv(&mut self) -> std::result::Result<QueryEvent, mpsc::error::TryRecvError> {
-        self.receiver.try_recv()
+        self.delivery.refill();
+        let event = self.receiver.try_recv();
+        self.delivery.refill();
+        event
+    }
+
+    /// `Lagged` remains visible after close or client shutdown; admitted bodies
+    /// still drain. The caller must reconcile missed events against an
+    /// authoritative history or event store. Reopening resumes live delivery,
+    /// but cannot guarantee recovering an event after the replay cache evicts it.
+    #[must_use]
+    pub fn delivery_status(&self) -> SubscriptionDeliveryStatus {
+        self.delivery.status()
     }
 
     pub fn close(mut self) {

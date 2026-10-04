@@ -2,12 +2,12 @@ use super::{
     Arc, AtomicU64, AtomicUsize, EventId, EventPolicyContext, EventSource, Filter, FipsEndpoint,
     FipsPubsubClientOptions, FipsPubsubSubscription, FipsPubsubWireCodec, FipsPubsubWireMessage,
     HashMap, HashSet, Mutex, Ordering, PeerIdentity, PolicyDecision, PublishReport, PubsubError,
-    PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy, QueryEvent, Result,
-    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionId, TransportCommand, VecDeque,
-    VerifiedEvent, bounded_delivery_targets, event_payload_bytes, mpsc, no_connected_peers, now_ms,
-    poisoned, publish_report, storage_error,
+    PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy, Result,
+    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionDeliveryStatus, SubscriptionId,
+    TransportCommand, VecDeque, VerifiedEvent, bounded_delivery_targets, event_payload_bytes, mpsc,
+    no_connected_peers, now_ms, poisoned, publish_report, storage_error,
 };
-use crate::FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS;
+use crate::local_delivery::LocalDelivery;
 use crate::pending_wants::{InventoryProvider, PendingInventory, PendingWants};
 use crate::provider_behavior::{ProviderBehavior, ProviderViolation};
 use crate::recent_events::{CachedEvent, RecentEvents, deliver_local};
@@ -122,6 +122,7 @@ impl ClientInner {
             filters.clone(),
         ))?;
         let (sender, receiver) = mpsc::channel(self.options.max_replay_events);
+        let delivery = Arc::new(LocalDelivery::new(sender, self.options.max_replay_events));
         let subscribed_peers = peers
             .iter()
             .map(|peer| peer.npub.clone())
@@ -141,9 +142,7 @@ impl ClientInner {
                     filters,
                     fresh: !replay_local,
                     peers: subscribed_peers,
-                    recent_event_ids: HashSet::new(),
-                    recent_event_order: VecDeque::new(),
-                    sender,
+                    delivery: Arc::clone(&delivery),
                 },
             );
         }
@@ -174,6 +173,7 @@ impl ClientInner {
             subscription_id,
             key,
             receiver,
+            delivery,
             inner: Arc::clone(self),
             closed: false,
         })
@@ -411,22 +411,27 @@ impl ClientInner {
             return false;
         };
         let mut delivered = false;
-        for active in subscriptions.values_mut() {
+        let mut lagged = Vec::new();
+        for (key, active) in subscriptions.iter_mut() {
             if !active.peers.contains(source_npub)
                 || PubsubPeerInterest::from_filters(&active.filters, event)
                     != PubsubPeerInterest::Subscribed
-                || active.recent_event_ids.contains(&event_id)
+                || active.delivery.contains(&event_id)
             {
                 continue;
             }
-            deliver_local(
+            delivered |= deliver_local(
                 active,
                 event.clone(),
                 EventSource::fips_endpoint(source_npub),
-                &event_id,
-                FIPS_NOSTR_PUBSUB_MAX_SEEN_EVENT_IDS,
             );
-            delivered = true;
+            if active.delivery.status() == SubscriptionDeliveryStatus::Lagged {
+                lagged.push(key.clone());
+            }
+        }
+        drop(subscriptions);
+        for key in lagged {
+            self.close_subscription(&key);
         }
         delivered
     }
@@ -577,14 +582,12 @@ impl ClientInner {
             {
                 continue;
             }
-            let event_id = cached.event.as_event().id.to_string();
-            deliver_local(
-                active,
-                cached.event,
-                cached.source,
-                &event_id,
-                self.options.max_replay_events,
-            );
+            deliver_local(active, cached.event, cached.source);
+        }
+        let lagged = active.delivery.status() == SubscriptionDeliveryStatus::Lagged;
+        drop(subscriptions);
+        if lagged {
+            self.close_subscription(key);
         }
         Ok(())
     }
@@ -710,7 +713,7 @@ impl ClientInner {
                     .is_some_and(|active| {
                         active.peers.contains(source_npub)
                             && (!already_seen || active.fresh)
-                            && !active.recent_event_ids.contains(&event_id_hex)
+                            && !active.delivery.contains(&event_id_hex)
                     })
             })
             .map(|subscription_id| subscription_id.to_string())
@@ -865,6 +868,7 @@ impl ClientInner {
         let Some(active) = active else {
             return;
         };
+        active.delivery.close();
         if let Ok(mut pending) = self.pending_wants.lock() {
             pending.remove_subscription(key);
         }
@@ -978,9 +982,7 @@ pub(super) struct ActiveSubscription {
     pub(super) filters: Vec<Filter>,
     pub(super) fresh: bool,
     pub(super) peers: HashSet<String>,
-    pub(super) recent_event_ids: HashSet<String>,
-    pub(super) recent_event_order: VecDeque<String>,
-    pub(super) sender: mpsc::Sender<QueryEvent>,
+    pub(super) delivery: Arc<LocalDelivery>,
 }
 
 pub(super) struct InventoryAdvertisement {

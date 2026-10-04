@@ -74,6 +74,7 @@ impl super::ClientInner {
             .map(|mut subscriptions| subscriptions.drain().collect::<Vec<_>>())
             .unwrap_or_default();
         for (key, subscription) in active {
+            subscription.delivery.close();
             self.send_close(&key, subscription.peers);
         }
         if let Ok(mut pending) = self.pending_wants.lock() {

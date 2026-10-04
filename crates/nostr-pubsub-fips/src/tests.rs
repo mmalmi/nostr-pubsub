@@ -24,6 +24,7 @@ use tokio::time::timeout;
 use super::*;
 use crate::client_transport::tcp_driver_poll_needed;
 
+mod delivery;
 mod late_events;
 mod managed_reputation;
 mod peer_policy;
