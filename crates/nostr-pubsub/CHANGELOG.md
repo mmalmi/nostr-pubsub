@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.16 - 2026-10-04
+
+- Expose optional live subscription delivery status through providers and the
+  shared router, preserving compatibility with providers that do not report it.
+- Report bounded delivery gaps explicitly so consumers can reconcile against
+  their authoritative event history before resuming live subscriptions.
+
 ## 0.1.15 - 2026-09-11
 
 - Reduce peer-selection allocations when all candidates fit and when reserving

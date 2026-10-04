@@ -85,3 +85,10 @@ Consumers expose exactly one `PubsubProvider`: `local-only` for a local peer
 provider, `direct-relay` for direct relay sockets, or `router` for an explicitly
 composed `NostrPubsubRouter`. Provider construction is application-owned; the
 core never opens or falls back to an unconfigured backend.
+
+Live subscriptions may expose `delivery_status()`. `None` means the provider
+does not report its delivery health. A reported `Lagged` state means events
+were missed: reconcile against an authoritative history or event store.
+Reopening resumes live delivery but cannot guarantee recovering an event
+after the provider's replay cache evicts it. Router subscriptions preserve a
+known gap even when another selected provider does not report its health.
