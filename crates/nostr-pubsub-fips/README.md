@@ -9,6 +9,9 @@ crate opens no Nostr relay socket.
 
 The Rust dependencies are published as `nvpn-fips-core`, `nvpn-fips-tcp`, and
 `nvpn-fips-tcp-endpoint`. Source imports abbreviate these names locally.
+Version `0.5.19` requires `nostr-pubsub` `0.1.16` or later for subscription
+delivery status and retains FIPS core `0.4.94`, TCP `0.2.3`, and TCP endpoint
+`0.2.29`.
 
 Every high-level client keeps one bounded default subscription for signed
 `fips-overlay-v1` kind `37195` endpoint adverts. It publishes its FIPS-generated

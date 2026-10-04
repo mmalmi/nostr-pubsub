@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.19 - 2026-10-04
+
+- Preserve signed events in a bounded FIFO when a local subscription channel
+  fills. Consumer progress refills the channel without losing pending events,
+  reordering newer arrivals, or replacing fresh source provenance with replay.
+- Expose sticky `Lagged` delivery status when both local delivery bounds fill,
+  stop only the affected wire subscription, and drain admitted events before
+  EOF. Callback subscriptions also finish draining when asynchronously closed
+  after lag or client shutdown.
+- Require `nostr-pubsub` 0.1.16 for delivery status. Callers must reconcile missed
+  events against authoritative history or an event store; reopening resumes live
+  delivery but cannot guarantee recovery after replay-cache eviction.
+- Keep FIPS core 0.4.94, TCP 0.2.3, TCP endpoint 0.2.29, and the pubsub wire
+  format unchanged.
+
 ## 0.5.18 - 2026-10-04
 
 - Require FIPS core 0.4.94 and TCP endpoint 0.2.29 for bounded concurrent
