@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.17 - 2026-10-04
+
+- Let public providers reserve bounded inbound connections for authenticated
+  routed clients, without requiring a preconfigured client roster. Admission
+  remains disabled by default.
+- Release all peer TCP state when a client disconnects or its idle lease
+  expires; replay local subscriptions when an inbound client becomes selected.
+- Use TCP 0.2.3 and TCP endpoint 0.2.28 for early datagram admission and complete
+  peer cleanup. FIPS core remains 0.4.93 and the pubsub wire format is unchanged.
+
 ## 0.5.14 - 2026-10-03
 
 - Use FIPS core 0.4.91 and TCP endpoint 0.2.24 so unanswered WebRTC offers

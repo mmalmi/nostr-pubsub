@@ -8,8 +8,7 @@ capability `nostr.pubsub/1`. There is no raw-FSP datagram fallback and this
 crate opens no Nostr relay socket.
 
 The Rust dependencies are published as `nvpn-fips-core`, `nvpn-fips-tcp`, and
-`nvpn-fips-tcp-endpoint`. Their dependency aliases preserve the established
-Rust API names.
+`nvpn-fips-tcp-endpoint`. Source imports abbreviate these names locally.
 
 Every high-level client keeps one bounded default subscription for signed
 `fips-overlay-v1` kind `37195` endpoint adverts. It publishes its FIPS-generated
