@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.18 - 2026-10-04
+
+- Require FIPS core 0.4.94 and TCP endpoint 0.2.29 for bounded concurrent
+  discovery. Keep the pubsub wire format, External peerfinding guard, and
+  opt-in inbound provider defaults unchanged.
+
 ## 0.5.17 - 2026-10-04
 
 - Let public providers reserve bounded inbound connections for authenticated
