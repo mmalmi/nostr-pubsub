@@ -81,6 +81,12 @@ pub struct FipsPubsubClientOptions {
     /// Transport-restricted clients cannot use routed peers because a routed
     /// path's underlying transports are not exposed by the endpoint API.
     pub routed_peers: Vec<String>,
+    /// Opt in to serving previously unknown authenticated routed clients.
+    /// Zero (the default) only admits selected peers. Inbound clients share
+    /// `max_connected_peers` and all queue/subscription limits. These slots are
+    /// reserved from the outgoing peer roster; idle leases
+    /// expire and never trigger outgoing connections or subscription replay.
+    pub max_inbound_routed_peers: usize,
     /// Maximum subscribed peers selected for one live inventory fanout.
     pub fanout: usize,
     /// Maximum simultaneous application streaming or query subscriptions.
@@ -105,6 +111,7 @@ impl Default for FipsPubsubClientOptions {
             max_frame_bytes: FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES,
             max_connected_peers: 64,
             routed_peers: Vec::new(),
+            max_inbound_routed_peers: 0,
             fanout: DEFAULT_INV_WANT_FANOUT,
             max_active_subscriptions: 64,
             max_filters_per_subscription: 4,
@@ -116,6 +123,21 @@ impl Default for FipsPubsubClientOptions {
 }
 
 impl FipsPubsubClientOptions {
+    fn outbound_peer_capacity(&self) -> usize {
+        self.max_connected_peers
+            .saturating_sub(self.max_inbound_routed_peers)
+    }
+
+    fn validate_peer_transport(&self, restricted: bool) -> Result<()> {
+        self.validate()?;
+        if self.max_inbound_routed_peers != 0 && restricted {
+            return Err(invalid_option(
+                "inbound routed peers require an unrestricted FIPS client",
+            ));
+        }
+        Ok(())
+    }
+
     fn subscription_limits(&self) -> PubsubSubscriptionLimits {
         PubsubSubscriptionLimits {
             max_peers: self.max_connected_peers,
@@ -133,6 +155,7 @@ impl FipsPubsubClientOptions {
         WireTcpOptions {
             frame_capacity: self.max_frame_bytes,
             peer_capacity: self.max_connected_peers,
+            inbound_peer_capacity: self.max_inbound_routed_peers,
             queue_records_per_peer: records,
             queue_bytes_per_peer: self
                 .max_frame_bytes
@@ -144,6 +167,11 @@ impl FipsPubsubClientOptions {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.max_inbound_routed_peers > self.max_connected_peers {
+            return Err(invalid_option(
+                "max_inbound_routed_peers cannot exceed max_connected_peers",
+            ));
+        }
         if self.query_timeout.is_zero() {
             return Err(invalid_option("query_timeout must be greater than zero"));
         }
@@ -377,12 +405,13 @@ impl FipsPubsubClient {
         excluded_peer_transports: HashSet<String>,
         policies: FipsPubsubClientPolicies,
     ) -> Result<Self> {
-        options.validate()?;
+        let restricted = peer_transport.is_some() || !excluded_peer_transports.is_empty();
+        options.validate_peer_transport(restricted)?;
         let routed_peers = client_peers::validate_routed_peers(
             options.routed_peers.clone(),
-            options.max_connected_peers,
+            options.outbound_peer_capacity(),
             endpoint.npub(),
-            peer_transport.is_some() || !excluded_peer_transports.is_empty(),
+            restricted,
         )?;
         let codec = FipsPubsubWireCodec::new(options.max_frame_bytes)?;
         let subscription_capacity = options.max_active_subscriptions.saturating_add(1);
@@ -488,7 +517,7 @@ impl FipsPubsubClient {
     pub fn set_routed_peers(&self, peers: Vec<String>) -> Result<()> {
         let peers = client_peers::validate_routed_peers(
             peers,
-            self.inner.options.max_connected_peers,
+            self.inner.options.outbound_peer_capacity(),
             self.inner.endpoint.npub(),
             self.inner.peer_transport.is_some() || !self.inner.excluded_peer_transports.is_empty(),
         )?;

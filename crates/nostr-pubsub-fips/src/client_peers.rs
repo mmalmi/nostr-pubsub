@@ -171,13 +171,15 @@ impl ClientInner {
         peers = select_links(
             self.peer_policy.as_deref(),
             peers,
-            self.options.max_connected_peers,
+            self.options.outbound_peer_capacity(),
             0,
         )?;
         peers.extend(select_links(
             self.peer_policy.as_deref(),
             discovered,
-            self.options.max_connected_peers.saturating_sub(peers.len()),
+            self.options
+                .outbound_peer_capacity()
+                .saturating_sub(peers.len()),
             self.unknown_peer_reserve,
         )?);
         Ok(peers)

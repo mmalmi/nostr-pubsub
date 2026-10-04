@@ -44,6 +44,7 @@ impl Fixture {
         let options = || WireTcpOptions {
             frame_capacity: 1024,
             peer_capacity: 1,
+            inbound_peer_capacity: 0,
             queue_records_per_peer: 8,
             queue_bytes_per_peer: capacity,
             drive_io_bytes: budget,
@@ -174,6 +175,159 @@ async fn endpoint(secret: u8, peers: Vec<PeerConfig>) -> Arc<FipsEndpoint> {
     )
 }
 
+// Receive authenticated TCP input without accepting streams yet, so a single
+// driver turn can observe a new stream with both its request and remote FIN.
+async fn receive_before_drive(driver: &mut WireTcpDriver) -> usize {
+    let selected = &driver.selected_peers;
+    let options = &driver.options;
+    let inbound = &mut driver.inbound;
+    timeout(
+        Duration::from_secs(5),
+        driver
+            .tcp
+            .receive_report_filtered_datagrams(now_ms(), |peer, bytes| {
+                inbound.admit(peer, bytes, selected, options, Instant::now())
+            }),
+    )
+    .await
+    .expect("authenticated TCP input")
+    .unwrap()
+    .datagrams
+}
+
+async fn raw_client(endpoint: &Arc<FipsEndpoint>, seed: u64) -> FipsTcpEndpoint {
+    timeout(Duration::from_secs(5), async {
+        while !endpoint
+            .peers()
+            .await
+            .unwrap()
+            .iter()
+            .any(|peer| peer.connected)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    FipsTcpEndpoint::bind(
+        endpoint.clone(),
+        FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+        TcpConfig::default(),
+        seed,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn public_client_close_reclaims_hidden_syn_and_same_turn_request_state() {
+    let provider = endpoint(130, Vec::new()).await;
+    let isolated = endpoint(141, Vec::new()).await;
+    let context = FipsPubsubClient::start(isolated.clone(), FipsPubsubClientOptions::default())
+        .await
+        .unwrap();
+    let address = provider.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+    let options = || WireTcpOptions {
+        frame_capacity: 1024,
+        peer_capacity: 2,
+        inbound_peer_capacity: 1,
+        queue_records_per_peer: 4,
+        queue_bytes_per_peer: 4096,
+        drive_io_bytes: 4096,
+        drive_frames: 4,
+    };
+    let mut driver = WireTcpDriver::bind(provider.clone(), options(), 130)
+        .await
+        .unwrap();
+    let provider_peer = PeerIdentity::from_npub(provider.npub()).unwrap();
+    // A configured peer remains admitted while the public slot is recycled.
+    let configured = endpoint(131, vec![PeerConfig::new(provider.npub(), "udp", &address)]).await;
+    driver
+        .select_peers([configured.npub().to_owned()].into())
+        .await;
+    let mut configured_tcp = raw_client(&configured, 131).await;
+
+    for byte in 132..140 {
+        let client = endpoint(
+            byte,
+            vec![PeerConfig::new(provider.npub(), "udp", &address)],
+        )
+        .await;
+        let mut tcp = raw_client(&client, byte.into()).await;
+        let id = tcp.connect(provider_peer, now_ms()).await.unwrap();
+        receive_before_drive(&mut driver).await; // SYN
+        timeout(Duration::from_secs(5), tcp.receive(now_ms()))
+            .await
+            .unwrap()
+            .unwrap(); // SYN-ACK
+        receive_before_drive(&mut driver).await; // ACK, not yet accepted by the driver
+        assert_eq!(tcp.state(id), Some(State::Established));
+
+        // A second connection deliberately remains hidden in SYN-RECEIVED.
+        let hidden = tcp.connect(provider_peer, now_ms()).await.unwrap();
+        receive_before_drive(&mut driver).await;
+        assert_eq!(tcp.state(hidden), Some(State::SynSent));
+        assert_eq!(driver.inbound.len(), 1);
+        let frame = br#"["REQ","closed-client",{"kinds":[1]}]"#;
+        let record = encode_record(frame).unwrap();
+        assert_eq!(
+            tcp.write(id, &record, now_ms()).await.unwrap(),
+            record.len()
+        );
+        tcp.close(id, now_ms()).await.unwrap();
+        let mut count = 0;
+        while count < 2 {
+            count += receive_before_drive(&mut driver).await;
+        }
+        let report = driver.drive_ready(now_ms()).await.unwrap();
+        assert_eq!(report.frames.len(), 1);
+        assert_eq!(report.newly_connected.len(), 1);
+        assert_eq!(report.disconnected.len(), 1);
+        assert_eq!(report.disconnected[0].npub(), client.npub());
+        assert_eq!(driver.inbound.len(), 0);
+        assert!(
+            !driver
+                .connections
+                .values()
+                .any(|connection| connection.peer == client.npub())
+        );
+        assert!(!driver.active.contains_key(client.npub()));
+        assert!(!driver.inputs.contains_key(client.npub()));
+        assert!(!driver.queues.contains_key(client.npub()));
+        let peer = PeerIdentity::from_npub(client.npub()).unwrap();
+        context.inner.handle_frame(peer, frame).await;
+        assert_eq!(context.peer_subscription_count().unwrap(), 1);
+        let received = context.delivery_snapshot().req_frames_received;
+        crate::client_transport::process_wire_report(&context.inner, &mut driver, report).await;
+        assert_eq!(context.peer_subscription_count().unwrap(), 0);
+        assert_eq!(context.delivery_snapshot().req_frames_received, received);
+
+        if byte == 132 {
+            let id = configured_tcp
+                .connect(provider_peer, now_ms())
+                .await
+                .unwrap();
+            receive_before_drive(&mut driver).await;
+            timeout(Duration::from_secs(5), configured_tcp.receive(now_ms()))
+                .await
+                .unwrap()
+                .unwrap();
+            driver.receive(now_ms()).await.unwrap();
+            assert_eq!(configured_tcp.state(id), Some(State::Established));
+        }
+        assert!(driver.active.contains_key(configured.npub()));
+        assert!(driver.selected_peers.contains_key(configured.npub()));
+        drop(tcp);
+        client.shutdown().await.unwrap();
+    }
+    drop(configured_tcp);
+    drop(driver);
+    context.shutdown().await;
+    isolated.shutdown().await.unwrap();
+    configured.shutdown().await.unwrap();
+    provider.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn unselected_peer_syn_is_rejected_before_tcp_admission() {
     let remote = endpoint(124, Vec::new()).await;
@@ -189,6 +343,7 @@ async fn unselected_peer_syn_is_rejected_before_tcp_admission() {
     let options = || WireTcpOptions {
         frame_capacity: 1024,
         peer_capacity: 1,
+        inbound_peer_capacity: 0,
         queue_records_per_peer: 4,
         queue_bytes_per_peer: 4096,
         drive_io_bytes: 4096,

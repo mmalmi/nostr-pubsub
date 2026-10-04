@@ -75,8 +75,24 @@ The roster provides identities, not physical addresses or a separate routing
 protocol; the endpoint still needs a working route. Restricting peer transports
 and routed identities cannot be combined because the endpoint API does not
 expose every transport along an indirect path.
-The supplied roster must fit `max_connected_peers`; temporarily unreachable
+The supplied roster must fit the outgoing connection capacity; temporarily unreachable
 configured identities retain their slots until the application removes them.
+
+Public providers can opt in with `max_inbound_routed_peers` (default `0`).
+Those slots are reserved within `max_connected_peers`, leaving the remainder
+for the selected outgoing roster. Only an authenticated initial service SYN
+can reserve a public slot. Inbound clients receive requested events without
+receiving the provider's own subscriptions. Disconnects release all TCP and
+pubsub state for that identity; abandoned clients expire after 30 idle seconds.
+Promoting an inbound client into the selected roster reconnects it and replays
+local subscriptions. This option cannot be combined with transport restrictions.
+
+The routed-provider test also supports a separate, unchanged `0.5.16` client:
+build `tests/previous-client/Cargo.toml`, then run
+`public_provider_serves_unknown_late_client_through_transit` with
+`NOSTR_PUBSUB_PREVIOUS_CLIENT` set to that fixture's absolute executable path.
+Both the default closed provider and the opt-in provider run over real UDP
+through a transit endpoint with no pubsub service.
 
 Endpoints participating in FIPS same-host rendezvous also discover local
 `nostr.pubsub/1` providers automatically, including providers reached through

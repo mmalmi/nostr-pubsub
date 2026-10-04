@@ -134,9 +134,12 @@ async fn sync_transport_peers(
         .filter(|(npub, link_id)| next_links.get(*npub) != Some(*link_id))
         .filter_map(|(npub, _)| PeerIdentity::from_npub(npub).ok())
         .collect::<Vec<_>>();
-    driver
+    for peer in driver
         .select_peers(next_links.keys().cloned().collect())
-        .await;
+        .await
+    {
+        forget_peer_state(inner, &peer.npub());
+    }
     for peer in changed {
         if next_links.contains_key(&peer.npub()) {
             let _ = driver.abort_peer(peer).await;
@@ -167,7 +170,7 @@ fn forget_peer_state(inner: &ClientInner, peer_npub: &str) {
     }
 }
 
-async fn process_wire_report(
+pub(super) async fn process_wire_report(
     inner: &ClientInner,
     driver: &mut WireTcpDriver,
     report: WireTcpReport,
@@ -184,8 +187,19 @@ async fn process_wire_report(
     inner
         .connected_transport_peers
         .store(report.connected_peers, Ordering::Relaxed);
+    let disconnected = report
+        .disconnected
+        .iter()
+        .map(PeerIdentity::npub)
+        .collect::<HashSet<_>>();
+    for peer in report.disconnected {
+        forget_peer_state(inner, &peer.npub());
+    }
     let mut cooled_peers = HashSet::new();
     for peer in report.newly_connected {
+        if disconnected.contains(&peer.npub()) {
+            continue;
+        }
         if inner.peer_is_in_cooldown(&peer.npub(), now_ms()) {
             cooled_peers.insert(peer.npub());
             forget_peer_state(inner, &peer.npub());
@@ -193,11 +207,16 @@ async fn process_wire_report(
             continue;
         }
         inner.reset_peer_epoch(&peer.npub());
-        for frame in inner.replay_frames_for_peer(&peer.npub()) {
-            let _ = driver.queue_frame(peer, &frame);
+        if !driver.is_inbound(&peer.npub()) {
+            for frame in inner.replay_frames_for_peer(&peer.npub()) {
+                let _ = driver.queue_frame(peer, &frame);
+            }
         }
     }
     for (peer, frame) in report.frames {
+        if disconnected.contains(&peer.npub()) {
+            continue;
+        }
         if cooled_peers.contains(&peer.npub()) || inner.peer_is_in_cooldown(&peer.npub(), now_ms())
         {
             if cooled_peers.insert(peer.npub()) {

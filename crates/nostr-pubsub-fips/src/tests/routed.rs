@@ -350,3 +350,155 @@ pub(super) fn signed_note(content: &str) -> VerifiedEvent {
     )
     .unwrap()
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_provider_serves_unknown_late_client_through_transit() {
+    for public in [false, true] {
+        let transit = udp_endpoint([111; 32], Vec::new()).await;
+        let address = transit.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+        let provider_endpoint = udp_endpoint(
+            [112; 32],
+            vec![PeerConfig::new(transit.npub(), "udp", &address)],
+        )
+        .await;
+        let provider = FipsPubsubClient::start(
+            provider_endpoint.clone(),
+            FipsPubsubClientOptions {
+                max_inbound_routed_peers: usize::from(public),
+                max_connected_peers: 2,
+                fanout: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let event = signed_note("retained before a previously unknown reader starts");
+        let store = Arc::new(InMemoryEventBus::default());
+        store
+            .publish(event.clone(), EventSource::local_index("public-test"))
+            .await
+            .unwrap();
+        provider.set_replay_source(Some(store)).unwrap();
+        if let Ok(binary) = std::env::var("NOSTR_PUBSUB_PREVIOUS_CLIENT") {
+            check_previous_client(
+                binary,
+                &transit,
+                &address,
+                &provider_endpoint,
+                public,
+                &event,
+            )
+            .await;
+            provider.shutdown().await;
+            provider_endpoint.shutdown().await.unwrap();
+            transit.shutdown().await.unwrap();
+            continue;
+        }
+        let endpoint = udp_endpoint(
+            [113; 32],
+            vec![PeerConfig::new(transit.npub(), "udp", &address)],
+        )
+        .await;
+        let reader = FipsPubsubClient::start(
+            endpoint.clone(),
+            FipsPubsubClientOptions {
+                routed_peers: vec![provider_endpoint.npub().to_owned()],
+                max_connected_peers: 1,
+                fanout: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut subscription = reader
+            .subscribe(vec![Filter::new().kind(Kind::TextNote)])
+            .await
+            .unwrap();
+        let result = timeout(
+            Duration::from_secs(if public { 15 } else { 2 }),
+            subscription.recv(),
+        )
+        .await;
+        if public {
+            assert_eq!(
+                result.unwrap().unwrap().event.as_event().id,
+                event.as_event().id
+            );
+            assert!(provider.delivery_snapshot().req_frames_received >= 2);
+            assert_eq!(
+                reader.delivery_snapshot().req_frames_received,
+                0,
+                "public readers must not receive provider subscriptions"
+            );
+            assert!(provider.inner.routed_peers.lock().unwrap().is_empty());
+            check_inbound_promotion(&reader, &provider, endpoint.npub()).await;
+        } else {
+            assert!(result.is_err(), "default provider must remain closed");
+        }
+        reader.shutdown().await;
+        provider.shutdown().await;
+        endpoint.shutdown().await.unwrap();
+        provider_endpoint.shutdown().await.unwrap();
+        transit.shutdown().await.unwrap();
+    }
+}
+
+async fn check_inbound_promotion(
+    reader: &FipsPubsubClient,
+    provider: &FipsPubsubClient,
+    peer: &str,
+) {
+    let client_event = signed_note("already cached before inbound reader becomes selected");
+    reader
+        .publish(
+            client_event.clone(),
+            EventSource::local_index("promotion-test"),
+        )
+        .await
+        .unwrap();
+    let mut promoted = provider
+        .subscribe(vec![Filter::new().id(client_event.as_event().id)])
+        .await
+        .unwrap();
+    provider.set_routed_peers(vec![peer.to_owned()]).unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(15), promoted.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .event,
+        client_event
+    );
+}
+
+async fn check_previous_client(
+    binary: String,
+    transit: &FipsEndpoint,
+    address: &str,
+    provider: &FipsEndpoint,
+    public: bool,
+    event: &VerifiedEvent,
+) {
+    let output = timeout(
+        Duration::from_secs(20),
+        tokio::process::Command::new(binary)
+            .args([transit.npub(), address, provider.npub()])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        output.status.success(),
+        public,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if public {
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            event.as_event().id.to_string()
+        );
+    }
+}

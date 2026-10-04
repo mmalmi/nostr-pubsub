@@ -14,11 +14,15 @@ const IO_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_READY_INPUT_TURNS: usize = 16;
 const SERVICE_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
+mod inbound;
+use inbound::InboundPeers;
+
 type ReceivedFrames = Vec<(PeerIdentity, Vec<u8>)>;
 
 pub(crate) struct WireTcpOptions {
     pub frame_capacity: usize,
     pub peer_capacity: usize,
+    pub inbound_peer_capacity: usize,
     pub queue_records_per_peer: usize,
     pub queue_bytes_per_peer: usize,
     pub drive_io_bytes: usize,
@@ -28,6 +32,7 @@ pub(crate) struct WireTcpOptions {
 pub(crate) struct WireTcpReport {
     pub frames: Vec<(PeerIdentity, Vec<u8>)>,
     pub newly_connected: Vec<PeerIdentity>,
+    pub disconnected: Vec<PeerIdentity>,
     pub connected_peers: usize,
     pub tcp_datagrams: usize,
     pub rejected_tcp_datagrams: usize,
@@ -40,6 +45,7 @@ pub(crate) struct WireTcpDriver {
     // Next outbound attempt per selected peer; failed/short-lived services must
     // not turn the polling timer or application sends into a handshake loop.
     selected_peers: BTreeMap<String, Option<Instant>>,
+    inbound: InboundPeers,
     tcp: FipsTcpEndpoint,
     options: WireTcpOptions,
     connections: HashMap<ConnectionId, TrackedConnection>,
@@ -76,6 +82,7 @@ impl WireTcpDriver {
         Ok(Self {
             local_npub,
             selected_peers: BTreeMap::new(),
+            inbound: InboundPeers::default(),
             tcp,
             options,
             connections: HashMap::new(),
@@ -97,7 +104,11 @@ impl WireTcpDriver {
         })
     }
 
-    pub async fn select_peers(&mut self, peers: BTreeSet<String>) {
+    pub async fn select_peers(&mut self, peers: BTreeSet<String>) -> Vec<PeerIdentity> {
+        let retired = self.inbound.retire(&peers, Instant::now());
+        for peer in &retired {
+            let _ = self.forget_peer(*peer).await;
+        }
         let removed = self
             .selected_peers
             .keys()
@@ -113,12 +124,20 @@ impl WireTcpDriver {
                 let _ = self.forget_peer(peer).await;
             }
         }
+        retired
+    }
+
+    pub fn is_inbound(&self, peer: &str) -> bool {
+        self.inbound.contains(peer)
     }
 
     pub async fn connect_peer(&mut self, peer_npub: &str, now_ms: u64) -> Result<()> {
         self.ensure_peer_selected(peer_npub)?;
         if self.has_peer_connection(peer_npub) {
             return Ok(());
+        }
+        if self.is_inbound(peer_npub) {
+            return Err(storage("Inbound client has no live TCP connection"));
         }
         if self.selected_peers[peer_npub].is_some_and(|retry_at| Instant::now() < retry_at) {
             return Ok(());
@@ -184,9 +203,13 @@ impl WireTcpDriver {
 
     pub async fn receive(&mut self, now_ms: u64) -> Result<WireTcpReport> {
         let selected_peers = &self.selected_peers;
+        let inbound = &mut self.inbound;
+        let options = &self.options;
         let received = self
             .tcp
-            .receive_report_filtered(now_ms, |peer| selected_peers.contains_key(&peer.npub()))
+            .receive_report_filtered_datagrams(now_ms, |peer, bytes| {
+                inbound.admit(peer, bytes, selected_peers, options, Instant::now())
+            })
             .await
             .map_err(|error| storage_error("receive TCP/FIPS Nostr pubsub batch", error))?;
         let mut report = self.drive_ready(now_ms).await?;
@@ -205,39 +228,41 @@ impl WireTcpDriver {
 
     pub async fn abort_peer(&mut self, peer: PeerIdentity) -> Result<()> {
         let peer_npub = peer.npub();
-        let ids = self
-            .connections
-            .iter()
-            .filter_map(|(id, connection)| (connection.peer == peer_npub).then_some(*id))
-            .collect::<Vec<_>>();
-        let mut last_error = None;
-        for id in ids {
-            if self.tcp.state(id).is_some()
-                && let Err(error) = self.tcp.abort(id).await
-            {
-                last_error = Some(storage_error("abort TCP/FIPS Nostr pubsub peer", error));
-            }
-            self.connections.remove(&id);
-        }
+        // Includes SYN-RECEIVED tuples not yet returned by accept(). Otherwise
+        // releasing an inbound lease could hide TCP state from our peer cap.
+        let result = self
+            .tcp
+            .abort_peer(peer)
+            .await
+            .map_err(|error| storage_error("abort TCP/FIPS Nostr pubsub peer", error));
+        self.connections
+            .retain(|_, connection| connection.peer != peer_npub);
         self.active.remove(&peer_npub);
         self.inputs.remove(&peer_npub);
         if let Some(queue) = self.queues.get_mut(&peer_npub) {
             queue.restart();
         }
-        last_error.map_or(Ok(()), Err)
+        result.map(|_| ())
     }
 
     pub async fn forget_peer(&mut self, peer: PeerIdentity) -> Result<()> {
         self.selected_peers.remove(&peer.npub());
+        self.inbound.remove(&peer.npub());
         self.queues.remove(&peer.npub());
         self.abort_peer(peer).await
     }
 
     pub(crate) fn connection_count(&self) -> usize {
-        self.connections.len()
+        self.connections.len().max(self.inbound.len())
     }
 
     async fn drive_ready(&mut self, now_ms: u64) -> Result<WireTcpReport> {
+        let previous_inbound = self
+            .active
+            .keys()
+            .filter(|peer| self.is_inbound(peer))
+            .cloned()
+            .collect::<Vec<_>>();
         self.accept_connections().await?;
         let newly_connected = self.refresh_active().await?;
         let (frames, rejected_frames) = self.read_active(now_ms).await?;
@@ -248,9 +273,23 @@ impl WireTcpDriver {
         newly_connected.extend(more_connected);
         newly_connected.sort_unstable_by_key(PeerIdentity::npub);
         newly_connected.dedup_by_key(|peer| peer.npub());
+        let disconnected = previous_inbound
+            .into_iter()
+            .chain(newly_connected.iter().map(PeerIdentity::npub))
+            .filter(|peer| self.is_inbound(peer) && !self.active.contains_key(peer))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|peer| PeerIdentity::from_npub(&peer).ok())
+            .collect::<Vec<_>>();
+        for peer in &disconnected {
+            // abort_peer removes all TCP state before sending resets. A failed
+            // reset must not prevent the application from retiring this peer.
+            let _ = self.forget_peer(*peer).await;
+        }
         Ok(WireTcpReport {
             frames,
             newly_connected,
+            disconnected,
             connected_peers: self.active.len(),
             tcp_datagrams: 0,
             rejected_tcp_datagrams: 0,
@@ -492,7 +531,7 @@ impl WireTcpDriver {
     }
 
     fn ensure_peer_selected(&self, peer: &str) -> Result<()> {
-        if !self.selected_peers.contains_key(peer) {
+        if !self.selected_peers.contains_key(peer) && !self.is_inbound(peer) {
             return Err(storage("TCP/FIPS Nostr pubsub peer is no longer selected"));
         }
         Ok(())
@@ -672,6 +711,7 @@ mod tests {
             WireTcpOptions {
                 frame_capacity: 1024,
                 peer_capacity: 2,
+                inbound_peer_capacity: 0,
                 queue_records_per_peer: 4,
                 queue_bytes_per_peer: 4096,
                 drive_io_bytes: 4096,
@@ -748,6 +788,7 @@ mod tests {
             WireTcpOptions {
                 frame_capacity: 1024,
                 peer_capacity: 1,
+                inbound_peer_capacity: 0,
                 queue_records_per_peer: 4,
                 queue_bytes_per_peer: 4096,
                 drive_io_bytes: 4096,
