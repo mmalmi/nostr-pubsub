@@ -16,7 +16,7 @@ struct Fixture {
     peer: PeerIdentity,
     tx: mpsc::Sender<TransportCommand>,
     rx: mpsc::Receiver<TransportCommand>,
-    links: HashMap<String, u64>,
+    links: HashMap<String, crate::PeerLinkEpoch>,
 }
 
 impl Fixture {
@@ -489,7 +489,9 @@ async fn ready_output_preserves_byte_budget_and_stops_on_tcp_backpressure() {
 #[tokio::test]
 async fn ready_command_batch_preserves_send_cooldown_order() {
     let mut fixture = Fixture::new(4096, 4096).await;
-    fixture.links.insert(fixture.peer.npub(), 1);
+    fixture
+        .links
+        .insert(fixture.peer.npub(), crate::PeerLinkEpoch::Direct(1));
     fixture
         .tx
         .try_send(TransportCommand::Cooldown { peer: fixture.peer })
@@ -541,4 +543,84 @@ async fn ready_batches_deliver_repeated_bursts_without_timer_polls() {
         0
     );
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn discovered_inbound_peer_keeps_its_pending_reply_when_selected() {
+    let remote = endpoint(148, Vec::new()).await;
+    let local = endpoint(
+        149,
+        vec![PeerConfig::new(
+            remote.npub(),
+            "udp",
+            remote.bound_udp_listen_addrs().await.unwrap()[0].to_string(),
+        )],
+    )
+    .await;
+    let options = || WireTcpOptions {
+        frame_capacity: 1024,
+        peer_capacity: 2,
+        inbound_peer_capacity: 1,
+        queue_records_per_peer: 4,
+        queue_bytes_per_peer: 4096,
+        drive_io_bytes: 4096,
+        drive_frames: 4,
+    };
+    let mut sender = WireTcpDriver::bind(local.clone(), options(), 148)
+        .await
+        .unwrap();
+    let mut receiver = WireTcpDriver::bind(remote.clone(), options(), 149)
+        .await
+        .unwrap();
+    sender.select_peers([remote.npub().to_owned()].into()).await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            sender.connect_peer(remote.npub(), now_ms()).await.unwrap();
+            sender.poll(now_ms()).await.unwrap();
+            receiver.poll(now_ms()).await.unwrap();
+            if sender.active.contains_key(remote.npub())
+                && receiver.active.contains_key(local.npub())
+            {
+                break;
+            }
+            tokio::select! {
+                r = sender.receive(now_ms()) => { r.unwrap(); }
+                r = receiver.receive(now_ms()) => { r.unwrap(); }
+                () = tokio::time::sleep(Duration::from_millis(1)) => {}
+            }
+        }
+    })
+    .await
+    .expect("inbound peer establishes its request stream");
+    let peer = PeerIdentity::from_npub(local.npub()).unwrap();
+    receiver
+        .queue_frame(peer, b"pending historical reply")
+        .unwrap();
+    receiver
+        .select_peers([local.npub().to_owned()].into())
+        .await;
+    // Selection may add local subscriptions, but a reply already owed to this
+    // authenticated peer must survive discovery of its advertised service.
+    receiver.connect_peer(local.npub(), now_ms()).await.unwrap();
+    let delivered = timeout(Duration::from_secs(2), async {
+        loop {
+            sender.poll(now_ms()).await.unwrap();
+            receiver.poll(now_ms()).await.unwrap();
+            tokio::select! {
+                r = sender.receive(now_ms()) => {
+                    if r.unwrap().frames.iter().any(|(_, frame)| frame == b"pending historical reply") { break; }
+                }
+                r = receiver.receive(now_ms()) => { r.unwrap(); }
+                () = tokio::time::sleep(Duration::from_millis(1)) => {}
+            }
+        }
+    }).await;
+    drop(sender);
+    drop(receiver);
+    local.shutdown().await.unwrap();
+    remote.shutdown().await.unwrap();
+    assert!(
+        delivered.is_ok(),
+        "discovering a peer must preserve its queued history reply"
+    );
 }

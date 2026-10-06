@@ -1,5 +1,5 @@
 use super::{ConnectedPeerLink, PeerIdentity, Result, invalid_option, poisoned, storage_error};
-use crate::client_inner::ClientInner;
+use crate::client_inner::{ClientInner, PeerLinkEpoch};
 use crate::{FIPS_NOSTR_PUBSUB_CAPABILITY, FIPS_NOSTR_PUBSUB_SERVICE_PORT};
 use nostr_pubsub::{MeshPeerPolicy, select_mesh_peers};
 
@@ -117,7 +117,7 @@ impl ClientInner {
                 npub: npub.clone(),
                 // A routed service session belongs to the destination identity,
                 // independent of changes to its intermediate physical links.
-                link_id: 0,
+                link_id: PeerLinkEpoch::Routed,
             })
             .collect::<Vec<_>>();
         // Routed discovery cannot prove which transports a path will use.
@@ -135,7 +135,7 @@ impl ClientInner {
                     npub: (*npub).to_owned(),
                     // An endpoint restart resets its stream, but changing its
                     // intermediate anchor does not change the service identity.
-                    link_id: *epoch,
+                    link_id: PeerLinkEpoch::LocalService(*epoch),
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -160,7 +160,7 @@ impl ClientInner {
             })
             .map(|peer| ConnectedPeerLink {
                 npub: peer.npub,
-                link_id: peer.link_id,
+                link_id: PeerLinkEpoch::Direct(peer.link_id),
             })
             .collect::<Vec<_>>();
         direct.sort_unstable_by(|left, right| left.npub.cmp(&right.npub));

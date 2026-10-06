@@ -46,8 +46,8 @@ impl InboundPeers {
     }
 
     pub fn retire(&mut self, selected: &BTreeSet<String>, now: Instant) -> Vec<PeerIdentity> {
-        // Promotion restarts the stream: selected peers then receive local
-        // subscriptions, which public read-only clients never receive.
+        // Release the inbound lease on promotion. The driver keeps its stream
+        // and pending replies; the transport loop adds local subscriptions.
         let retired = self
             .0
             .iter()

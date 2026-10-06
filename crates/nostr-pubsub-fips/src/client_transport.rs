@@ -1,8 +1,8 @@
 use std::sync::Weak;
 
 use super::{
-    ClientInner, HashMap, HashSet, Ordering, PeerIdentity, SourceId, TCP_POLL_INTERVAL,
-    TransportCommand, WireTcpDriver, mpsc, now_ms,
+    ClientInner, HashMap, HashSet, Ordering, PeerIdentity, PeerLinkEpoch, SourceId,
+    TCP_POLL_INTERVAL, TransportCommand, WireTcpDriver, mpsc, now_ms,
 };
 use crate::wire_tcp::WireTcpReport;
 
@@ -77,7 +77,7 @@ pub(super) async fn finish_ready_turn(
     inner: &ClientInner,
     driver: &mut WireTcpDriver,
     commands: &mut mpsc::Receiver<TransportCommand>,
-    known_links: &mut HashMap<String, u64>,
+    known_links: &mut HashMap<String, PeerLinkEpoch>,
     mut first: Option<TransportCommand>,
     already_written: usize,
 ) {
@@ -119,7 +119,7 @@ pub(super) const fn tcp_driver_poll_needed(connection_count: usize) -> bool {
 async fn sync_transport_peers(
     inner: &ClientInner,
     driver: &mut WireTcpDriver,
-    known_links: &mut HashMap<String, u64>,
+    known_links: &mut HashMap<String, PeerLinkEpoch>,
 ) {
     let Ok(peers) = inner.connected_peer_links().await else {
         return;
@@ -131,14 +131,26 @@ async fn sync_transport_peers(
         .collect::<HashMap<_, _>>();
     let changed = known_links
         .iter()
-        .filter(|(npub, link_id)| next_links.get(*npub) != Some(*link_id))
+        .filter(|(npub, link_id)| {
+            next_links
+                .get(*npub)
+                .is_none_or(|next| next.requires_reset(**link_id))
+        })
         .filter_map(|(npub, _)| PeerIdentity::from_npub(npub).ok())
         .collect::<Vec<_>>();
     for peer in driver
         .select_peers(next_links.keys().cloned().collect())
         .await
     {
-        forget_peer_state(inner, &peer.npub());
+        if next_links.contains_key(&peer.npub()) {
+            // An inbound stream became a discovered outgoing peer. Add our
+            // subscriptions on that stream without clearing its pending history.
+            for frame in inner.replay_frames_for_peer(&peer.npub()) {
+                let _ = driver.queue_frame(peer, &frame);
+            }
+        } else {
+            forget_peer_state(inner, &peer.npub());
+        }
     }
     for peer in changed {
         if next_links.contains_key(&peer.npub()) {

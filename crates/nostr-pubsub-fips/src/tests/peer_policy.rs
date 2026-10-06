@@ -163,7 +163,7 @@ async fn local_service_selection_respects_capabilities_policy_capacity_and_resta
         .set_routed_peers(vec![provider.npub().to_owned()])
         .unwrap();
     let selected = wait_for_selected_peers(&client, &[provider.npub()]).await;
-    assert_eq!(selected[0].link_id, 0);
+    assert_eq!(selected[0].link_id, crate::PeerLinkEpoch::Routed);
     let explicit = Identity::from_secret_bytes(&[96; 32]).unwrap().npub();
     client.set_routed_peers(vec![explicit.clone()]).unwrap();
     wait_for_selected_peers(&client, &[&explicit]).await;
@@ -303,7 +303,7 @@ fn link_selection_preserves_rank_metadata_and_fresh_policy() {
                 .iter()
                 .map(|(npub, link_id)| ConnectedPeerLink {
                     npub: (*npub).to_owned(),
-                    link_id: *link_id,
+                    link_id: crate::PeerLinkEpoch::Direct(*link_id),
                 })
                 .collect(),
             2,
@@ -322,13 +322,19 @@ fn link_selection_preserves_rank_metadata_and_fresh_policy() {
             ("unknown", 3),
             ("best", 5),
         ]),
-        [("best".to_owned(), 5), ("unknown".to_owned(), 3)]
+        [
+            ("best".to_owned(), crate::PeerLinkEpoch::Direct(5)),
+            ("unknown".to_owned(), crate::PeerLinkEpoch::Direct(3))
+        ]
     );
 
     policy.0.write().unwrap().insert("best".into(), None);
     assert_eq!(
         select(&[("best", 15), ("unknown", 13), ("second", 12)]),
-        [("second".to_owned(), 12), ("unknown".to_owned(), 13)]
+        [
+            ("second".to_owned(), crate::PeerLinkEpoch::Direct(12)),
+            ("unknown".to_owned(), crate::PeerLinkEpoch::Direct(13))
+        ]
     );
 }
 

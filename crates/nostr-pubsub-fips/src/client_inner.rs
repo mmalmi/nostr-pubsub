@@ -975,7 +975,22 @@ pub(super) struct ConnectedPeer {
 
 pub(super) struct ConnectedPeerLink {
     pub(super) npub: String,
-    pub(super) link_id: u64,
+    pub(super) link_id: PeerLinkEpoch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PeerLinkEpoch {
+    Routed,
+    Direct(u64),
+    LocalService(u64),
+}
+
+impl PeerLinkEpoch {
+    pub(super) fn requires_reset(self, previous: Self) -> bool {
+        // Learning the already-connected peer's advertised service is discovery,
+        // not an endpoint restart. Keep the stream and its in-flight replies.
+        !matches!((previous, self), (Self::Direct(_), Self::LocalService(_))) && self != previous
+    }
 }
 
 pub(super) struct ActiveSubscription {

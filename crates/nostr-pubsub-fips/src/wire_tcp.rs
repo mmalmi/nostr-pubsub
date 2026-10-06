@@ -107,7 +107,9 @@ impl WireTcpDriver {
     pub async fn select_peers(&mut self, peers: BTreeSet<String>) -> Vec<PeerIdentity> {
         let retired = self.inbound.retire(&peers, Instant::now());
         for peer in &retired {
-            let _ = self.forget_peer(*peer).await;
+            if !peers.contains(&peer.npub()) {
+                let _ = self.forget_peer(*peer).await;
+            }
         }
         let removed = self
             .selected_peers

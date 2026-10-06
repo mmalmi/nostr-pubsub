@@ -39,7 +39,7 @@ mod stats;
 mod stream;
 mod stream_tcp;
 mod wire_tcp;
-use client_inner::{ClientInner, ConnectedPeerLink};
+use client_inner::{ClientInner, ConnectedPeerLink, PeerLinkEpoch};
 use client_lifecycle::ClientTasks;
 use client_transport::transport_loop;
 pub use peerfinding::*;
