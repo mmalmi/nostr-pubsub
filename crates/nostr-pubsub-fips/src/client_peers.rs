@@ -1,7 +1,22 @@
 use super::{ConnectedPeerLink, PeerIdentity, Result, invalid_option, poisoned, storage_error};
-use crate::client_inner::{ClientInner, PeerLinkEpoch};
+use crate::client_inner::ClientInner;
 use crate::{FIPS_NOSTR_PUBSUB_CAPABILITY, FIPS_NOSTR_PUBSUB_SERVICE_PORT};
 use nostr_pubsub::{MeshPeerPolicy, select_mesh_peers};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PeerLinkEpoch {
+    Routed,
+    Direct(u64),
+    LocalService(u64),
+}
+
+impl PeerLinkEpoch {
+    pub(super) fn requires_reset(self, previous: Self) -> bool {
+        // Learning the already-connected peer's advertised service is discovery,
+        // not an endpoint restart. Keep the stream and its in-flight replies.
+        !matches!((previous, self), (Self::Direct(_), Self::LocalService(_))) && self != previous
+    }
+}
 
 pub(super) fn select_policy_peers(
     policy: &dyn MeshPeerPolicy,

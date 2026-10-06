@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.20 - 2026-10-06
+
+- Preserve pending replies and peer subscriptions when an inbound pubsub peer
+  becomes a discovered outgoing peer; add local subscriptions on its existing
+  stream.
+- Preserve streams when a connected direct peer gains a local service advert.
+  Physical link changes and advertised service restarts still reset streams.
+- Keep query deadlines, resource limits, wire format, and dependency versions
+  unchanged.
+
 ## 0.5.19 - 2026-10-04
 
 - Preserve signed events in a bounded FIFO when a local subscription channel
