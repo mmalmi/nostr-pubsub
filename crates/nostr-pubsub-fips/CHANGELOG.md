@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.21 - 2026-10-08
+
+- Require FIPS core 0.4.95, TCP core 0.2.4, and TCP endpoint 0.2.30 to stop measurement reports
+  from sustaining idle link traffic while preserving packet and loss accounting.
+- Refresh idle peer selection once per second independently of TCP timers,
+  and skip TCP timer wakeups when there are no connections. Keep startup,
+  inbound traffic, and application sends immediate.
+- Start failed-service retry delays when the connection fails, with bounded
+  backoff and wakeups at the actual deadline. Preserve queued messages and
+  resume faster retries after a healthy connection or fresh service discovery.
+- Include corrected TCP acknowledgment recovery while preserving the pubsub
+  wire format, query deadlines, and TCP timer cadence.
+
 ## 0.5.20 - 2026-10-06
 
 - Preserve pending replies and peer subscriptions when an inbound pubsub peer
