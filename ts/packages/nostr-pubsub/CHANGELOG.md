@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.15 - 2026-10-08
+
+- Update the shared TCP/FIPS transport to 0.2.3 so receiver buffer-space updates
+  do not trigger unnecessary retransmission or preserve stale duplicate ACKs.
+
 ## 0.5.14 - 2026-10-02
 
 - Add opt-in NIP-77 gap recovery alongside immediate cache reads and ordinary
