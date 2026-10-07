@@ -170,11 +170,9 @@ fn alternate_providers_recover_blackholes_without_unbounded_wants() {
             }]
         );
     }
-    assert!(
-        consumer
-            .receive("excess", inventory, &[], 5)
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        consumer.receive("excess", inventory, &[], 5).unwrap().len(),
+        0
     );
     assert!(
         consumer
@@ -285,7 +283,7 @@ fn fulfilled_routes_absorb_late_requested_frames_without_scoring() {
                 .unwrap(),
         );
         assert_eq!(delivered.as_slice(), std::slice::from_ref(&event_id));
-        assert!(
+        assert_eq!(
             consumer
                 .receive(
                     "alternate",
@@ -297,7 +295,8 @@ fn fulfilled_routes_absorb_late_requested_frames_without_scoring() {
                     now + 3,
                 )
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
     }
     consumer.maintain(30);
@@ -322,7 +321,7 @@ fn fulfilled_routes_absorb_late_requested_frames_without_scoring() {
         .receive("alternate", inventory_for(&rejected, 4), &[], 32)
         .unwrap();
     consumer.dismiss_frame("primary", &rejected_id);
-    assert!(
+    assert_eq!(
         consumer
             .receive(
                 "alternate",
@@ -334,7 +333,8 @@ fn fulfilled_routes_absorb_late_requested_frames_without_scoring() {
                 33,
             )
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     assert!(
         consumer
@@ -368,7 +368,7 @@ fn transient_routes_are_evicted_atomically_and_route_less_wants_are_forgotten() 
     };
     let mut consumer = InvWantMesh::new(options);
 
-    assert!(
+    assert_eq!(
         consumer
             .receive(
                 "ghost",
@@ -379,7 +379,8 @@ fn transient_routes_are_evicted_atomically_and_route_less_wants_are_forgotten() 
                 1,
             )
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     consumer
         .receive("provider-a", inventory_for(&event_a, 4), &[], 2)
@@ -524,7 +525,7 @@ fn cached_event_can_be_replayed_to_a_peer_that_connected_later() {
     let expected_payload_bytes = u32::try_from(serde_json::to_vec(&event).unwrap().len()).unwrap();
     let mut provider = mesh();
 
-    assert!(provider.publish(event.clone(), &[], 1).unwrap().is_empty());
+    assert_eq!(provider.publish(event.clone(), &[], 1).unwrap().len(), 0);
     let inventory = only_message(
         provider
             .replay_to_peer(event, "late-peer", 20 * 60 * 1_000)

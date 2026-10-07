@@ -153,7 +153,7 @@ fn discovery_selection_does_not_require_hidden_supernode_roles() {
         let topology = build_topology(&config)
             .unwrap_or_else(|error| panic!("{discovery:?} used hidden roles: {error}"));
 
-        assert!(topology.honest_supernodes.is_empty());
+        assert_eq!(topology.honest_supernodes, [] as [usize; 0]);
         assert_eq!(
             topology.discovery_selections.selected_high_capacity_links,
             0

@@ -63,8 +63,8 @@ fn unknown_reserve_replaces_last_ranked_known_peers_in_exact_order() {
 
 #[test]
 fn empty_or_zero_capacity_never_selects_a_peer() {
-    assert!(select_mesh_peers(&[], None, 4, 1).is_empty());
+    assert_eq!(select_mesh_peers(&[], None, 4, 1).len(), 0);
     let peers = [MeshPeer::observed("known", 100), MeshPeer::new("unknown")];
-    assert!(select_mesh_peers(&peers, None, 0, usize::MAX).is_empty());
-    assert!(select_mesh_peers(&peers[..1], Some("known"), 4, 1).is_empty());
+    assert_eq!(select_mesh_peers(&peers, None, 0, usize::MAX).len(), 0);
+    assert_eq!(select_mesh_peers(&peers[..1], Some("known"), 4, 1).len(), 0);
 }

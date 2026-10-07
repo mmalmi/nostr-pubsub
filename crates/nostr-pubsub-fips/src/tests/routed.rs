@@ -99,7 +99,7 @@ async fn local_service_peers_exchange_events_and_survive_anchor_exit_without_rou
         fanout: 1,
         ..Default::default()
     };
-    assert!(options.routed_peers.is_empty());
+    assert_eq!(options.routed_peers.len(), 0);
     let client_a = FipsPubsubClient::start(a.clone(), options.clone())
         .await
         .unwrap();
@@ -198,10 +198,11 @@ fn routed_roster_is_validated_bounded_and_canonical() {
     assert!(validate_routed_peers(vec![remote.clone()], 0, &local, false).is_err());
     assert!(validate_routed_peers(vec![remote], 1, &local, true).is_err());
     assert!(validate_routed_peers(vec!["invalid".into()], 1, &local, false).is_err());
-    assert!(
+    assert_eq!(
         validate_routed_peers(vec![], 1, &local, true)
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
 }
 

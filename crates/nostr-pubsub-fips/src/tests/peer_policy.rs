@@ -259,10 +259,11 @@ fn high_level_peer_selection_keeps_unknown_capacity_and_bounds_fanout() {
     )
     .unwrap();
     assert_eq!(selected, ["best", "unknown"]);
-    assert!(
+    assert_eq!(
         crate::client_peers::select_policy_peers(&policy, ["best".to_owned()], 0, 1,)
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
 }
 

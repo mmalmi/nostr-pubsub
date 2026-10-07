@@ -153,8 +153,7 @@ async fn reconnect_replays_only_live_interests_and_drop_closes_socket() {
             let message = socket.next().await.unwrap().unwrap();
             if message
                 .to_text()
-                .ok()
-                .is_some_and(|text| text.starts_with("[\"CLOSE\""))
+                .is_ok_and(|text| text.starts_with("[\"CLOSE\""))
             {
                 break;
             }

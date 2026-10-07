@@ -73,12 +73,12 @@ fn pending_want_retries_with_backoff_then_expires() {
         },
     ));
 
-    assert!(pending.retry_due(599, 500).retries.is_empty());
+    assert_eq!(pending.retry_due(599, 500).retries.len(), 0);
     assert_eq!(
         pending.retry_due(600, 500).retries,
         vec![("event-id".to_string(), provider.clone())]
     );
-    assert!(pending.retry_due(1_599, 500).retries.is_empty());
+    assert_eq!(pending.retry_due(1_599, 500).retries.len(), 0);
     assert_eq!(
         pending.retry_due(1_600, 500).retries,
         vec![("event-id".to_string(), provider.clone())]
@@ -89,12 +89,12 @@ fn pending_want_retries_with_backoff_then_expires() {
             vec![("event-id".to_string(), provider.clone())]
         );
     }
-    assert!(pending.retry_due(31_599, 500).retries.is_empty());
+    assert_eq!(pending.retry_due(31_599, 500).retries.len(), 0);
     let expired = pending.retry_due(31_600, 500);
-    assert!(expired.retries.is_empty());
+    assert_eq!(expired.retries.len(), 0);
     assert_eq!(expired.expired_event_count, 1);
     assert_eq!(expired.expired_providers, vec![provider]);
-    assert!(pending.retry_due(60_000, 500).retries.is_empty());
+    assert_eq!(pending.retry_due(60_000, 500).retries.len(), 0);
 }
 
 #[test]

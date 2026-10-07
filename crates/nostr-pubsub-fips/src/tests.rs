@@ -251,19 +251,21 @@ async fn peerfinder_routes_publication_and_lookup_only_through_event_bus() {
             accepted: 1,
         }
     );
-    assert!(
+    assert_eq!(
         endpoint_a
             .relay_statuses()
             .await
             .expect("publisher relays")
-            .is_empty()
+            .len(),
+        0
     );
-    assert!(
+    assert_eq!(
         endpoint_b
             .relay_statuses()
             .await
             .expect("consumer relays")
-            .is_empty()
+            .len(),
+        0
     );
     endpoint_a.shutdown().await.expect("publisher shutdown");
     endpoint_b.shutdown().await.expect("consumer shutdown");

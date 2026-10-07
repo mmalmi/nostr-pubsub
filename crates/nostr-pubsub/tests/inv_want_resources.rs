@@ -23,7 +23,7 @@ fn retained_pending_peer_count_tracks_delivery_and_route_expiry() {
             .unwrap(),
     );
     for downstream in ["downstream-a", "downstream-b", "downstream-a"] {
-        assert!(
+        assert_eq!(
             middle
                 .receive(
                     downstream,
@@ -34,7 +34,8 @@ fn retained_pending_peer_count_tracks_delivery_and_route_expiry() {
                     3,
                 )
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
     }
     assert_eq!(middle.retained_state().pending_events, 1);
@@ -62,7 +63,7 @@ fn retained_pending_peer_count_tracks_delivery_and_route_expiry() {
             .receive("provider", inventory, &[MeshPeer::new("provider")], 11)
             .unwrap(),
     );
-    assert!(
+    assert_eq!(
         middle
             .receive(
                 "downstream-c",
@@ -73,7 +74,8 @@ fn retained_pending_peer_count_tracks_delivery_and_route_expiry() {
                 12,
             )
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     assert_eq!(middle.retained_state().pending_events, 1);
     assert_eq!(middle.retained_state().pending_peers, 1);
@@ -98,7 +100,7 @@ fn delivered_dedup_state_expires_and_allows_later_redelivery() {
     assert_eq!(consumer.retained_state().delivered_events, 1);
 
     let duplicate = consumer.receive("provider", first_frame, &[], 5).unwrap();
-    assert!(delivered_ids(&duplicate).is_empty());
+    assert_eq!(delivered_ids(&duplicate).len(), 0);
     assert_eq!(consumer.retained_state().delivered_events, 1);
 
     consumer.maintain(720_020);

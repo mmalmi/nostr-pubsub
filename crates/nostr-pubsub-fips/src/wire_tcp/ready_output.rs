@@ -429,7 +429,7 @@ async fn unselected_peer_syn_is_rejected_before_tcp_admission() {
     assert!(report.tcp_datagrams > 0);
     assert_eq!(report.rejected_tcp_datagrams, report.tcp_datagrams);
     assert_eq!(retained, 0);
-    assert!(report.frames.is_empty());
+    assert_eq!(report.frames.len(), 0);
 }
 
 #[tokio::test]
