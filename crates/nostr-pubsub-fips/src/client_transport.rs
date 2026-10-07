@@ -1,4 +1,4 @@
-use std::sync::Weak;
+use std::{sync::Weak, time::Duration};
 
 use super::{
     ClientInner, HashMap, HashSet, Ordering, PeerIdentity, PeerLinkEpoch, SourceId,
@@ -6,13 +6,20 @@ use super::{
 };
 use crate::wire_tcp::WireTcpReport;
 
+// Peer discovery and policy snapshots are slower-changing than TCP timers.
+// Keep the initial sync eager and inbound/application traffic event-driven.
+const PEER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
+
 pub(super) async fn transport_loop(
     inner: Weak<ClientInner>,
     mut driver: WireTcpDriver,
     mut commands: mpsc::Receiver<TransportCommand>,
 ) {
-    let mut poll_tick = tokio::time::interval(TCP_POLL_INTERVAL);
+    let start = tokio::time::Instant::now();
+    let mut poll_tick = tokio::time::interval_at(start, TCP_POLL_INTERVAL);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut peer_tick = tokio::time::interval_at(start + PEER_SYNC_INTERVAL, PEER_SYNC_INTERVAL);
+    peer_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut known_links = HashMap::new();
     // Startup subscriptions enqueue their REQs before the transport task starts.
     if let Some(inner) = inner.upgrade() {
@@ -42,19 +49,20 @@ pub(super) async fn transport_loop(
                     (None, usize::MAX)
                 }
             }
-            _ = poll_tick.tick() => {
+            _ = peer_tick.tick() => {
                 sync_transport_peers(&inner, &mut driver, &mut known_links).await;
-                let mut written = 0;
-                if tcp_driver_poll_needed(driver.connection_count()) {
-                    inner.tcp_poll_turns.fetch_add(1, Ordering::Relaxed);
-                    if let Ok(report) = driver.poll(now_ms()).await {
-                        written = report.written_bytes;
-                        process_wire_report(&inner, &mut driver, report).await;
-                    } else {
-                        inner.transport_errors.fetch_add(1, Ordering::Relaxed);
-                        written = usize::MAX;
-                    }
-                }
+                (None, 0)
+            }
+            _ = poll_tick.tick(), if tcp_driver_poll_needed(driver.connection_count()) => {
+                inner.tcp_poll_turns.fetch_add(1, Ordering::Relaxed);
+                let written = if let Ok(report) = driver.poll(now_ms()).await {
+                    let written = report.written_bytes;
+                    process_wire_report(&inner, &mut driver, report).await;
+                    written
+                } else {
+                    inner.transport_errors.fetch_add(1, Ordering::Relaxed);
+                    usize::MAX
+                };
                 (None, written)
             }
         };

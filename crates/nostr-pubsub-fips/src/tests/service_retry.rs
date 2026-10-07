@@ -240,3 +240,71 @@ async fn shutdown(network: &str, a: Arc<FipsEndpoint>, b: Arc<FipsEndpoint>) {
     b.shutdown().await.unwrap();
     unregister_sim_network(network);
 }
+
+#[derive(Default)]
+struct CountingPeerPolicy(AtomicU64);
+
+impl MeshPeerPolicy for CountingPeerPolicy {
+    fn select_mesh_peer(&self, peer_id: &str) -> Result<Option<nostr_pubsub::MeshPeer>> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(nostr_pubsub::MeshPeer::new(peer_id)))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_peer_selection_is_slower_than_tcp_timers_without_delaying_messages() {
+    let (network, a, b) = endpoints().await;
+    let policy = Arc::new(CountingPeerPolicy::default());
+    let alice = FipsPubsubClient::start_for_peer_selection(
+        a.clone(),
+        FipsPubsubClientOptions::default(),
+        Some("sim"),
+        HashSet::new(),
+        FipsPubsubClientPolicies {
+            peers: Some(policy.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let bob = start_sim_client(&b, "provider").await;
+    wait_for_pubsub_connections(&alice, 1).await;
+    wait_for_pubsub_connections(&bob, 1).await;
+    let mut subscription = alice
+        .subscribe(vec![Filter::new().kind(Kind::TextNote)])
+        .await
+        .unwrap();
+    wait_for_default_peer_subscription(&bob).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = alice.delivery_snapshot();
+    policy.0.store(0, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let selections = policy.0.load(Ordering::Relaxed);
+    let polls = alice.delivery_snapshot().tcp_poll_turns - before.tcp_poll_turns;
+
+    let note = signed_note("existing streams still deliver immediately after idle");
+    bob.publish(note.clone(), EventSource::local_index("provider"))
+        .await
+        .unwrap();
+    let delivered = timeout(Duration::from_millis(500), subscription.recv()).await;
+    drop(subscription);
+    alice.shutdown().await;
+    bob.shutdown().await;
+    shutdown(&network, a, b).await;
+
+    assert!(
+        polls >= 8,
+        "TCP retransmission polling must remain timely: {polls}"
+    );
+    assert!(
+        selections <= 4,
+        "idle peer selection must not run on every TCP poll: {selections}"
+    );
+    assert_eq!(
+        delivered
+            .expect("delivery must not wait for peer discovery")
+            .unwrap()
+            .event,
+        note
+    );
+}
