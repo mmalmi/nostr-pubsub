@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.21 - 2026-10-08
+## 0.5.22 - 2026-10-08
 
 - Require FIPS core 0.4.95, TCP core 0.2.4, and TCP endpoint 0.2.30 to stop measurement reports
   from sustaining idle link traffic while preserving packet and loss accounting.
