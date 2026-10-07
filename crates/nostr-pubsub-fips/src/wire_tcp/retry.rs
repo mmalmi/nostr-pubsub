@@ -1,12 +1,14 @@
 use super::{Duration, Instant, SERVICE_RETRY_INTERVAL};
 
 const MAX_SERVICE_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const STABLE_SERVICE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub(super) struct ServiceRetry {
     pub(super) next_attempt_at: Option<Instant>,
     failures: u32,
     retry_scheduled: bool,
+    connected_since: Option<Instant>,
 }
 
 impl ServiceRetry {
@@ -17,9 +19,11 @@ impl ServiceRetry {
     pub(super) fn started(&mut self, now: Instant) {
         self.next_attempt_at = Some(now + SERVICE_RETRY_INTERVAL);
         self.retry_scheduled = false;
+        self.connected_since = None;
     }
 
     pub(super) fn failed(&mut self, now: Instant) {
+        self.connected_since = None;
         self.failures = self.failures.saturating_add(1).min(6);
         let delay = SERVICE_RETRY_INTERVAL
             .saturating_mul(1 << (self.failures - 1))
@@ -32,7 +36,12 @@ impl ServiceRetry {
     }
 
     pub(super) fn connected(&mut self, now: Instant) {
-        self.service_discovered(now);
+        // A successful TCP handshake alone does not prove a usable service.
+        // Accept-then-close peers must not erase the accumulated failure delay.
+        let since = *self.connected_since.get_or_insert(now);
+        if now.duration_since(since) >= STABLE_SERVICE_INTERVAL {
+            self.restore_fast_retry(now);
+        }
         self.retry_scheduled = false;
     }
 
@@ -47,9 +56,14 @@ impl ServiceRetry {
     }
 
     pub(super) fn service_discovered(&mut self, now: Instant) {
+        self.connected_since = None;
+        self.restore_fast_retry(now);
+    }
+
+    fn restore_fast_retry(&mut self, now: Instant) {
         self.failures = 0;
-        // A fresh service advertisement can end a long failed-service backoff,
-        // while retaining the minimum spacing against repeated epoch changes.
+        // A fresh service advertisement or stable connection can end a long
+        // backoff, retaining the minimum spacing against repeated epoch changes.
         self.next_attempt_at = self
             .next_attempt_at
             .map(|due| due.min(now + SERVICE_RETRY_INTERVAL));
@@ -59,6 +73,23 @@ impl ServiceRetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_short_connections_keep_failure_backoff() {
+        let mut retry = ServiceRetry::default();
+        let mut now = Instant::now();
+        for seconds in [3, 6, 12, 24, 48, 60] {
+            retry.started(now);
+            retry.connected(now + Duration::from_millis(10));
+            let closed = now + Duration::from_millis(20);
+            retry.failed(closed);
+            assert_eq!(
+                retry.next_retry_at(),
+                Some(closed + Duration::from_secs(seconds))
+            );
+            now = closed + Duration::from_secs(seconds);
+        }
+    }
 
     #[test]
     fn failures_back_off_from_completion_and_recovery_restores_fast_retries() {
@@ -74,6 +105,8 @@ mod tests {
             now = due;
         }
         retry.connected(now);
+        retry.connected(now + STABLE_SERVICE_INTERVAL);
+        now += STABLE_SERVICE_INTERVAL;
         assert_eq!(retry.next_retry_at(), None);
         retry.started(now);
         assert_eq!(retry.next_retry_at(), None);
@@ -106,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn incoming_connection_clears_a_long_cooldown_before_an_early_close() {
+    fn incoming_connection_is_usable_without_resetting_backoff_on_early_close() {
         let now = Instant::now();
         let mut retry = ServiceRetry::default();
         for _ in 0..6 {
@@ -114,9 +147,12 @@ mod tests {
         }
         let connected = now + Duration::from_secs(5);
         retry.connected(connected);
+        assert_eq!(retry.next_retry_at(), None);
         let closed = connected + Duration::from_secs(1);
         retry.failed(closed);
-        assert!(retry.is_waiting(closed));
-        assert!(!retry.is_waiting(closed + SERVICE_RETRY_INTERVAL));
+        assert_eq!(
+            retry.next_retry_at(),
+            Some(closed + MAX_SERVICE_RETRY_INTERVAL)
+        );
     }
 }

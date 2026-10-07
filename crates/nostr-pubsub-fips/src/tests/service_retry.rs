@@ -8,15 +8,20 @@ static NEXT_NETWORK: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn service_retry_rst_on_stable_link_is_spaced_and_recovers() {
-    rejected_service_recovers(false).await;
+    rejected_service_recovers(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn service_retry_accept_close_cannot_be_accelerated_by_send_commands() {
-    rejected_service_recovers(true).await;
+    rejected_service_recovers(true, false).await;
 }
 
-async fn rejected_service_recovers(accept_close: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn service_retry_repeated_accept_close_backs_off_and_recovers() {
+    rejected_service_recovers(true, true).await;
+}
+
+async fn rejected_service_recovers(accept_close: bool, sustained_failure: bool) {
     let (network, a, b) = endpoints().await;
     let before = link_id(&a, b.npub()).await;
     let attempts = Arc::new(Mutex::new(Vec::new()));
@@ -35,7 +40,8 @@ async fn rejected_service_recovers(accept_close: bool) {
     })
     .await
     .expect("the actual client sent its initial SYN");
-    let until = Instant::now() + Duration::from_millis(3_300);
+    let until = Instant::now()
+        + Duration::from_millis(if sustained_failure { 7_000 } else { 3_300 });
     while Instant::now() < until {
         if accept_close {
             // Public API actions reach TransportCommand::Send independently of
@@ -86,23 +92,12 @@ async fn rejected_service_recovers(accept_close: bool) {
         stable_link, before,
         "test must not manufacture a FIPS link epoch change"
     );
-    assert!(
-        observed.len() >= 2,
-        "closed service must remain retryable: {observed:?}"
-    );
-    let gaps = observed
-        .windows(2)
-        .map(|pair| pair[1].duration_since(pair[0]))
-        .collect::<Vec<_>>();
+    assert_retry_schedule(&observed, sustained_failure);
     println!(
-        "service_retry accept_close={accept_close} link={before}->{stable_link} attempts={} accepted={} gaps={gaps:?} recovered={}",
+        "service_retry accept_close={accept_close} link={before}->{stable_link} attempts={} accepted={} recovered={}",
         observed.len(),
         accepted.load(Ordering::Relaxed),
         matches!(&delivered, Ok(Some(delivery)) if delivery.event == event),
-    );
-    assert!(
-        gaps.iter().all(|gap| *gap >= Duration::from_millis(2_950)),
-        "service retries must be at least three seconds apart (50 ms receive scheduling allowance): {gaps:?}"
     );
     if accept_close {
         assert!(
@@ -116,6 +111,28 @@ async fn rejected_service_recovers(accept_close: bool) {
             .unwrap()
             .event,
         event
+    );
+}
+
+fn assert_retry_schedule(observed: &[Instant], sustained_failure: bool) {
+    assert!(
+        observed.len() >= 2,
+        "closed service must remain retryable: {observed:?}"
+    );
+    if sustained_failure {
+        assert_eq!(
+            observed.len(), 2,
+            "accepting TCP without keeping the service alive must not reset failure backoff: {observed:?}"
+        );
+    }
+    let gaps = observed
+        .windows(2)
+        .map(|pair| pair[1].duration_since(pair[0]))
+        .collect::<Vec<_>>();
+    println!("service retry gaps: {gaps:?}");
+    assert!(
+        gaps.iter().all(|gap| *gap >= Duration::from_millis(2_950)),
+        "service retries must be at least three seconds apart (50 ms receive scheduling allowance): {gaps:?}"
     );
 }
 

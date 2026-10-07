@@ -415,7 +415,11 @@ impl WireTcpDriver {
             });
             let (selected, _) = streams.remove(0);
             if let Some(retry) = self.selected_peers.get_mut(&peer) {
-                retry.connected(Instant::now());
+                if self.tcp.state(selected) == Some(State::Established) {
+                    retry.connected(Instant::now());
+                } else {
+                    retry.in_flight();
+                }
             }
             next_active.insert(peer, selected);
             extras.extend(streams.into_iter().map(|(id, _)| id));
