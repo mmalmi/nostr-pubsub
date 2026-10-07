@@ -1,4 +1,4 @@
-use super::{BTreeMap, BTreeSet, Duration, Instant, PeerIdentity, WireTcpOptions};
+use super::{BTreeMap, BTreeSet, Duration, Instant, PeerIdentity, ServiceRetry, WireTcpOptions};
 use fips_tcp::wire::{FIPS_VERSION, Flags, Segment};
 
 // Silent or abandoned public clients release their bounded slot. Expiry
@@ -23,7 +23,7 @@ impl InboundPeers {
         &mut self,
         peer: &PeerIdentity,
         bytes: &[u8],
-        selected: &BTreeMap<String, Option<Instant>>,
+        selected: &BTreeMap<String, ServiceRetry>,
         options: &WireTcpOptions,
         now: Instant,
     ) -> bool {
@@ -164,7 +164,7 @@ mod tests {
         opts.inbound_peer_capacity = 0;
         assert!(!peers.admit(&a, &bytes, &BTreeMap::new(), &opts, now));
         opts.inbound_peer_capacity = 1;
-        let selected = BTreeMap::from([(b.npub(), None)]);
+        let selected = BTreeMap::from([(b.npub(), ServiceRetry::default())]);
         assert!(peers.admit(&a, &bytes, &selected, &opts, now));
         assert!(!peers.admit(&c, &bytes, &selected, &opts, now));
         assert!(peers.admit(&b, &[], &selected, &opts, now));

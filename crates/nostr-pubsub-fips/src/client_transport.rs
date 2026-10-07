@@ -29,6 +29,9 @@ pub(super) async fn transport_loop(
         let Some(inner) = inner.upgrade() else {
             break;
         };
+        let service_retry_at = driver
+            .next_service_retry_at()
+            .map(tokio::time::Instant::from_std);
         let (first, already_written) = tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else {
@@ -51,6 +54,10 @@ pub(super) async fn transport_loop(
             }
             _ = peer_tick.tick() => {
                 sync_transport_peers(&inner, &mut driver, &mut known_links).await;
+                (None, 0)
+            }
+            () = tokio::time::sleep_until(service_retry_at.unwrap_or(start)), if service_retry_at.is_some() => {
+                retry_due_services(&inner, &mut driver, &mut known_links).await;
                 (None, 0)
             }
             _ = poll_tick.tick(), if tcp_driver_poll_needed(driver.connection_count()) => {
@@ -105,9 +112,7 @@ pub(super) async fn finish_ready_turn(
                 }
             }
             TransportCommand::Cooldown { peer } => {
-                known_links.remove(&peer.npub());
-                forget_peer_state(inner, &peer.npub());
-                let _ = driver.forget_peer(peer).await;
+                forget_cooled_peer(inner, driver, known_links, peer).await;
             }
         }
     }
@@ -118,6 +123,35 @@ pub(super) async fn finish_ready_turn(
     {
         inner.transport_errors.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+pub(super) async fn retry_due_services(
+    inner: &ClientInner,
+    driver: &mut WireTcpDriver,
+    known_links: &mut HashMap<String, PeerLinkEpoch>,
+) {
+    for peer in driver.due_service_peers() {
+        if inner.peer_is_in_cooldown(&peer, now_ms())
+            && let Ok(identity) = PeerIdentity::from_npub(&peer)
+        {
+            forget_cooled_peer(inner, driver, known_links, identity).await;
+            continue;
+        }
+        if driver.connect_peer(&peer, now_ms()).await.is_err() {
+            inner.transport_errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+async fn forget_cooled_peer(
+    inner: &ClientInner,
+    driver: &mut WireTcpDriver,
+    known_links: &mut HashMap<String, PeerLinkEpoch>,
+    peer: PeerIdentity,
+) {
+    known_links.remove(&peer.npub());
+    forget_peer_state(inner, &peer.npub());
+    let _ = driver.forget_peer(peer).await;
 }
 
 pub(super) const fn tcp_driver_poll_needed(connection_count: usize) -> bool {
@@ -170,6 +204,11 @@ async fn sync_transport_peers(
     for peer in peers {
         if inner.peer_is_in_cooldown(&peer.npub, now_ms()) {
             continue;
+        }
+        if matches!(peer.link_id, PeerLinkEpoch::LocalService(_))
+            && known_links.get(&peer.npub) != Some(&peer.link_id)
+        {
+            driver.service_discovered(&peer.npub);
         }
         if driver.connect_peer(&peer.npub, now_ms()).await.is_err() {
             inner.transport_errors.fetch_add(1, Ordering::Relaxed);

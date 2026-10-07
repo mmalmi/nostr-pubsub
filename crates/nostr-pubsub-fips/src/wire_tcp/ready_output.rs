@@ -195,6 +195,58 @@ async fn receive_before_drive(driver: &mut WireTcpDriver) -> usize {
     .datagrams
 }
 
+#[tokio::test]
+async fn scheduled_service_retry_honors_a_new_provider_cooldown() {
+    let mut fixture = Fixture::new(4096, 4096).await;
+    let peer = fixture.peer;
+    fixture.sender.abort_peer(peer).await.unwrap();
+    fixture
+        .sender
+        .queue_frame(peer, b"pending request")
+        .unwrap();
+    fixture
+        .sender
+        .selected_peers
+        .get_mut(&peer.npub())
+        .unwrap()
+        .next_attempt_at = Some(Instant::now());
+    fixture
+        .links
+        .insert(peer.npub(), crate::PeerLinkEpoch::Routed);
+    for _ in 0..3 {
+        fixture
+            .context
+            .inner
+            .provider_behavior
+            .lock()
+            .unwrap()
+            .record(
+                &peer.npub(),
+                crate::provider_behavior::ProviderViolation::MalformedFrame,
+                now_ms(),
+            );
+    }
+    assert!(
+        fixture
+            .context
+            .inner
+            .peer_is_in_cooldown(&peer.npub(), now_ms())
+    );
+    // The retry timer can win selection before the queued cooldown command.
+    crate::client_transport::retry_due_services(
+        &fixture.context.inner,
+        &mut fixture.sender,
+        &mut fixture.links,
+    )
+    .await;
+    assert_eq!(fixture.sender.connection_count(), 0);
+    assert!(!fixture.sender.selected_peers.contains_key(&peer.npub()));
+    assert!(!fixture.sender.queues.contains_key(&peer.npub()));
+    assert!(!fixture.links.contains_key(&peer.npub()));
+    assert_eq!(fixture.sender.next_service_retry_at(), None);
+    fixture.close().await;
+}
+
 async fn raw_client(endpoint: &Arc<FipsEndpoint>, seed: u64) -> FipsTcpEndpoint {
     timeout(Duration::from_secs(5), async {
         while !endpoint

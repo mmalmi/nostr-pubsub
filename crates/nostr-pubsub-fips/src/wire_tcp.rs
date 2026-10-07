@@ -16,6 +16,8 @@ const SERVICE_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
 mod inbound;
 use inbound::InboundPeers;
+mod retry;
+use retry::ServiceRetry;
 
 type ReceivedFrames = Vec<(PeerIdentity, Vec<u8>)>;
 
@@ -44,7 +46,7 @@ pub(crate) struct WireTcpDriver {
     local_npub: String,
     // Next outbound attempt per selected peer; failed/short-lived services must
     // not turn the polling timer or application sends into a handshake loop.
-    selected_peers: BTreeMap<String, Option<Instant>>,
+    selected_peers: BTreeMap<String, ServiceRetry>,
     inbound: InboundPeers,
     tcp: FipsTcpEndpoint,
     options: WireTcpOptions,
@@ -136,29 +138,42 @@ impl WireTcpDriver {
     pub async fn connect_peer(&mut self, peer_npub: &str, now_ms: u64) -> Result<()> {
         self.ensure_peer_selected(peer_npub)?;
         if self.has_peer_connection(peer_npub) {
+            if let Some(retry) = self.selected_peers.get_mut(peer_npub) {
+                retry.in_flight();
+            }
             return Ok(());
         }
         if self.is_inbound(peer_npub) {
             return Err(storage("Inbound client has no live TCP connection"));
         }
-        if self.selected_peers[peer_npub].is_some_and(|retry_at| Instant::now() < retry_at) {
+        if self.selected_peers[peer_npub].is_waiting(Instant::now()) {
             return Ok(());
         }
-        self.ensure_peer_capacity(peer_npub)?;
-        let peer = PeerIdentity::from_npub(peer_npub)
-            .map_err(|error| storage_error("decode TCP/FIPS Nostr pubsub peer", error))?;
-        // Keep this deadline through connect errors, stream closes and link
-        // refreshes. Only deselection releases it along with the peer's queue.
+        if let Err(error) = self.ensure_peer_capacity(peer_npub) {
+            self.note_service_failure(peer_npub);
+            return Err(error);
+        }
+        let peer = match PeerIdentity::from_npub(peer_npub) {
+            Ok(peer) => peer,
+            Err(error) => {
+                self.note_service_failure(peer_npub);
+                return Err(storage_error("decode TCP/FIPS Nostr pubsub peer", error));
+            }
+        };
+        // Retain retry history across failures and link refreshes. Deselection
+        // releases it along with the peer's queue; a real connection resets it.
         // Wall-clock adjustments must not bypass or prolong this retry delay.
-        self.selected_peers.insert(
-            peer_npub.to_owned(),
-            Some(Instant::now() + SERVICE_RETRY_INTERVAL),
-        );
-        let id = self
-            .tcp
-            .connect(peer, now_ms)
-            .await
-            .map_err(|error| storage_error("connect TCP/FIPS Nostr pubsub peer", error))?;
+        self.selected_peers
+            .get_mut(peer_npub)
+            .expect("selected peer")
+            .started(Instant::now());
+        let id = match self.tcp.connect(peer, now_ms).await {
+            Ok(id) => id,
+            Err(error) => {
+                self.note_service_failure(peer_npub);
+                return Err(storage_error("connect TCP/FIPS Nostr pubsub peer", error));
+            }
+        };
         self.connections.insert(
             id,
             TrackedConnection {
@@ -167,6 +182,40 @@ impl WireTcpDriver {
             },
         );
         Ok(())
+    }
+
+    fn note_service_failure(&mut self, peer: &str) {
+        if let Some(retry) = self.selected_peers.get_mut(peer) {
+            retry.failed(Instant::now());
+        }
+    }
+
+    pub(crate) fn next_service_retry_at(&self) -> Option<Instant> {
+        self.selected_peers
+            .values()
+            .filter_map(ServiceRetry::next_retry_at)
+            .min()
+    }
+
+    pub(crate) fn due_service_peers(&self) -> Vec<String> {
+        let now = Instant::now();
+        self.selected_peers
+            .iter()
+            .filter_map(|(peer, retry)| {
+                retry
+                    .next_retry_at()
+                    .filter(|at| *at <= now)
+                    .map(|_| peer.clone())
+            })
+            .collect()
+    }
+
+    pub(crate) fn service_discovered(&mut self, peer: &str) {
+        if !self.has_peer_connection(peer)
+            && let Some(retry) = self.selected_peers.get_mut(peer)
+        {
+            retry.service_discovered(Instant::now());
+        }
     }
 
     pub fn queue_frame(&mut self, peer: PeerIdentity, frame: &[u8]) -> Result<()> {
@@ -230,6 +279,10 @@ impl WireTcpDriver {
 
     pub async fn abort_peer(&mut self, peer: PeerIdentity) -> Result<()> {
         let peer_npub = peer.npub();
+        let had_connection = self
+            .connections
+            .values()
+            .any(|connection| connection.peer == peer_npub);
         // Includes SYN-RECEIVED tuples not yet returned by accept(). Otherwise
         // releasing an inbound lease could hide TCP state from our peer cap.
         let result = self
@@ -241,6 +294,9 @@ impl WireTcpDriver {
             .retain(|_, connection| connection.peer != peer_npub);
         self.active.remove(&peer_npub);
         self.inputs.remove(&peer_npub);
+        if had_connection {
+            self.note_service_failure(&peer_npub);
+        }
         if let Some(queue) = self.queues.get_mut(&peer_npub) {
             queue.restart();
         }
@@ -323,8 +379,20 @@ impl WireTcpDriver {
     }
 
     async fn refresh_active(&mut self) -> Result<Vec<PeerIdentity>> {
-        self.connections
-            .retain(|id, _| self.tcp.state(*id).is_some());
+        let mut closed = BTreeSet::new();
+        self.connections.retain(|id, connection| {
+            if self.tcp.state(*id).is_some() {
+                true
+            } else {
+                closed.insert(connection.peer.clone());
+                false
+            }
+        });
+        for peer in closed {
+            if !self.has_peer_connection(&peer) {
+                self.note_service_failure(&peer);
+            }
+        }
         let mut candidates = BTreeMap::<String, Vec<(ConnectionId, Direction)>>::new();
         for (id, connection) in &self.connections {
             if matches!(
@@ -346,6 +414,9 @@ impl WireTcpDriver {
                 (!preferred, id.get())
             });
             let (selected, _) = streams.remove(0);
+            if let Some(retry) = self.selected_peers.get_mut(&peer) {
+                retry.connected(Instant::now());
+            }
             next_active.insert(peer, selected);
             extras.extend(streams.into_iter().map(|(id, _)| id));
         }
@@ -667,6 +738,18 @@ mod tests {
     use fips_core::config::{IdentityConfig, SimTransportConfig, TransportInstances};
     use fips_core::{Config, Identity, SimNetwork, register_sim_network, unregister_sim_network};
 
+    fn options(peer_capacity: usize) -> WireTcpOptions {
+        WireTcpOptions {
+            frame_capacity: 1024,
+            peer_capacity,
+            inbound_peer_capacity: 0,
+            queue_records_per_peer: 4,
+            queue_bytes_per_peer: 4096,
+            drive_io_bytes: 4096,
+            drive_frames: 4,
+        }
+    }
+
     #[test]
     fn oversized_record_prefix_is_ready_for_rejection_without_filling_the_buffer() {
         for declared in [1025_u32, u32::MAX] {
@@ -708,21 +791,9 @@ mod tests {
         });
         peers.sort_by_key(PeerIdentity::npub);
         let [healthy, malformed] = peers;
-        let mut driver = WireTcpDriver::bind(
-            endpoint.clone(),
-            WireTcpOptions {
-                frame_capacity: 1024,
-                peer_capacity: 2,
-                inbound_peer_capacity: 0,
-                queue_records_per_peer: 4,
-                queue_bytes_per_peer: 4096,
-                drive_io_bytes: 4096,
-                drive_frames: 4,
-            },
-            99,
-        )
-        .await
-        .unwrap();
+        let mut driver = WireTcpDriver::bind(endpoint.clone(), options(2), 99)
+            .await
+            .unwrap();
         driver
             .select_peers(peers.map(|peer| peer.npub()).into())
             .await;
@@ -785,21 +856,9 @@ mod tests {
             .await
             .unwrap(),
         );
-        let mut driver = WireTcpDriver::bind(
-            endpoint.clone(),
-            WireTcpOptions {
-                frame_capacity: 1024,
-                peer_capacity: 1,
-                inbound_peer_capacity: 0,
-                queue_records_per_peer: 4,
-                queue_bytes_per_peer: 4096,
-                drive_io_bytes: 4096,
-                drive_frames: 4,
-            },
-            73,
-        )
-        .await
-        .unwrap();
+        let mut driver = WireTcpDriver::bind(endpoint.clone(), options(1), 73)
+            .await
+            .unwrap();
         let early =
             PeerIdentity::from_npub(&Identity::from_secret_bytes(&[72; 32]).unwrap().npub())
                 .unwrap();
@@ -827,6 +886,12 @@ mod tests {
         driver.connect_peer(&early.npub(), 0).await.unwrap();
         assert_eq!(driver.connection_count(), 1);
 
+        assert_failed_handshake_defers_redial(&mut driver, early).await;
+        assert_eq!(
+            driver.queues[&early.npub()].bytes,
+            b"partly-written".len() + 4
+        );
+
         driver.select_peers(BTreeSet::from([late.npub()])).await;
         assert!(!driver.queues.contains_key(&early.npub()));
         assert!(driver.queue_frame(early, b"delayed old command").is_err());
@@ -846,13 +911,16 @@ mod tests {
         driver
             .select_peers(BTreeSet::from([invalid.to_owned()]))
             .await;
-        driver.selected_peers.insert(
-            invalid.to_owned(),
-            Some(Instant::now() + SERVICE_RETRY_INTERVAL),
-        );
+        driver
+            .selected_peers
+            .get_mut(invalid)
+            .unwrap()
+            .next_attempt_at = Some(Instant::now() + SERVICE_RETRY_INTERVAL);
         driver.connect_peer(invalid, 0).await.unwrap();
         assert_eq!(driver.connection_count(), 0);
-        driver.selected_peers.insert(invalid.to_owned(), None);
+        driver
+            .selected_peers
+            .insert(invalid.to_owned(), ServiceRetry::default());
         let error = driver.connect_peer(invalid, 0).await.unwrap_err();
         assert!(
             error
@@ -864,5 +932,31 @@ mod tests {
         drop(driver);
         endpoint.shutdown().await.unwrap();
         unregister_sim_network(&network);
+    }
+
+    async fn assert_failed_handshake_defers_redial(driver: &mut WireTcpDriver, peer: PeerIdentity) {
+        // TCP's unanswered SYN can outlive the initial service retry deadline.
+        // Drive that real timeout, with its old monotonic deadline expired, and
+        // verify that peer sync/application sends cannot immediately redial it.
+        let expiring = *driver.connections.keys().next().unwrap();
+        driver
+            .selected_peers
+            .get_mut(&peer.npub())
+            .unwrap()
+            .next_attempt_at = Instant::now().checked_sub(SERVICE_RETRY_INTERVAL);
+        for tick in 1..=10 {
+            driver.poll(tick * 60_000).await.unwrap();
+            if driver.tcp.state(expiring).is_none() {
+                break;
+            }
+        }
+        assert!(driver.tcp.state(expiring).is_none());
+        assert_eq!(driver.connection_count(), 0);
+        driver.connect_peer(&peer.npub(), 700_000).await.unwrap();
+        assert_eq!(
+            driver.connection_count(),
+            0,
+            "a failed service needs a fresh cooldown after the TCP timeout"
+        );
     }
 }
