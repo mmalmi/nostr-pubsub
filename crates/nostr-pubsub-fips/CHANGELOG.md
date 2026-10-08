@@ -14,6 +14,12 @@
 - Include corrected TCP acknowledgment recovery while preserving the pubsub
   wire format, query deadlines, and TCP timer cadence.
 
+## 0.5.21 - 2026-10-08
+
+- Require TCP/FIPS 0.2.4 to avoid false fast retransmission on receiver window
+  updates and to reset stale duplicate acknowledgment counts. Keep FIPS core
+  0.4.94, TCP endpoint 0.2.29, discovery policy, and pubsub behavior unchanged.
+
 ## 0.5.20 - 2026-10-06
 
 - Preserve pending replies and peer subscriptions when an inbound pubsub peer
