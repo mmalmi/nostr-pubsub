@@ -379,6 +379,22 @@ impl WireTcpDriver {
     }
 
     async fn refresh_active(&mut self) -> Result<Vec<PeerIdentity>> {
+        // Most TCP timer turns retain the same established streams. Reuse the
+        // selected map instead of cloning and sorting every peer twice per turn.
+        if self.connections.len() == self.active.len()
+            && self.connections.iter().all(|(id, connection)| {
+                self.tcp.state(*id) == Some(State::Established)
+                    && self.active.get(&connection.peer) == Some(id)
+            })
+        {
+            let now = Instant::now();
+            for peer in self.active.keys() {
+                if let Some(retry) = self.selected_peers.get_mut(peer) {
+                    retry.connected(now);
+                }
+            }
+            return Ok(Vec::new());
+        }
         let mut closed = BTreeSet::new();
         self.connections.retain(|id, connection| {
             if self.tcp.state(*id).is_some() {

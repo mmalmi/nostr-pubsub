@@ -40,8 +40,8 @@ async fn rejected_service_recovers(accept_close: bool, sustained_failure: bool) 
     })
     .await
     .expect("the actual client sent its initial SYN");
-    let until = Instant::now()
-        + Duration::from_millis(if sustained_failure { 7_000 } else { 3_300 });
+    let until =
+        Instant::now() + Duration::from_millis(if sustained_failure { 7_000 } else { 3_300 });
     while Instant::now() < until {
         if accept_close {
             // Public API actions reach TransportCommand::Send independently of
@@ -121,7 +121,8 @@ fn assert_retry_schedule(observed: &[Instant], sustained_failure: bool) {
     );
     if sustained_failure {
         assert_eq!(
-            observed.len(), 2,
+            observed.len(),
+            2,
             "accepting TCP without keeping the service alive must not reset failure backoff: {observed:?}"
         );
     }
