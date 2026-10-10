@@ -18,9 +18,9 @@ repository = "https://github.com/mmalmi/nostr-pubsub"
 
 [workspace.dependencies]
 async-trait = "0.1"
-nvpn-fips-core = { version = "=0.4.95" }
+nvpn-fips-core = { version = "=0.4.96" }
 nvpn-fips-tcp = { version = "=0.2.5" }
-nvpn-fips-tcp-endpoint = { version = "=0.2.30" }
+nvpn-fips-tcp-endpoint = { version = "=0.2.31" }
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
 nostr-pubsub = { version = "0.1.16", path = "crates/nostr-pubsub" }

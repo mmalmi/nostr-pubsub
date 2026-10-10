@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.23 - 2026-10-10
+
+- Require FIPS core 0.4.96 and TCP endpoint 0.2.31 for bounded handshake retries
+  and control processing. Preserve pubsub behavior, query deadlines, and wire formats.
+
 ## 0.5.22 - 2026-10-08
 
 - Require FIPS core 0.4.95, TCP core 0.2.5, and TCP endpoint 0.2.30 to bound idle
