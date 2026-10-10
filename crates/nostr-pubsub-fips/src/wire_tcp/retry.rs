@@ -1,6 +1,6 @@
 use super::{Duration, Instant, SERVICE_RETRY_INTERVAL};
 
-const MAX_SERVICE_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_SERVICE_RETRY_INTERVAL: Duration = Duration::from_mins(1);
 const STABLE_SERVICE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
@@ -97,7 +97,7 @@ mod tests {
         let mut now = Instant::now();
         for seconds in [3, 6, 12, 24, 48, 60, 60] {
             retry.started(now);
-            now += Duration::from_secs(300);
+            now += Duration::from_mins(5);
             retry.failed(now);
             let due = now + Duration::from_secs(seconds);
             assert!(retry.is_waiting(due.checked_sub(Duration::from_millis(1)).unwrap()));
