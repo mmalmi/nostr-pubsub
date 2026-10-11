@@ -66,7 +66,6 @@ pub const FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS: usize = 16_384;
 /// Maximum encoded Nostr frame carried in one reliable TCP record.
 pub const FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES: usize = u16::MAX as usize - 10;
 
-const TCP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const FIPS_PEER_ADVERT_REFRESH_INTERVAL: Duration = Duration::from_mins(30);
 
 /// Resource limits and replay window for a FIPS pubsub client.

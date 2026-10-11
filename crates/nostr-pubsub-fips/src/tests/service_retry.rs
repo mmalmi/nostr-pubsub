@@ -270,7 +270,7 @@ impl MeshPeerPolicy for CountingPeerPolicy {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn idle_peer_selection_is_slower_than_tcp_timers_without_delaying_messages() {
+async fn idle_connections_sleep_without_delaying_messages() {
     let (network, a, b) = endpoints().await;
     let policy = Arc::new(CountingPeerPolicy::default());
     let alice = FipsPubsubClient::start_for_peer_selection(
@@ -310,10 +310,7 @@ async fn idle_peer_selection_is_slower_than_tcp_timers_without_delaying_messages
     bob.shutdown().await;
     shutdown(&network, a, b).await;
 
-    assert!(
-        polls >= 8,
-        "TCP retransmission polling must remain timely: {polls}"
-    );
+    assert_eq!(polls, 0, "idle established TCP streams need no polling");
     assert!(
         selections <= 4,
         "idle peer selection must not run on every TCP poll: {selections}"

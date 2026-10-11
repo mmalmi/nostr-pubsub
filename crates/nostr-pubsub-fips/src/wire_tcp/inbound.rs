@@ -35,8 +35,8 @@ impl InboundPeers {
             *last_seen = now;
             return true;
         }
-        if self.0.len() >= options.inbound_peer_capacity
-            || self.0.len() + selected.len() >= options.peer_capacity
+        if self.len() >= options.inbound_peer_capacity
+            || self.len() + selected.len() >= options.peer_capacity
             || !initial_syn(bytes)
         {
             return false;

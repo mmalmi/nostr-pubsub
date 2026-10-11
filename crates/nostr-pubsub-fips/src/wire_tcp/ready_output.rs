@@ -1,3 +1,4 @@
+use super::tests::connection_count;
 use super::*;
 use crate::client_transport::finish_ready_turn;
 use crate::{FipsPubsubClient, FipsPubsubClientOptions, TransportCommand, now_ms};
@@ -77,8 +78,8 @@ impl Fixture {
                     }
                 }
                 tokio::select! {
-                    report = sender.receive(now_ms()) => { report.unwrap(); }
-                    report = receiver.receive(now_ms()) => { report.unwrap(); }
+                    report = sender.receive() => { report.unwrap(); }
+                    report = receiver.receive() => { report.unwrap(); }
                     () = tokio::time::sleep(Duration::from_millis(1)) => {}
                 }
             }
@@ -123,7 +124,7 @@ impl Fixture {
             while frames.len() < count {
                 frames.extend(
                     self.receiver
-                        .receive(now_ms())
+                        .receive()
                         .await
                         .unwrap()
                         .frames
@@ -239,7 +240,7 @@ async fn scheduled_service_retry_honors_a_new_provider_cooldown() {
         &mut fixture.links,
     )
     .await;
-    assert_eq!(fixture.sender.connection_count(), 0);
+    assert_eq!(connection_count(&fixture.sender), 0);
     assert!(!fixture.sender.selected_peers.contains_key(&peer.npub()));
     assert!(!fixture.sender.queues.contains_key(&peer.npub()));
     assert!(!fixture.links.contains_key(&peer.npub()));
@@ -364,7 +365,7 @@ async fn public_client_close_reclaims_hidden_syn_and_same_turn_request_state() {
                 .await
                 .unwrap()
                 .unwrap();
-            driver.receive(now_ms()).await.unwrap();
+            driver.receive().await.unwrap();
             assert_eq!(configured_tcp.state(id), Some(State::Established));
         }
         assert!(driver.active.contains_key(configured.npub()));
@@ -412,7 +413,7 @@ async fn unselected_peer_syn_is_rejected_before_tcp_admission() {
     let report = timeout(Duration::from_secs(5), async {
         loop {
             tokio::select! {
-                report = receiver.receive(now_ms()) => break report.unwrap(),
+                report = receiver.receive() => break report.unwrap(),
                 () = tokio::time::sleep(Duration::from_millis(10)) => {
                     sender.poll(now_ms()).await.unwrap();
                 }
@@ -421,7 +422,7 @@ async fn unselected_peer_syn_is_rejected_before_tcp_admission() {
     })
     .await
     .expect("unselected peer sends an authenticated TCP SYN");
-    let retained = receiver.connection_count();
+    let retained = connection_count(&receiver);
     drop(sender);
     drop(receiver);
     local.shutdown().await.unwrap();
@@ -517,11 +518,7 @@ async fn ready_output_preserves_byte_budget_and_stops_on_tcp_backpressure() {
     // without a sender timer poll. The receiver alone drains its bounded reads.
     for _ in 0..8 {
         fixture.receiver.poll(now_ms()).await.unwrap();
-        let _ = timeout(
-            Duration::from_millis(10),
-            fixture.receiver.receive(now_ms()),
-        )
-        .await;
+        let _ = timeout(Duration::from_millis(10), fixture.receiver.receive()).await;
     }
     timeout(Duration::from_secs(2), async {
         while fixture
@@ -530,11 +527,89 @@ async fn ready_output_preserves_byte_budget_and_stops_on_tcp_backpressure() {
             .get(&fixture.peer.npub())
             .is_some_and(|queue| queue.bytes == pending)
         {
-            fixture.sender.receive(now_ms()).await.unwrap();
+            fixture.sender.receive().await.unwrap();
         }
     })
     .await
     .expect("ACK-driven ready IO resumes the queued write");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn bounded_input_keeps_draining_without_new_datagrams_or_periodic_polls() {
+    for (bytes, frames) in [(4096, 1), (3, 8)] {
+        let mut fixture = Fixture::new(4096, 4096).await;
+        fixture.receiver.options.drive_io_bytes = bytes;
+        fixture.receiver.options.drive_frames = frames;
+        let expected = (0..4).map(|n| vec![n; 4]).collect::<Vec<_>>();
+        for frame in &expected {
+            fixture.sender.queue_frame(fixture.peer, frame).unwrap();
+        }
+        fixture.sender.flush_queues(now_ms(), 0).await.unwrap();
+        // Consume every carrier datagram before reading any stream bytes. No
+        // further input is available to rescue a stranded decoder or TCP buffer.
+        let mut received = 0;
+        while received < 4 {
+            received += receive_before_drive(&mut fixture.receiver).await;
+        }
+        let mut delivered = Vec::new();
+        let mut report = fixture.receiver.drive_ready(now_ms()).await.unwrap();
+        for _ in 0..32 {
+            delivered.extend(report.frames.into_iter().map(|(_, frame)| frame));
+            if fixture.receiver.next_poll_at(now_ms()).is_none() {
+                break;
+            }
+            let now = now_ms();
+            assert_eq!(fixture.receiver.next_poll_at(now), Some(now));
+            report = fixture.receiver.poll(now).await.unwrap();
+        }
+        assert_eq!(delivered, expected);
+        assert_eq!(fixture.receiver.next_poll_at(now_ms()), None);
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn bounded_output_continues_then_sleeps_on_a_full_tcp_send_buffer() {
+    let mut fixture = Fixture::new(8, 16).await;
+    for value in 0..2 {
+        fixture
+            .sender
+            .queue_frame(fixture.peer, &[value; 4])
+            .unwrap();
+    }
+    assert_eq!(fixture.sender.flush_queues(now_ms(), 0).await.unwrap(), 8);
+    let now = now_ms();
+    assert_eq!(fixture.sender.next_poll_at(now), Some(now));
+    assert_eq!(fixture.sender.poll(now).await.unwrap().written_bytes, 8);
+    assert!(fixture.sender.queues.is_empty());
+    fixture.sender.queue_frame(fixture.peer, &[2; 4]).unwrap();
+    let report = fixture.sender.poll(now_ms()).await.unwrap();
+    assert_eq!(report.written_bytes, 0);
+    assert_eq!(fixture.sender.queues[&fixture.peer.npub()].bytes, 8);
+    let now = now_ms();
+    assert!(
+        fixture.sender.next_poll_at(now).unwrap() > now,
+        "full TCP buffer must wait for ACK or its existing retry deadline"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn peer_sync_restores_fast_retry_after_a_healthy_idle_connection() {
+    let mut fixture = Fixture::new(4096, 4096).await;
+    let peer = fixture.peer.npub();
+    let old = Instant::now() - Duration::from_secs(31);
+    let retry = fixture.sender.selected_peers.get_mut(&peer).unwrap();
+    for _ in 0..6 {
+        retry.failed(old);
+    }
+    retry.connected(old);
+    fixture.sender.connect_peer(&peer, now_ms()).await.unwrap();
+    let now = Instant::now();
+    let retry = fixture.sender.selected_peers.get_mut(&peer).unwrap();
+    retry.failed(now);
+    assert_eq!(retry.next_retry_at(), Some(now + SERVICE_RETRY_INTERVAL));
     fixture.close().await;
 }
 
@@ -636,8 +711,8 @@ async fn discovered_inbound_peer_keeps_its_pending_reply_when_selected() {
                 break;
             }
             tokio::select! {
-                r = sender.receive(now_ms()) => { r.unwrap(); }
-                r = receiver.receive(now_ms()) => { r.unwrap(); }
+                r = sender.receive() => { r.unwrap(); }
+                r = receiver.receive() => { r.unwrap(); }
                 () = tokio::time::sleep(Duration::from_millis(1)) => {}
             }
         }
@@ -659,10 +734,10 @@ async fn discovered_inbound_peer_keeps_its_pending_reply_when_selected() {
             sender.poll(now_ms()).await.unwrap();
             receiver.poll(now_ms()).await.unwrap();
             tokio::select! {
-                r = sender.receive(now_ms()) => {
+                r = sender.receive() => {
                     if r.unwrap().frames.iter().any(|(_, frame)| frame == b"pending historical reply") { break; }
                 }
-                r = receiver.receive(now_ms()) => { r.unwrap(); }
+                r = receiver.receive() => { r.unwrap(); }
                 () = tokio::time::sleep(Duration::from_millis(1)) => {}
             }
         }

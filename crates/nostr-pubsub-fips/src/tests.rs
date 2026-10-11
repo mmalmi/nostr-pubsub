@@ -22,7 +22,6 @@ use nostr_social_memory::RatingEventExt;
 use tokio::time::timeout;
 
 use super::*;
-use crate::client_transport::tcp_driver_poll_needed;
 
 mod delivery;
 mod late_events;
@@ -37,17 +36,6 @@ mod shutdown;
 mod state;
 mod turnover;
 mod websocket_restart;
-
-#[test]
-fn tcp_timer_poll_matches_the_minimum_retransmission_granularity() {
-    assert_eq!(TCP_POLL_INTERVAL, Duration::from_millis(200));
-}
-
-#[test]
-fn idle_transport_does_not_poll_an_empty_tcp_stack() {
-    assert!(!tcp_driver_poll_needed(0));
-    assert!(tcp_driver_poll_needed(1));
-}
 
 #[test]
 fn event_fanout_is_bounded_stable_and_rotates_across_events() {

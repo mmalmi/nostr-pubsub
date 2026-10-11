@@ -2,7 +2,7 @@ use std::{sync::Weak, time::Duration};
 
 use super::{
     ClientInner, HashMap, HashSet, Ordering, PeerIdentity, PeerLinkEpoch, SourceId,
-    TCP_POLL_INTERVAL, TransportCommand, WireTcpDriver, mpsc, now_ms,
+    TransportCommand, WireTcpDriver, mpsc, now_ms,
 };
 use crate::wire_tcp::WireTcpReport;
 
@@ -16,8 +16,6 @@ pub(super) async fn transport_loop(
     mut commands: mpsc::Receiver<TransportCommand>,
 ) {
     let start = tokio::time::Instant::now();
-    let mut poll_tick = tokio::time::interval_at(start, TCP_POLL_INTERVAL);
-    poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut peer_tick = tokio::time::interval_at(start + PEER_SYNC_INTERVAL, PEER_SYNC_INTERVAL);
     peer_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut known_links = HashMap::new();
@@ -32,6 +30,10 @@ pub(super) async fn transport_loop(
         let service_retry_at = driver
             .next_service_retry_at()
             .map(tokio::time::Instant::from_std);
+        let now = now_ms();
+        let poll_delay = driver
+            .next_poll_at(now)
+            .map(|due| Duration::from_millis(due.saturating_sub(now)));
         let (first, already_written) = tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else {
@@ -39,7 +41,7 @@ pub(super) async fn transport_loop(
                 };
                 (Some(command), 0)
             }
-            report = driver.receive(now_ms()) => {
+            report = driver.receive() => {
                 if let Ok(report) = report {
                     inner.tcp_receive_batches.fetch_add(1, Ordering::Relaxed);
                     let written = report.written_bytes;
@@ -60,7 +62,7 @@ pub(super) async fn transport_loop(
                 retry_due_services(&inner, &mut driver, &mut known_links).await;
                 (None, 0)
             }
-            _ = poll_tick.tick(), if tcp_driver_poll_needed(driver.connection_count()) => {
+            () = tokio::time::sleep(poll_delay.unwrap_or(Duration::ZERO)), if poll_delay.is_some() => {
                 inner.tcp_poll_turns.fetch_add(1, Ordering::Relaxed);
                 let written = if let Ok(report) = driver.poll(now_ms()).await {
                     let written = report.written_bytes;
@@ -152,10 +154,6 @@ async fn forget_cooled_peer(
     known_links.remove(&peer.npub());
     forget_peer_state(inner, &peer.npub());
     let _ = driver.forget_peer(peer).await;
-}
-
-pub(super) const fn tcp_driver_poll_needed(connection_count: usize) -> bool {
-    connection_count != 0
 }
 
 async fn sync_transport_peers(
