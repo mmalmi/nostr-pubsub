@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.24 - 2026-10-11
+
+- Wake TCP processing at retransmission, probe, and close deadlines instead of
+  polling idle streams. Continue buffered application work immediately and
+  retain the independent peer-discovery cadence and retry backoff.
+- Select on input readiness, then finish the selected receive batch without
+  cancellation by another command or timer.
+- Compare cached binary event IDs directly and avoid rebuilding peer identities
+  just to format a publish receipt.
+- Require FIPS core 0.4.97, TCP core 0.2.6, and TCP endpoint 0.2.32. Preserve the
+  pubsub wire format, resource bounds, and cryptographic event verification.
+
 ## 0.5.23 - 2026-10-10
 
 - Require FIPS core 0.4.96 and TCP endpoint 0.2.31 for bounded handshake retries

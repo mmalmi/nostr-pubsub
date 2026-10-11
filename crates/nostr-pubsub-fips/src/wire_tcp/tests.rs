@@ -213,10 +213,10 @@ async fn assert_failed_handshake_defers_redial(driver: &mut WireTcpDriver, peer:
         }
     }
     assert!(driver.tcp.state(expiring).is_none());
-    assert_eq!(connection_count(&driver), 0);
+    assert_eq!(connection_count(driver), 0);
     driver.connect_peer(&peer.npub(), 700_000).await.unwrap();
     assert_eq!(
-        connection_count(&driver),
+        connection_count(driver),
         0,
         "a failed service needs a fresh cooldown after the TCP timeout"
     );

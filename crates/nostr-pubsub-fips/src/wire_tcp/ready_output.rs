@@ -599,7 +599,9 @@ async fn bounded_output_continues_then_sleeps_on_a_full_tcp_send_buffer() {
 async fn peer_sync_restores_fast_retry_after_a_healthy_idle_connection() {
     let mut fixture = Fixture::new(4096, 4096).await;
     let peer = fixture.peer.npub();
-    let old = Instant::now() - Duration::from_secs(31);
+    let old = Instant::now()
+        .checked_sub(Duration::from_secs(31))
+        .expect("represent stable connection history");
     let retry = fixture.sender.selected_peers.get_mut(&peer).unwrap();
     for _ in 0..6 {
         retry.failed(old);
