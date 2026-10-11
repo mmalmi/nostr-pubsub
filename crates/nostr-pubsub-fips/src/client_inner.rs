@@ -493,7 +493,6 @@ impl ClientInner {
             });
         }
 
-        let peers = self.connected_peers().await?;
         let subscribed = self.peer_delivery_targets(&event, None)?;
         let _admission = self.admit()?;
         let is_new = self
@@ -523,10 +522,7 @@ impl ClientInner {
         Ok(PublishReport {
             accepted: true,
             priority,
-            reason: Some(format!(
-                "cached for live subscriptions from {} connected FIPS peers",
-                peers.len()
-            )),
+            reason: Some("cached for live FIPS subscriptions".to_string()),
         })
     }
 
