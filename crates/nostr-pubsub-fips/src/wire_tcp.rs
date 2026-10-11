@@ -263,6 +263,13 @@ impl WireTcpDriver {
         Ok(())
     }
 
+    pub async fn wait_for_input(&mut self) -> Result<()> {
+        self.tcp
+            .wait_for_input()
+            .await
+            .map_err(|error| storage_error("wait for TCP/FIPS Nostr pubsub input", error))
+    }
+
     pub async fn receive(&mut self) -> Result<WireTcpReport> {
         let selected_peers = &self.selected_peers;
         let inbound = &mut self.inbound;

@@ -41,7 +41,13 @@ pub(super) async fn transport_loop(
                 };
                 (Some(command), 0)
             }
-            report = driver.receive() => {
+            ready = driver.wait_for_input() => {
+                // Once input wins selection, finish its TCP writes and bounded
+                // application reads without cancellation by another ready branch.
+                let report = match ready {
+                    Ok(()) => driver.receive().await,
+                    Err(error) => Err(error),
+                };
                 if let Ok(report) = report {
                     inner.tcp_receive_batches.fetch_add(1, Ordering::Relaxed);
                     let written = report.written_bytes;
