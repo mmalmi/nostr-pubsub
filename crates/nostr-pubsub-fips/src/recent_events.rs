@@ -1,7 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 
-use nostr::Filter;
+use nostr::{EventId, Filter};
 use nostr_pubsub::{
     EventSource, PubsubPeerInterest, QueryEvent, SOURCE_PRIORITY_FIPS_ENDPOINT,
     SubscriptionDeliveryStatus, VerifiedEvent,
@@ -183,9 +183,10 @@ impl RecentEvents {
     }
 
     pub(super) fn event(&self, event_id: &str) -> Option<&VerifiedEvent> {
+        let event_id = EventId::from_hex(event_id).ok()?;
         self.entries
             .iter()
-            .find(|cached| cached.event.as_event().id.to_string() == event_id)
+            .find(|cached| cached.event.as_event().id == event_id)
             .map(|cached| &cached.event)
     }
 

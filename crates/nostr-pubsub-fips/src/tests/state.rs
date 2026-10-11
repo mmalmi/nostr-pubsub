@@ -20,6 +20,12 @@ fn accepted_event_ids_outlive_full_payload_replay() {
     }
     assert_eq!(recent.entries.len(), 1);
     assert!(recent.contains(&events[0].as_event().id.to_string()));
+    assert_eq!(
+        recent.event(&events[2].as_event().id.to_hex()),
+        Some(&events[2])
+    );
+    assert!(recent.event(&events[0].as_event().id.to_hex()).is_none());
+    assert!(recent.event("invalid event id").is_none());
 
     assert!(recent.insert(events[3].clone(), EventSource::local_index("test"), 1,));
     assert!(!recent.contains(&events[0].as_event().id.to_string()));
