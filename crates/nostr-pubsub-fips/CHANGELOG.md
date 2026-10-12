@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.27 - 2026-10-13
+
+- Require FIPS core 0.4.99 and TCP endpoint 0.2.34 for application-owned carrier
+  sockets and host name resolution. Preserve pubsub wire formats, resource bounds,
+  and cryptographic event verification.
+
 ## 0.5.26 - 2026-10-12
 
 - Keep events with exhausted hop budgets available to local subscriptions, but
