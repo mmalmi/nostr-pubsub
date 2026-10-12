@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.26 - 2026-10-12
+
+- Keep events with exhausted hop budgets available to local subscriptions, but
+  omit them from peer replay before applying the request limit. This prevents
+  invalid zero-hop inventory frames and leaves room for forwardable events.
+
 ## 0.5.24 - 2026-10-11
 
 - Wake TCP processing at retransmission, probe, and close deadlines instead of

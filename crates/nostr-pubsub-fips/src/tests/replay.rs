@@ -2,6 +2,86 @@ use super::routed::{signed_note, udp_endpoint};
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exhausted_hops_stay_local_and_do_not_consume_peer_replay_limit() {
+    let a = udp_endpoint([95; 32], Vec::new()).await;
+    let publisher = FipsPubsubClient::start(
+        a.clone(),
+        FipsPubsubClientOptions {
+            max_hops: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let addr = a.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+    let b = udp_endpoint([96; 32], vec![PeerConfig::new(a.npub(), "udp", &addr)]).await;
+    let relay = FipsPubsubClient::start(b.clone(), FipsPubsubClientOptions::default())
+        .await
+        .unwrap();
+    let filter = Filter::new().kind(Kind::TextNote);
+    let mut inbound = relay.subscribe(vec![filter.clone()]).await.unwrap();
+    let exhausted = (0..3)
+        .map(|i| signed_note(&format!("last hop {i}")))
+        .collect::<Vec<_>>();
+    for event in &exhausted {
+        publisher
+            .publish(event.clone(), EventSource::local_index("origin"))
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(5), inbound.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .event,
+            *event
+        );
+    }
+    assert!(
+        relay
+            .inner
+            .recent_matching_events(std::slice::from_ref(&filter))
+            .unwrap()
+            .iter()
+            .all(|cached| cached.hop_limit == 0)
+    );
+    // Exhausted events remain available to new local subscriptions.
+    let mut local = relay.subscribe(vec![filter.clone()]).await.unwrap();
+    for event in &exhausted {
+        assert_eq!(local.recv().await.unwrap().event, *event);
+    }
+    let retained = signed_note("forwardable retained announcement");
+    relay
+        .publish(retained.clone(), EventSource::local_index("release"))
+        .await
+        .unwrap();
+    let addr = b.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+    let c = udp_endpoint([97; 32], vec![PeerConfig::new(b.npub(), "udp", &addr)]).await;
+    let receiver = FipsPubsubClient::start(c.clone(), FipsPubsubClientOptions::default())
+        .await
+        .unwrap();
+    // The three exhausted entries precede the valid event in the cache. They
+    // must neither produce invalid INV frames nor consume this replay budget.
+    let mut remote = receiver.subscribe(vec![filter.limit(1)]).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(5), remote.recv())
+            .await
+            .expect("forwardable event survives exhausted cached entries")
+            .unwrap()
+            .event,
+        retained
+    );
+    assert_eq!(receiver.delivery_snapshot().provider_cooldowns, 0);
+    drop((inbound, local, remote));
+    publisher.shutdown().await;
+    relay.shutdown().await;
+    receiver.shutdown().await;
+    a.shutdown().await.unwrap();
+    b.shutdown().await.unwrap();
+    c.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_outbox_retry_restores_a_payload_evicted_before_peer_arrival() {
     let a = udp_endpoint([91; 32], Vec::new()).await;
     let publisher = FipsPubsubClient::start(a.clone(), FipsPubsubClientOptions::default())

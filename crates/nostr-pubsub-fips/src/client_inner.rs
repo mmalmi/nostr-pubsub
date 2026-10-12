@@ -302,6 +302,7 @@ impl ClientInner {
             .recent_matching_events(filters)
             .unwrap_or_default()
             .into_iter()
+            .filter(|cached| cached.hop_limit > 0)
             .take(limit)
         {
             let Ok(frame) = self.inventory_frame(
