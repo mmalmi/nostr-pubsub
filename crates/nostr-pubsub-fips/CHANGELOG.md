@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.28 - 2026-10-14
+
+- Use FIPS core 0.4.100 and TCP endpoint 0.2.35 to reduce mobile crypto-worker
+  wakeups for isolated small packets while preserving pubsub behavior, wire
+  formats, authentication, and resource bounds.
+
 ## 0.5.27 - 2026-10-13
 
 - Require FIPS core 0.4.99 and TCP endpoint 0.2.34 for application-owned carrier
