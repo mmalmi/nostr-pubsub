@@ -16,9 +16,10 @@ use std::{
 
 use async_trait::async_trait;
 use nostr_pubsub::{
-    EventBus, EventSource, MatchEventOptions, NostrEventHandler, NostrEventSubscriber,
-    NostrEventSubscription, PublishReport, PubsubError, PubsubProvider, PubsubProviderMode,
-    QueryEvent, QueryOptions, QueryReport, Result, SOURCE_PRIORITY_RELAY, VerifiedEvent,
+    EventBus, EventSource, EventVerificationCache, MatchEventOptions, NostrEventHandler,
+    NostrEventSubscriber, NostrEventSubscription, PublishReport, PubsubError, PubsubProvider,
+    PubsubProviderMode, QueryEvent, QueryOptions, QueryReport, Result, SOURCE_PRIORITY_RELAY,
+    VerifiedEvent,
 };
 use nostr_sdk::{
     Client, ClientMessage, Filter, Keys, RelayMessage, RelayPoolNotification, SubscriptionId,
@@ -213,6 +214,7 @@ impl RelayEventBus {
         let replay_timeout = self.query_timeout;
         let notifications_task = tokio::spawn(async move {
             let mut replay = LiveReplay::default();
+            let mut verification = EventVerificationCache::default();
             loop {
                 let notification = tokio::select! {
                     notification = notifications.recv() => notification,
@@ -234,9 +236,9 @@ impl RelayEventBus {
                                 event,
                             },
                     }) if watched_filters.contains_key(subscription_id.as_ref()) => {
-                        if let Ok(event) = VerifiedEvent::try_from(event.into_owned())
-                            && watched_filters[subscription_id.as_ref()]
-                                .match_event(event.as_event(), MatchEventOptions::new())
+                        if watched_filters[subscription_id.as_ref()]
+                            .match_event(event.as_ref(), MatchEventOptions::new())
+                            && let Ok(event) = verification.verify(event.into_owned())
                             && !handler(QueryEvent {
                                 event,
                                 source: EventSource::relay(relay_url.to_string()),

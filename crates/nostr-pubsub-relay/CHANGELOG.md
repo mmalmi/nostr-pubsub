@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.14 - 2026-10-14
+
+- Reuse successful signature checks for live events repeated across relays or subscriptions, while preserving duplicate callbacks, filter checks, and tamper rejection.
+
 ## 0.1.13 - 2026-09-30
 
 - Recover live notification gaps with bounded replay of the original configured relay filters, preserving limits, expiry, duplicate callbacks, and client keys.

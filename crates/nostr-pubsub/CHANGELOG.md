@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.17 - 2026-10-14
+
+- Add a bounded signature verification cache for repeated events. Cache hits still verify the complete event body and require the exact previously verified signature.
+
 ## 0.1.16 - 2026-10-04
 
 - Expose optional live subscription delivery status through providers and the

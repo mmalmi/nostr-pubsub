@@ -1,6 +1,10 @@
 //! Minimal in-process pubsub primitives for Nostr event routing.
 
-use std::{fmt, str::FromStr};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    str::FromStr,
+};
 
 use async_trait::async_trait;
 use nostr::Event;
@@ -61,6 +65,47 @@ impl TryFrom<Event> for VerifiedEvent {
             .verify()
             .map_err(|error| PubsubError::Validation(format!("invalid Nostr event: {error}")))?;
         Ok(Self { event })
+    }
+}
+
+const VERIFICATION_CACHE_CAPACITY: usize = 512;
+
+/// Reuse successful signature checks when an event arrives through several sources.
+///
+/// Only event IDs and signatures are retained, with a fixed entry bound. Every
+/// cache hit still recomputes the event ID from its author and complete payload.
+#[derive(Default)]
+pub struct EventVerificationCache {
+    signatures: HashMap<EventId, [u8; 64]>,
+    order: VecDeque<EventId>,
+}
+
+impl EventVerificationCache {
+    pub fn verify(&mut self, event: Event) -> Result<VerifiedEvent> {
+        let signature = event.sig.serialize();
+        if self.signatures.get(&event.id) == Some(&signature) {
+            // An ID supplied by a relay is not proof of the event body. Bind
+            // the cached signature to the recomputed ID, which also covers
+            // the author, before constructing a verified event.
+            if !event.verify_id() {
+                return Err(PubsubError::Validation(
+                    "invalid Nostr event ID".to_string(),
+                ));
+            }
+            return Ok(VerifiedEvent { event });
+        }
+        let verified = VerifiedEvent::try_from(event)?;
+        let id = verified.as_event().id;
+        if !self.signatures.contains_key(&id) {
+            if self.order.len() == VERIFICATION_CACHE_CAPACITY
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.signatures.remove(&oldest);
+            }
+            self.order.push_back(id);
+        }
+        self.signatures.insert(id, signature);
+        Ok(verified)
     }
 }
 
@@ -335,6 +380,63 @@ fn subscription_filters_match(filters: &[Filter], event: &Event) -> bool {
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn verification_cache_rechecks_body_and_signature_on_relay_replays() {
+        let keys = Keys::generate();
+        let original = signed_event(&keys, Kind::TextNote, "original").into_event();
+        let other = signed_event(&Keys::generate(), Kind::TextNote, "other").into_event();
+        let mut cache = EventVerificationCache::default();
+        for _ in 0..3 {
+            assert_eq!(
+                cache.verify(original.clone()).unwrap().as_event(),
+                &original
+            );
+        }
+        let mut changed = original.clone();
+        changed.content.clone_from(&other.content);
+        assert!(cache.verify(changed).is_err());
+        let mut changed = original.clone();
+        changed.pubkey = other.pubkey;
+        assert!(cache.verify(changed).is_err());
+        let mut changed = original.clone();
+        changed.tags = nostr::Tags::from_list(vec![Tag::identifier("changed")]);
+        assert!(cache.verify(changed).is_err());
+        let mut changed = original.clone();
+        changed.id = other.id;
+        assert!(cache.verify(changed).is_err());
+        let mut changed = original.clone();
+        changed.sig = other.sig;
+        assert!(cache.verify(changed).is_err());
+        assert_eq!(
+            cache.verify(original.clone()).unwrap().as_event(),
+            &original
+        );
+        assert_eq!(cache.signatures.len(), 1);
+    }
+
+    #[test]
+    fn verification_cache_stays_bounded_and_revalidates_evicted_events() {
+        let keys = Keys::generate();
+        let original = signed_event(&keys, Kind::TextNote, "original").into_event();
+        let mut cache = EventVerificationCache::default();
+        cache.verify(original.clone()).unwrap();
+        for index in 0..VERIFICATION_CACHE_CAPACITY {
+            let event = signed_event(&keys, Kind::TextNote, &index.to_string()).into_event();
+            cache.verify(event).unwrap();
+        }
+        assert_eq!(cache.signatures.len(), VERIFICATION_CACHE_CAPACITY);
+        assert_eq!(cache.order.len(), VERIFICATION_CACHE_CAPACITY);
+        assert!(!cache.signatures.contains_key(&original.id));
+        let mut tampered = original.clone();
+        tampered.content.push_str("tampered");
+        assert!(cache.verify(tampered).is_err());
+        assert_eq!(
+            cache.verify(original.clone()).unwrap().as_event(),
+            &original
+        );
+        assert_eq!(cache.signatures.len(), VERIFICATION_CACHE_CAPACITY);
+    }
 
     #[test]
     fn retention_policy_accepts_matching_events_only() {
