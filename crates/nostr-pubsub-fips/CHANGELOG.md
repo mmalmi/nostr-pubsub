@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.29 - 2026-10-14
+
+- Use FIPS core 0.4.101 and TCP endpoint 0.2.36 for confirmed fallback recovery
+  after a lost initial UDP handshake reply and to retain received packets across
+  bounded processing turns. Keep the relay verification cache and existing pubsub
+  wire formats and resource bounds.
+
 ## 0.5.28 - 2026-10-14
 
 - Use FIPS core 0.4.100 and TCP endpoint 0.2.35 to reduce mobile crypto-worker
