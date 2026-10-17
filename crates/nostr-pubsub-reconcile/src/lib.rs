@@ -11,6 +11,9 @@ mod engine;
 
 mod validation;
 
+#[cfg(test)]
+mod malformed_tests;
+
 pub type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -40,3 +40,7 @@ The engine retains the MIT reference layout and upstream Rust storage types, wit
 correct tail fingerprints at frame boundaries. `tests/wire.rs` independently checks
 every emitted range; `tests/reconcile.rs` checks actual differences. The TypeScript
 suite exchanges real frames with the Rust `reconcile-stdio` fixture in both roles.
+
+Version 0.1.1 uses patched `negentropy` 0.5.2 and also validates ID-list lengths
+before allocating in the adapted engine (RUSTSEC-2026-0365). The public session's
+existing whole-frame validation remains in place; the wire format is unchanged.

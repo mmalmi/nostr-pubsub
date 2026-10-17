@@ -189,6 +189,12 @@ where
                 Mode::IdList => {
                     let num_ids: u64 = decode_var_int(&mut query)?;
 
+                    // Bound allocation by the actual frame, not the peer's count.
+                    // Keep the same check as negentropy 0.5.2 (RUSTSEC-2026-0365).
+                    if num_ids > (query.len() / ID_SIZE) as u64 {
+                        return Err(Error::ParseEndsPrematurely);
+                    }
+
                     let mut their_elems: HashSet<Id> = HashSet::with_capacity(
                         usize::try_from(num_ids).map_err(|_| Error::BadRange)?,
                     );
