@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.34 - 2026-10-18
+
+- Use FIPS core 0.4.106 and TCP endpoint 0.2.41 to retain the refreshed WebRTC
+  and mDNS fixes. Keep pubsub wire formats, authentication, and resource bounds.
+
 ## 0.5.33 - 2026-10-18
 
 - Use FIPS core 0.4.105 and TCP endpoint 0.2.40 for handshake reply hardening,
