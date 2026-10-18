@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.33 - 2026-10-18
+
+- Use FIPS core 0.4.105 and TCP endpoint 0.2.40 for handshake reply hardening,
+  failed tree announcement recovery, and DNS query screening. Keep pubsub wire
+  formats, event authentication, and resource bounds.
+
 ## 0.5.31 - 2026-10-18
 
 - Use FIPS core 0.4.103 and TCP endpoint 0.2.38 for routing-role status,
