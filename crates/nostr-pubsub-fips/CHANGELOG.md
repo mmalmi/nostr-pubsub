@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.31 - 2026-10-18
+
+- Use FIPS core 0.4.103 and TCP endpoint 0.2.38 for routing-role status,
+  initial connection-message recovery, and less repeated discovery verification.
+  Preserve pubsub wire formats, event authentication, and resource bounds.
+
 ## 0.5.30 - 2026-10-17
 
 - Use FIPS core 0.4.102 and TCP endpoint 0.2.37 for negotiated client-only
