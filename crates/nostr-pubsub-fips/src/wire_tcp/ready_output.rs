@@ -536,6 +536,33 @@ async fn ready_output_preserves_byte_budget_and_stops_on_tcp_backpressure() {
 }
 
 #[tokio::test]
+async fn coalesced_records_preserve_partial_write_boundaries() {
+    let mut fixture = Fixture::new(11, 64).await;
+    for value in 0..3 {
+        fixture
+            .sender
+            .queue_frame(fixture.peer, &[value; 4])
+            .unwrap();
+    }
+    assert_eq!(fixture.sender.flush_queues(now_ms(), 0).await.unwrap(), 11);
+    let queue = &fixture.sender.queues[&fixture.peer.npub()];
+    assert_eq!(queue.bytes, 13);
+    assert_eq!(queue.records.front().unwrap().offset, 3);
+    assert_eq!(fixture.receive(1).await, vec![vec![0; 4]]);
+
+    assert_eq!(fixture.sender.flush_queues(now_ms(), 0).await.unwrap(), 11);
+    let queue = &fixture.sender.queues[&fixture.peer.npub()];
+    assert_eq!(queue.bytes, 2);
+    assert_eq!(queue.records.front().unwrap().offset, 6);
+    assert_eq!(fixture.receive(1).await, vec![vec![1; 4]]);
+
+    assert_eq!(fixture.sender.flush_queues(now_ms(), 0).await.unwrap(), 2);
+    assert!(fixture.sender.queues.is_empty());
+    assert_eq!(fixture.receive(1).await, vec![vec![2; 4]]);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn bounded_input_keeps_draining_without_new_datagrams_or_periodic_polls() {
     for (bytes, frames) in [(4096, 1), (3, 8)] {
         let mut fixture = Fixture::new(4096, 4096).await;
@@ -548,10 +575,39 @@ async fn bounded_input_keeps_draining_without_new_datagrams_or_periodic_polls() 
         fixture.sender.flush_queues(now_ms(), 0).await.unwrap();
         // Consume every carrier datagram before reading any stream bytes. No
         // further input is available to rescue a stranded decoder or TCP buffer.
-        let mut received = 0;
-        while received < 4 {
-            received += receive_before_drive(&mut fixture.receiver).await;
-        }
+        let mut payload_bytes = 0;
+        let mut payload_datagrams = 0;
+        let driver = &mut fixture.receiver;
+        timeout(Duration::from_secs(5), async {
+            while payload_bytes < 32 {
+                driver
+                    .tcp
+                    .receive_report_filtered_datagrams(now_ms(), |peer, bytes| {
+                        let admitted = driver.inbound.admit(
+                            peer,
+                            bytes,
+                            &driver.selected_peers,
+                            &driver.options,
+                            Instant::now(),
+                        );
+                        if admitted {
+                            let segment = fips_tcp::wire::Segment::decode(bytes).unwrap();
+                            payload_bytes += segment.payload.len();
+                            payload_datagrams += usize::from(!segment.payload.is_empty());
+                        }
+                        admitted
+                    })
+                    .await
+                    .unwrap();
+            }
+        })
+        .await
+        .expect("all framed bytes arrive, allowing pending handshake ACKs");
+        assert_eq!(payload_bytes, 32);
+        assert_eq!(
+            payload_datagrams, 1,
+            "queued records share one TCP datagram"
+        );
         let mut delivered = Vec::new();
         let mut report = fixture.receiver.drive_ready(now_ms()).await.unwrap();
         for _ in 0..32 {

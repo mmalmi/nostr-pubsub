@@ -516,8 +516,9 @@ impl WireTcpDriver {
                         .get_mut(&peer)
                         .expect("decoder exists")
                         .take(self.options.drive_frames - frames.len());
-                    let identity = PeerIdentity::from_npub(&peer)
-                        .map_err(|error| storage_error("decode authenticated peer", error))?;
+                    let identity = self.tcp.peer(id).ok_or_else(|| {
+                        storage("active TCP/FIPS stream has no authenticated peer")
+                    })?;
                     let Ok(decoded) = decoded else {
                         self.abort_peer(identity).await?;
                         rejected += 1;
@@ -577,13 +578,17 @@ impl WireTcpDriver {
                 let chunk = self
                     .queues
                     .get(&peer)
-                    .and_then(|queue| queue.records.front())
-                    .map(|record| {
-                        let end = record
-                            .offset
-                            .saturating_add(IO_CHUNK_BYTES.min(budget))
-                            .min(record.bytes.len());
-                        record.bytes[record.offset..end].to_vec()
+                    .filter(|queue| !queue.records.is_empty())
+                    .map(|queue| {
+                        // Record framing belongs to the byte stream. Fill one
+                        // bounded TCP write with already queued records instead
+                        // of emitting a small segment for each inventory/reply.
+                        queue
+                            .records
+                            .iter()
+                            .flat_map(|record| record.bytes[record.offset..].iter().copied())
+                            .take(IO_CHUNK_BYTES.min(budget))
+                            .collect::<Vec<_>>()
                     });
                 let Some(chunk) = chunk else {
                     break;
@@ -598,11 +603,16 @@ impl WireTcpDriver {
                 }
                 budget -= accepted;
                 let queue = self.queues.get_mut(&peer).expect("queue exists");
-                let record = queue.records.front_mut().expect("record exists");
-                record.offset += accepted;
                 queue.bytes = queue.bytes.saturating_sub(accepted);
-                if record.offset == record.bytes.len() {
-                    queue.records.pop_front();
+                let mut remaining = accepted;
+                while remaining > 0 {
+                    let record = queue.records.front_mut().expect("accepted record exists");
+                    let consumed = remaining.min(record.bytes.len() - record.offset);
+                    record.offset += consumed;
+                    remaining -= consumed;
+                    if record.offset == record.bytes.len() {
+                        queue.records.pop_front();
+                    }
                 }
             }
             if self
