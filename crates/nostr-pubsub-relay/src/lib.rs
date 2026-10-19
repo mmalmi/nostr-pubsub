@@ -113,10 +113,13 @@ impl EventBus for RelayEventBus {
         for filter in filters {
             let fetched = self
                 .client
-                .fetch_events(filter, self.query_timeout)
+                .fetch_events(filter.clone(), self.query_timeout)
                 .await
                 .map_err(|error| PubsubError::Storage(format!("fetch relay events: {error}")))?;
             for event in fetched {
+                if !filter.match_event(&event, MatchEventOptions::new()) {
+                    continue;
+                }
                 let event = VerifiedEvent::try_from(event)?;
                 if seen.insert(event.as_event().id) {
                     events.push(QueryEvent {

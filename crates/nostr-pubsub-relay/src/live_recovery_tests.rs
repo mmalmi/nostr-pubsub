@@ -286,6 +286,58 @@ fn drain_event_notifications(
 }
 
 #[tokio::test]
+async fn query_discards_unmatched_roots_before_applying_the_result_limit() {
+    let keys = Keys::generate();
+    let root = |name: &str, timestamp: u64| {
+        EventBuilder::new(Kind::Custom(30078), "root")
+            .tags([nostr_sdk::Tag::identifier(name)])
+            .custom_created_at(Timestamp::from(timestamp))
+            .sign_with_keys(&keys)
+            .expect("signed root")
+    };
+    let requested = root("sites", 100);
+    let unrelated = root("drive", 200);
+    let relay = RelayFixture::start(vec![unrelated, requested.clone()], false).await;
+    let bus = relay.bus(128).await;
+    let filter = Filter::new()
+        .author(keys.public_key())
+        .kind(Kind::Custom(30078))
+        .identifier("sites")
+        .limit(1);
+    let report = bus
+        .query(vec![filter], QueryOptions { limit: Some(1) })
+        .await
+        .expect("root query");
+    bus.client().shutdown().await;
+    assert_eq!(report.events.len(), 1);
+    assert_eq!(report.events[0].event.as_event().id, requested.id);
+}
+
+#[tokio::test]
+async fn query_keeps_matching_events_from_each_filter_and_deduplicates_them() {
+    let first = event("first requested event");
+    let second = event("second requested event");
+    let unrelated = event("unrequested event");
+    let relay = RelayFixture::start(vec![unrelated, first.clone(), second.clone()], false).await;
+    let bus = relay.bus(128).await;
+    let report = bus
+        .query(
+            vec![Filter::new().id(first.id), Filter::new().id(second.id)],
+            QueryOptions::default(),
+        )
+        .await
+        .expect("multiple filter query");
+    bus.client().shutdown().await;
+    let ids = report
+        .events
+        .iter()
+        .map(|row| row.event.as_event().id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(report.events.len(), 2);
+    assert_eq!(ids, [first.id, second.id].into_iter().collect());
+}
+
+#[tokio::test]
 async fn refetch_recovers_bodies_through_messages_without_duplicate_sdk_event_notifications() {
     let expected = event("body retained at the relay, ID retained by the SDK");
     let relay = RelayFixture::start(vec![expected.clone()], false).await;
