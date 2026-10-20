@@ -32,12 +32,8 @@ export class RuntimeRelays {
             verifyEvent: (event) => this.boundary.verifyEvent(event),
             // Own reconnect so replay overlaps the last timestamp instead of skipping its second.
             enableReconnect: false,
-            automaticallyAuth: options.signAuthEvent ? (url) => async (event) => {
-                const signed = await options.signAuthEvent(url, event);
-                if (!this.boundary.verifyEvent(signed))
-                    throw new Error('Invalid relay authentication event');
-                return this.boundary.admitEvent(signed);
-            } : undefined,
+            // Authenticate explicitly below. nostr-tools' fire-and-forget automatic
+            // AUTH can reject without a handler when a short-lived scope closes.
         });
     }
     urls() { return [...this.relays]; }
@@ -198,8 +194,22 @@ export class RuntimeRelays {
                         if (!entry.closed)
                             entry.state(url, true);
                 },
-                onclose: (reason) => { if (current())
-                    this.retry(batch, url, link, reason); },
+                onclose: (reason) => {
+                    if (!current())
+                        return;
+                    if (reason.startsWith('auth-required:') && this.options.signAuthEvent && !link.authenticating) {
+                        link.authenticating = true;
+                        // AUTH is initial setup, not a failed historical result. Keep the
+                        // caller's deadline active while awaiting its acknowledgment.
+                        void relay.auth(async (template) => verifyNostrEvent(await this.options.signAuthEvent(url, template)))
+                            .then(() => { if (current())
+                            void this.connect(batch, url, link); })
+                            .catch(error => { if (current())
+                            this.retry(batch, url, link, errorText(error)); });
+                    }
+                    else
+                        this.retry(batch, url, link, reason);
+                },
             });
             relay.ongoingOperations++;
             relay.idleSince = undefined;

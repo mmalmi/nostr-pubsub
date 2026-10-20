@@ -24,6 +24,8 @@ export { FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL, FIPS_NOSTR_PUBSUB_INV_WANT_VERSION
 export { FipsInvWantTcpDriver } from './fips-invwant-tcp-driver.js';
 export { fipsInvWantTcpCapabilityName, fipsInvWantTcpPeerOrderKey, type FipsInvWantTcpDriveReport, type FipsInvWantTcpDriverOptions, type FipsInvWantTcpQueueSnapshot, } from './fips-invwant-tcp-types.js';
 export { NostrRuntime, createNostrRuntime } from './runtime.js';
+export { createPrivateRelayPublisher, isPrivateRelayEvent, publicationLaneStore, type PrivatePublicationSource, type PrivateRelayPublisher, type PrivateRelayPublisherOptions, } from './private-relay-publisher.js';
+export { createAnonymousRelayDiscovery, isRelayDiscoveryFilter, type AnonymousRelayDiscovery, type AnonymousRelayDiscoveryOptions, } from './anonymous-relay-discovery.js';
 export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
 export type { NostrRuntimeOptions, RuntimeCacheMode, RuntimeCompletion, RuntimeEventInfo, RuntimeEventStore, RuntimeMetrics, RuntimeOutboxEntry, RuntimePublishOptions, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeRelayStats, RuntimeReconciliationOptions, RuntimeSource, RuntimeSubscribeOptions, RuntimeSubscription, RuntimeSubscriptionHandlers, } from './runtime-types.js';
 //# sourceMappingURL=index.d.ts.map

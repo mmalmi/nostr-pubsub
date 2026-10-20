@@ -7,7 +7,7 @@ import type { NostrRuntimeOptions, RuntimeRelayStats } from './runtime-types.js'
 import { RuntimeReconciliation } from './runtime-reconciliation.js';
 
 type Entry = { relays?: readonly string[]; filters: NostrFilter[]; event: (event: NostrEvent, relay: string) => void; state: (relay: string, complete: boolean, error?: string) => void; closed: boolean; batch?: Batch };
-type Link = { generation: number; close?: () => void; timer?: ReturnType<typeof setTimeout>; attempts: number; eosed: boolean; latest: Map<string, number> };
+type Link = { generation: number; close?: () => void; timer?: ReturnType<typeof setTimeout>; attempts: number; eosed: boolean; authenticating?: boolean; latest: Map<string, number> };
 type Batch = { entries: Entry[]; links: Map<string, Link>; closed: boolean; reopenTimer?: ReturnType<typeof setTimeout> };
 
 /** Batches OR filters without merging their fields, preserving recipient/author intersections. */
@@ -35,11 +35,8 @@ export class RuntimeRelays {
       verifyEvent: (event): event is NostrVerifiedEvent => this.boundary.verifyEvent(event),
       // Own reconnect so replay overlaps the last timestamp instead of skipping its second.
       enableReconnect: false,
-      automaticallyAuth: options.signAuthEvent ? (url) => async (event) => {
-        const signed = await options.signAuthEvent!(url, event);
-        if (!this.boundary.verifyEvent(signed)) throw new Error('Invalid relay authentication event');
-        return this.boundary.admitEvent(signed);
-      } : undefined,
+      // Authenticate explicitly below. nostr-tools' fire-and-forget automatic
+      // AUTH can reject without a handler when a short-lived scope closes.
     });
   }
   urls(): string[] { return [...this.relays]; }
@@ -166,7 +163,17 @@ export class RuntimeRelays {
           link.eosed = true; link.attempts = 0;
           for (const entry of batch.entries) if (!entry.closed) entry.state(url, true);
         },
-        onclose: (reason) => { if (current()) this.retry(batch, url, link, reason); },
+        onclose: (reason) => {
+          if (!current()) return;
+          if (reason.startsWith('auth-required:') && this.options.signAuthEvent && !link.authenticating) {
+            link.authenticating = true;
+            // AUTH is initial setup, not a failed historical result. Keep the
+            // caller's deadline active while awaiting its acknowledgment.
+            void relay.auth(async template => verifyNostrEvent(await this.options.signAuthEvent!(url, template)))
+              .then(() => { if (current()) void this.connect(batch, url, link); })
+              .catch(error => { if (current()) this.retry(batch, url, link, errorText(error)); });
+          } else this.retry(batch, url, link, reason);
+        },
       });
       relay.ongoingOperations++;
       relay.idleSince = undefined;

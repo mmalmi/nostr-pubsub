@@ -23,5 +23,7 @@ export { FIPS_NOSTR_PUBSUB_INV_WANT_PROTOCOL, FIPS_NOSTR_PUBSUB_INV_WANT_VERSION
 export { FipsInvWantTcpDriver } from './fips-invwant-tcp-driver.js';
 export { fipsInvWantTcpCapabilityName, fipsInvWantTcpPeerOrderKey, } from './fips-invwant-tcp-types.js';
 export { NostrRuntime, createNostrRuntime } from './runtime.js';
+export { createPrivateRelayPublisher, isPrivateRelayEvent, publicationLaneStore, } from './private-relay-publisher.js';
+export { createAnonymousRelayDiscovery, isRelayDiscoveryFilter, } from './anonymous-relay-discovery.js';
 export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
 //# sourceMappingURL=index.js.map

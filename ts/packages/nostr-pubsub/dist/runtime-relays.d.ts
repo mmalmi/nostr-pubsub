@@ -15,6 +15,7 @@ type Link = {
     timer?: ReturnType<typeof setTimeout>;
     attempts: number;
     eosed: boolean;
+    authenticating?: boolean;
     latest: Map<string, number>;
 };
 type Batch = {

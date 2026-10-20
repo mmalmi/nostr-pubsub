@@ -13,6 +13,7 @@ export class RuntimeRelayFixture {
   maxFilters = Infinity;
   requireAuth = false;
   authEvents: NostrEvent[] = [];
+  readonly frames = new Map<WebSocket, unknown[][]>();
   constructor() {
     this.server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
     this.server.on('connection', (socket) => {
@@ -20,9 +21,11 @@ export class RuntimeRelayFixture {
       let authenticated = !this.requireAuth;
       if (this.requireAuth) socket.send(JSON.stringify(['AUTH', 'runtime-test-challenge']));
       this.clients.set(socket, subscriptions);
+      this.frames.set(socket, []);
       socket.on('close', () => this.clients.delete(socket));
       socket.on('message', (raw) => {
         const [type, id, ...rest] = JSON.parse(raw.toString());
+        this.frames.get(socket)!.push([type, id, ...rest]);
         if (type === 'AUTH') {
           this.authEvents.push(id); authenticated = true; socket.send(JSON.stringify(['OK', id.id, true, '']));
         } else if (type === 'REQ') {

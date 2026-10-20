@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.16 - 2026-10-20
+
+- Add an encrypted-event publisher with fresh relay connections and anonymous
+  authentication for every event and retry, separate from account reception.
+- Add public device and invite discovery isolated by each author or device key;
+  reject unscoped or combined identity lookups.
+- Keep private sends and public reception in separate durable retry lanes and
+  quarantine retired shared group traffic without deleting local records.
+- Await required relay authentication before completing query setup, and handle
+  canceled anonymous scopes without unhandled authentication rejections.
+
 ## 0.5.15 - 2026-10-08
 
 - Update the shared TCP/FIPS transport to 0.2.3 so receiver buffer-space updates

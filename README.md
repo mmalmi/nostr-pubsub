@@ -147,6 +147,28 @@ Iris browser apps can later consume it with a local dependency such as:
 "nostr-pubsub": "link:../nostr-pubsub/ts/packages/nostr-pubsub"
 ```
 
+For private messaging, use `createPrivateRelayPublisher` for recipient-specific
+encrypted kinds 1059, 1060 (v2), and 21111. Each event and retry opens independent
+relay connections with a fresh anonymous NIP-42 key. The publisher exposes no
+query or subscription API, and additional sources retain only their publication
+capability. Supply a separate durable pending store; the caller owns its lifetime.
+Wrap the account receiver's pending store with `publicationLaneStore(store,
+'public')` before constructing its runtime, and route every private kind using
+`isPrivateRelayEvent`, including malformed events, so rejection cannot fall back
+to the account connection. Move valid old pending private rows to the private
+store before removing their original pending entries. Invalid shared-group and
+roster entries remain quarantined locally.
+
+Use `createAnonymousRelayDiscovery` for public device-list (37368) and invite
+(30078) lookups. Each operation accepts exactly one author, or one reverse
+device `#p` selector for kind 37368. Split different keys into separate operations;
+unscoped, mixed-author and combined author/device selectors are rejected. Active
+requests for the same key may share a scope; idle scopes close, and later scopes
+use fresh authentication. Discovery never retries pending publications and never
+closes a supplied local cache. `isRelayDiscoveryFilter` also classifies malformed
+or unscoped protocol filters so hosts can fail closed. These boundaries isolate
+protocol identities; servers can still observe network addresses and timing.
+
 Interop vectors live in `crates/nostr-pubsub/tests/data/interop-vectors.json`
 and are read by both Vitest and Rust integration tests. Update the shared vector
 file when changing behavior that must remain compatible across Rust/FIPS peers
