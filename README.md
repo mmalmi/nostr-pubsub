@@ -162,8 +162,12 @@ to the account connection. Move valid old pending private rows to the private
 store before removing their original pending entries. Invalid shared-group and
 roster entries remain quarantined locally.
 
-Use `createAnonymousRelayDiscovery` for public device-list (37368) and invite
-(30078) lookups. Each operation accepts exactly one author, or one reverse
+Use `createAnonymousRelayDiscovery` for targeted profile (0), relay-list
+(10002/10050), public device-list (37368) and invite (30078) lookups.
+`splitRelayDiscoveryFilters` partitions mixed kinds and author batches into
+ordinary receiver interests and anonymous single-key scopes. Broad unscoped
+public profile/relay-list scans remain ordinary. Each discovery operation
+accepts exactly one author, or one reverse
 device `#p` selector for kind 37368. Split different keys into separate operations;
 unscoped, mixed-author and combined author/device selectors are rejected. Active
 requests for the same key may share a scope; idle scopes close, and later scopes

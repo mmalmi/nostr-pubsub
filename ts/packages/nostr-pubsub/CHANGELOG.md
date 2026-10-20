@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.18 - Unreleased
+
+- Preserve bounded encrypted owner proofs on invite responses from registered
+  devices, while rejecting plaintext, duplicate and misplaced proof tags.
+- Isolate targeted profile and relay-list author lookups alongside public device
+  and invite discovery, so private peer name hydration cannot reveal a contact.
+- Share exact filter partitioning across hosts, splitting mixed public lookup
+  kinds and multi-author batches without widening subscription intersections.
+
 ## 0.5.17 - 2026-10-20
 
 - Keep durable private queue ownership outside each disposable send operation,

@@ -236,7 +236,7 @@ export {
   type PrivatePublicationSource, type PrivateRelayPublisher, type PrivateRelayPublisherOptions,
 } from './private-relay-publisher.js';
 export {
-  createAnonymousRelayDiscovery, isRelayDiscoveryFilter,
+  createAnonymousRelayDiscovery, isRelayDiscoveryFilter, splitRelayDiscoveryFilters,
   type AnonymousRelayDiscovery, type AnonymousRelayDiscoveryOptions,
 } from './anonymous-relay-discovery.js';
 export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';

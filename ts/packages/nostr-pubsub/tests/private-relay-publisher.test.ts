@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent } from 'nostr-tools/pure';
+import * as nip44 from 'nostr-tools/nip44';
 import {
   createAnonymousRelayDiscovery, createPrivateRelayPublisher, isPrivateRelayEvent,
-  isRelayDiscoveryFilter, MemoryEventStore, NostrRuntime, publicationLaneStore,
+  isRelayDiscoveryFilter, splitRelayDiscoveryFilters, MemoryEventStore, NostrRuntime, publicationLaneStore,
   type NostrEvent,
 } from '../src/index.js';
 import { RuntimeRelayFixture, until } from './runtime-relay-fixture.js';
@@ -29,6 +30,24 @@ function frames(server: RuntimeRelayFixture) { return [...server.frames.values()
 function auth(connection: unknown[][]): NostrEvent { return connection.find(frame => frame[0] === 'AUTH')?.[1] as NostrEvent; }
 
 describe('private publication connection boundary', () => {
+  it('preserves an encrypted invite owner proof without exposing its identity or accepting plaintext proof tags', async () => {
+    const server = await relay(); const sender = await publisher(server);
+    const envelopeSecret = generateSecretKey();
+    const proof = finalizeEvent({kind: 37368, created_at: Math.floor(Date.now() / 1000),
+      tags: [['p', getPublicKey(generateSecretKey())]], content: ''}, owner);
+    const encrypted = nip44.encrypt(JSON.stringify(proof), nip44.getConversationKey(envelopeSecret, recipient));
+    const envelope = finalizeEvent({kind: 1059, created_at: proof.created_at, content: 'encrypted handshake',
+      tags: [['p', recipient], ['v', '2'], ['owner-proof', encrypted]]}, envelopeSecret);
+    expect((await sender.publish(envelope, {requireAck: true})).accepted).toBe(true);
+    expect(server.events[0]?.tags).toContainEqual(['owner-proof', encrypted]);
+    expect(JSON.stringify(frames(server))).not.toContain(ownerKey);
+    for (const [kind, tags] of [
+      [1060, [['p', recipient], ['v', '2'], ['owner-proof', encrypted]]],
+      [1059, [['p', recipient], ['owner-proof', JSON.stringify(proof)]]],
+      [1059, [['p', recipient], ['owner-proof', encrypted], ['owner-proof', encrypted]]],
+    ] as Array<[number, string[][]]>) await expect(sender.publish(event(kind, tags))).rejects.toThrow('recipient-specific');
+  });
+
   it('keeps invite responses, ratchet messages and wakes off account receive/AUTH sockets', async () => {
     const server = await relay();
     const receiver = new NostrRuntime({ relays: [await server.url()], websocketImplementation: ws,
@@ -143,6 +162,35 @@ describe('private publication connection boundary', () => {
 });
 
 describe('anonymous public-key discovery boundary', () => {
+  it('splits profile/relay-list author batches and mixed own settings without joining lookup identities', async () => {
+    const server = await relay();
+    const discovery = createAnonymousRelayDiscovery({ relays: [await server.url()], websocketImplementation: ws });
+    cleanup.push(() => discovery.close());
+    const split = splitRelayDiscoveryFilters([
+      { kinds: [0, 10013], authors: [ownerKey] },
+      { kinds: [0, 10002, 10050], authors: [recipient, 'a'.repeat(64)] },
+      { kinds: [1060], '#p': [ownerKey] },
+      { kinds: [0], limit: 20 },
+    ]);
+    expect(split.receiver).toEqual([
+      { kinds: [10013], authors: [ownerKey] }, { kinds: [1060], '#p': [ownerKey] }, { kinds: [0], limit: 20 },
+    ]);
+    expect(split.discovery).toHaveLength(3);
+    const results = await Promise.all(split.discovery.map(filters => discovery.query(filters, { cache: 'network-only' })));
+    expect(results.every(result => result.complete)).toBe(true);
+    expect(server.authEvents).toHaveLength(3);
+    expect(new Set(server.authEvents.map(value => value.pubkey)).size).toBe(3);
+    for (const connection of frames(server)) {
+      expect(connection.some(frame => frame[0] === 'EVENT')).toBe(false);
+      const filters = connection.filter(frame => frame[0] === 'REQ').flatMap(frame => frame.slice(2)) as Array<{ authors: string[] }>;
+      const keys = new Set(filters.flatMap(filter => filter.authors));
+      expect(keys.size).toBe(1); expect(keys.has(auth(connection).pubkey)).toBe(false);
+    }
+    expect(() => splitRelayDiscoveryFilters([{ kinds: [37368] }])).toThrow();
+    expect(() => splitRelayDiscoveryFilters([{ kinds: [37368], authors: [ownerKey], '#type': ['group_roster'] }])).toThrow();
+    expect(() => splitRelayDiscoveryFilters([{ kinds: [0], authors: [ownerKey], '#p': [recipient] }])).toThrow();
+  });
+
   it('uses separate fresh AUTH connections per author and reverse-device lookup with no pending sends', async () => {
     const server = await relay(); const store = new MemoryEventStore();
     await store.putPending({ event: event(), attempts: 0, updatedAt: 0 });

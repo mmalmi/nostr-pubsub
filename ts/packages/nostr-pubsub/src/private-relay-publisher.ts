@@ -13,10 +13,23 @@ function privateEnvelopeAllowed(event: NostrEvent): boolean {
   if (!isPrivateRelayEvent(event) || !Array.isArray(event.tags)
     || !event.tags.every(tag => Array.isArray(tag) && tag.every(part => typeof part === 'string'))) return false;
   const recipients = event.tags.filter(tag => tag[0] === 'p');
+  const proofs = event.tags.filter(tag => tag[0] === 'owner-proof');
   return recipients.length === 1 && recipients[0]?.length === 2 && /^[0-9a-f]{64}$/.test(recipients[0]?.[1] ?? '')
+    && proofs.length <= 1
     && (event.kind !== 1060 || event.tags.filter(tag => tag[0] === 'v').length === 1
       && event.tags.some(tag => tag[0] === 'v' && tag[1] === '2'))
-    && event.tags.every(tag => ['p', 'header', 'v', 'wk', 'expiration'].includes(tag[0] ?? ''));
+    && event.tags.every(tag => ['p', 'header', 'v', 'wk', 'expiration'].includes(tag[0] ?? '')
+      || event.kind === 1059 && tag[0] === 'owner-proof' && encryptedOwnerProof(tag));
+}
+
+function encryptedOwnerProof(tag: string[]): boolean {
+  const value = tag[1] ?? '';
+  if (tag.length !== 2 || value.length < 132 || value.length > 65536 || value.length % 4
+    || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
+  try {
+    const bytes = atob(value);
+    return bytes.length >= 99 && bytes.charCodeAt(0) === 2;
+  } catch { return false; }
 }
 
 function privateRoster(event: NostrEvent): boolean {

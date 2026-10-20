@@ -1,8 +1,13 @@
 import { NostrRuntime } from './runtime.js';
 import type { NostrFilter } from './types.js';
 import type { NostrRuntimeOptions } from './runtime-types.js';
-/** Identify targeted public device/invite lookups before validating their scope. */
+/** Identify targeted public lookups before validating their scope. */
 export declare function isRelayDiscoveryFilter(filter: NostrFilter): boolean;
+/** Preserve OR semantics while keeping every lookup key in a separate scope. */
+export declare function splitRelayDiscoveryFilters(filters: NostrFilter[]): {
+    receiver: NostrFilter[];
+    discovery: NostrFilter[][];
+};
 export type AnonymousRelayDiscoveryOptions = Pick<NostrRuntimeOptions, 'relays' | 'store' | 'websocketImplementation' | 'historyTimeoutMs' | 'reconnectDelayMs' | 'onError'> & {
     maxScopes?: number;
 };
