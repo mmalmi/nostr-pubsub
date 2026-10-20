@@ -1,3 +1,5 @@
+import { FipsPrivacyRolePolicy } from './fips-privacy-role.js';
+import { FipsPublicationReceipts } from './fips-publication-receipts.js';
 import { FipsRetainedReplay } from './fips-pubsub-retained.js';
 import { cloneFilter } from './filter.js';
 import { verifyNostrEvent, } from './types.js';
@@ -11,6 +13,9 @@ export const FIPS_NOSTR_PUBSUB_CAPABILITY = 'nostr.pubsub/1';
 export class FipsNostrPubsubClient {
     limits;
     codec;
+    privacy;
+    receipts = new FipsPublicationReceipts();
+    acceptAnonymous;
     node;
     localPeerId;
     peers;
@@ -27,6 +32,8 @@ export class FipsNostrPubsubClient {
     removeSessionListener;
     nextSubscriptionId = 1;
     constructor(options) {
+        this.privacy = new FipsPrivacyRolePolicy(options.role, options.receiverPublicAuthors);
+        this.acceptAnonymous = options.acceptAnonymousPublications === true;
         this.node = options.node;
         this.localPeerId = normalizePeerId(options.localPeerId) ?? '';
         if (this.localPeerId === '')
@@ -68,6 +75,7 @@ export class FipsNostrPubsubClient {
         return this;
     }
     async stop() {
+        this.receipts.close();
         this.retained.close();
         for (const subscriptionId of [...this.subscriptions.keys()]) {
             this.closeSubscription(subscriptionId);
@@ -92,6 +100,7 @@ export class FipsNostrPubsubClient {
         if (filters.length === 0 || filters.length > this.limits.maxFiltersPerSubscription) {
             throw clientError(`subscription requires 1..${this.limits.maxFiltersPerSubscription} filters`);
         }
+        this.privacy.filters(filters);
         const id = `ts-${this.nextSubscriptionId.toString(36)}`;
         this.nextSubscriptionId += 1;
         const normalized = this.normalizedFilters(id, filters);
@@ -121,6 +130,7 @@ export class FipsNostrPubsubClient {
     async publish(event) {
         this.requireStarted();
         const verified = this.admitEvent(event);
+        this.privacy.publication(verified);
         const peers = this.currentPeers();
         if (peers.length === 0)
             throw clientError('no admitted FIPS pubsub peers are available');
@@ -150,17 +160,22 @@ export class FipsNostrPubsubClient {
             throw clientError('all FIPS pubsub inventory deliveries failed');
         }
     }
+    async publishWithReceipt(event, options = {}) {
+        this.requireStarted();
+        const verified = this.admitEvent(event);
+        this.privacy.assertPublisher(verified);
+        const peers = this.currentPeers();
+        for (const peer of peers)
+            this.connectPeer(peer);
+        return this.receipts.publish(verified, peers, (peer, message) => this.send(peer, message), options);
+    }
     refreshPeers() {
         for (const subscription of this.subscriptions.values()) {
             this.refreshSubscriptionPeers(subscription);
         }
     }
-    peerSubscriptionCount(peerId) {
-        return this.peerSubscriptions.peerSubscriptionCount(peerId.toLowerCase());
-    }
-    activeSubscriptionCount() {
-        return this.subscriptions.size;
-    }
+    peerSubscriptionCount(peerId) { return this.peerSubscriptions.peerSubscriptionCount(peerId.toLowerCase()); }
+    activeSubscriptionCount() { return this.subscriptions.size; }
     async idle() {
         for (let turn = 0; turn < 4; turn += 1) {
             while (this.pending.size > 0)
@@ -187,6 +202,12 @@ export class FipsNostrPubsubClient {
             this.report(error, { operation: 'receive', peerId });
             return;
         }
+        if (message.type === 'ok') {
+            this.receipts.receive(peerId, message.eventId, message.accepted, message.message);
+            return;
+        }
+        if (this.privacy.ignoresRequests && ['req', 'want'].includes(message.type))
+            return;
         if (message.type === 'req') {
             this.peerSubscriptions.upsertFilters(peerId, message.subscriptionId, message.filters);
             this.background(this.retained.replay(peerId, message.subscriptionId, message.filters), { operation: 'send', peerId, subscriptionId: message.subscriptionId });
@@ -202,6 +223,12 @@ export class FipsNostrPubsubClient {
         }
         if (message.type === 'want') {
             answerWant(this.protocolContext(), peerId, message.eventId);
+            return;
+        }
+        if (this.acceptAnonymous && message.subscriptionId === undefined) {
+            if (this.events.remember(message.event, peerId, this.limits.maxHops))
+                this.forwardEvent(message.event, peerId, this.limits.maxHops);
+            this.background(this.send(peerId, { type: 'ok', eventId: message.event.id, accepted: true, message: '' }), { operation: 'send', peerId });
             return;
         }
         acceptEvent(this.protocolContext(), peerId, message);
@@ -364,6 +391,7 @@ export class FipsNostrPubsubClient {
         if (transport === undefined)
             return Promise.reject(clientError('client is not started'));
         try {
+            this.privacy.outbound(message);
             transport.queueFrame(peerId, this.codec.encodeFrame(message));
             return Promise.resolve();
         }

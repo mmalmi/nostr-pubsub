@@ -246,3 +246,8 @@ export type {
   RuntimeQueryResult, RuntimeRelayStats, RuntimeReconciliationOptions, RuntimeSource, RuntimeSubscribeOptions,
   RuntimeSubscription, RuntimeSubscriptionHandlers,
 } from './runtime-types.js';
+
+export { createAnonymousFipsPublisher, createAnonymousFipsDiscovery, type AnonymousFipsEndpoint, type AnonymousFipsOptions } from './anonymous-fips.js';
+export type { FipsPrivacyRole } from './fips-privacy-role.js';
+export type { FipsRemotePublication, FipsReceiptOptions } from './fips-publication-receipts.js';
+export { createScopedFipsSource, type ScopedFipsSourceOptions } from './scoped-fips-source.js';

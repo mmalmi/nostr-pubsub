@@ -9,7 +9,7 @@ export function isPrivateRelayEvent(event: Pick<NostrEvent, 'kind'>): boolean {
   return event.kind === 1059 || event.kind === 1060 || event.kind === 21111;
 }
 
-function privateEnvelopeAllowed(event: NostrEvent): boolean {
+export function privateEnvelopeAllowed(event: NostrEvent): boolean {
   if (!isPrivateRelayEvent(event) || !Array.isArray(event.tags)
     || !event.tags.every(tag => Array.isArray(tag) && tag.every(part => typeof part === 'string'))) return false;
   const recipients = event.tags.filter(tag => tag[0] === 'p');

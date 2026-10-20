@@ -1,7 +1,9 @@
 # Changelog
 
-## 0.5.18 - Unreleased
+## 0.5.18 - 2026-10-20
 
+- Add fresh anonymous FIPS publication operations with provider-bound remote OK receipts and one-subject lookup scopes. Keep identified receivers from exporting private cache or retained replay.
+- Recheck peer authorization immediately before queued TCP datagrams leave the endpoint.
 - Preserve bounded encrypted owner proofs on invite responses from registered
   devices, while rejecting plaintext, duplicate and misplaced proof tags.
 - Isolate targeted profile and relay-list author lookups alongside public device

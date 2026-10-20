@@ -23,7 +23,8 @@ export type FipsPubsubWireMessage =
       payloadBytes: number;
       hopLimit: number;
     }
-  | { type: 'want'; eventId: string };
+  | { type: 'want'; eventId: string }
+  | { type: 'ok'; eventId: string; accepted: boolean; message: string };
 
 export class FipsPubsubWireCodec {
   readonly maxFrameBytes: number;
@@ -134,6 +135,9 @@ function encodeWireMessage(message: FipsPubsubWireMessage): unknown[] {
         message.payloadBytes,
         message.hopLimit,
       ];
+    case 'ok':
+      validateEventId(message.eventId, 'OK');
+      return ['OK', message.eventId, message.accepted, message.message];
     case 'want':
       validateEventId(message.eventId, 'WANT');
       return ['WANT', message.eventId];
@@ -160,6 +164,11 @@ function decodeWireMessage(value: unknown): FipsPubsubWireMessage {
       throw invalidFrame('CLOSE requires exactly an id');
     }
     return { type: 'close', subscriptionId: value[1] };
+  }
+  if (messageType === 'OK') {
+    if (value.length !== 4 || typeof value[2] !== 'boolean' || typeof value[3] !== 'string') throw invalidFrame('OK requires event id, status and message');
+    validateEventId(value[1], 'OK');
+    return { type: 'ok', eventId: value[1] as string, accepted: value[2], message: value[3] };
   }
   if (messageType === 'EVENT') {
     if (value.length === 2) {

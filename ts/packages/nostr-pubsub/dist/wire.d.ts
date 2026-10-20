@@ -25,6 +25,11 @@ export type FipsPubsubWireMessage = {
 } | {
     type: 'want';
     eventId: string;
+} | {
+    type: 'ok';
+    eventId: string;
+    accepted: boolean;
+    message: string;
 };
 export declare class FipsPubsubWireCodec {
     readonly maxFrameBytes: number;

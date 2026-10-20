@@ -26,6 +26,12 @@ export interface FipsNostrPubsubClientErrorContext {
 
 export interface FipsNostrPubsubClientOptions {
   node: FipsPubsubClientNode;
+  /** A connection role, fixed for this endpoint lifetime. */
+  role?: import('./fips-privacy-role.js').FipsPrivacyRole;
+  /** Explicit public feed/service authors only; never infer from private contacts. */
+  receiverPublicAuthors?: () => readonly string[];
+  /** Provider-only opt-in; peers and all transport bounds still apply. */
+  acceptAnonymousPublications?: boolean;
   /** Local compressed FIPS public key used for deterministic TCP stream ownership. */
   localPeerId: string;
   /** Explicit application-admitted FIPS identities. Connected peers are not inferred. */

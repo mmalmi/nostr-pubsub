@@ -378,18 +378,23 @@ export class NostrRuntime {
         for (const source of this.sources.values()) {
             if (!source.publish || (options.sources ? !options.sources.includes(source.id) : options.relays !== undefined))
                 continue;
-            attempts.push({ id: source.id, remote: source.publishAcceptance !== 'queued', result: bounded(source.publish(event, localIndexSource('runtime-outbox')).then((report) => {
-                    if (!report.accepted)
-                        throw new Error(report.reason ?? 'Publication rejected');
-                }), this.options.publishTimeoutMs ?? 5000) });
+            const attempt = { id: source.id, remote: source.publishAcceptance !== 'queued', result: Promise.resolve() };
+            attempt.result = bounded(source.publish(event, localIndexSource('runtime-outbox')).then((report) => {
+                if (!report.accepted)
+                    throw new Error(report.reason ?? 'Publication rejected');
+                if (report.remoteAccepted === true)
+                    attempt.remote = true;
+            }), this.options.publishTimeoutMs ?? 5000);
+            attempts.push(attempt);
         }
         const outcomes = attempts.map(({ id }) => ({ id, accepted: false, pending: true }));
         const accepted = await new Promise((resolve) => {
             let remaining = attempts.length;
             if (!remaining)
                 resolve(false);
-            attempts.forEach(({ result, remote }, index) => {
+            attempts.forEach(({ result }, index) => {
                 void result.then(() => {
+                    const remote = attempts[index].remote;
                     outcomes[index] = { id: attempts[index].id, accepted: remote, ...(remote ? {} : { queued: true }) };
                     if (remote)
                         resolve(true);

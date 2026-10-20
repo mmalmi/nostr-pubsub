@@ -1,3 +1,5 @@
+import { FipsPrivacyRolePolicy } from './fips-privacy-role.js';
+import { FipsPublicationReceipts, type FipsReceiptOptions, type FipsRemotePublication } from './fips-publication-receipts.js';
 import { FipsRetainedReplay } from './fips-pubsub-retained.js';
 import { cloneFilter } from './filter.js';
 import { PubsubPeerSubscriptionStore } from './subscription.js';
@@ -46,7 +48,9 @@ export const FIPS_NOSTR_PUBSUB_CAPABILITY = 'nostr.pubsub/1';
 export class FipsNostrPubsubClient {
   readonly limits: FipsNostrPubsubClientLimits;
   readonly codec: FipsPubsubWireCodec;
-
+  private readonly privacy: FipsPrivacyRolePolicy;
+  private readonly receipts = new FipsPublicationReceipts();
+  private readonly acceptAnonymous: boolean;
   private readonly node: FipsPubsubClientNode;
   private readonly localPeerId: string;
   private readonly peers: FipsNostrPubsubClientOptions['peers'];
@@ -63,6 +67,8 @@ export class FipsNostrPubsubClient {
   private removeSessionListener?: () => void;
   private nextSubscriptionId = 1;
   constructor(options: FipsNostrPubsubClientOptions) {
+    this.privacy = new FipsPrivacyRolePolicy(options.role, options.receiverPublicAuthors);
+    this.acceptAnonymous = options.acceptAnonymousPublications === true;
     this.node = options.node;
     this.localPeerId = normalizePeerId(options.localPeerId) ?? '';
     if (this.localPeerId === '') throw clientError('localPeerId must be a compressed FIPS key');
@@ -113,6 +119,7 @@ export class FipsNostrPubsubClient {
     return this;
   }
   async stop(): Promise<void> {
+    this.receipts.close();
     this.retained.close();
     for (const subscriptionId of [...this.subscriptions.keys()]) {
       this.closeSubscription(subscriptionId);
@@ -142,6 +149,7 @@ export class FipsNostrPubsubClient {
         `subscription requires 1..${this.limits.maxFiltersPerSubscription} filters`,
       );
     }
+    this.privacy.filters(filters);
     const id = `ts-${this.nextSubscriptionId.toString(36)}`;
     this.nextSubscriptionId += 1;
     const normalized = this.normalizedFilters(id, filters);
@@ -176,10 +184,10 @@ export class FipsNostrPubsubClient {
   async publish(event: NostrEvent | NostrVerifiedEvent): Promise<void> {
     this.requireStarted();
     const verified = this.admitEvent(event);
+    this.privacy.publication(verified);
     const peers = this.currentPeers();
     if (peers.length === 0) throw clientError('no admitted FIPS pubsub peers are available');
     if (!this.events.remember(verified, undefined, this.limits.maxHops)) return;
-
     const deliveries = peers.flatMap((peerId) => {
       const subscriptionIds = this.peerSubscriptions
         .matchingSubscriptions(peerId, verified)
@@ -202,17 +210,20 @@ export class FipsNostrPubsubClient {
       throw clientError('all FIPS pubsub inventory deliveries failed');
     }
   }
+  async publishWithReceipt(event: NostrEvent | NostrVerifiedEvent, options: FipsReceiptOptions = {}): Promise<FipsRemotePublication> {
+    this.requireStarted();
+    const verified = this.admitEvent(event); this.privacy.assertPublisher(verified);
+    const peers = this.currentPeers();
+    for (const peer of peers) this.connectPeer(peer);
+    return this.receipts.publish(verified, peers, (peer, message) => this.send(peer, message), options);
+  }
   refreshPeers(): void {
     for (const subscription of this.subscriptions.values()) {
       this.refreshSubscriptionPeers(subscription);
     }
   }
-  peerSubscriptionCount(peerId: string): number {
-    return this.peerSubscriptions.peerSubscriptionCount(peerId.toLowerCase());
-  }
-  activeSubscriptionCount(): number {
-    return this.subscriptions.size;
-  }
+  peerSubscriptionCount(peerId: string): number { return this.peerSubscriptions.peerSubscriptionCount(peerId.toLowerCase()); }
+  activeSubscriptionCount(): number { return this.subscriptions.size; }
   async idle(): Promise<void> {
     for (let turn = 0; turn < 4; turn += 1) {
       while (this.pending.size > 0) await Promise.allSettled([...this.pending]);
@@ -228,7 +239,6 @@ export class FipsNostrPubsubClient {
       });
       return;
     }
-
     let message: FipsPubsubWireMessage;
     try {
       message = this.codec.decodeFrame(frame);
@@ -237,7 +247,8 @@ export class FipsNostrPubsubClient {
       this.report(error, { operation: 'receive', peerId });
       return;
     }
-
+    if (message.type === 'ok') { this.receipts.receive(peerId, message.eventId, message.accepted, message.message); return; }
+    if (this.privacy.ignoresRequests && ['req', 'want'].includes(message.type)) return;
     if (message.type === 'req') {
       this.peerSubscriptions.upsertFilters(peerId, message.subscriptionId, message.filters);
       this.background(this.retained.replay(peerId, message.subscriptionId, message.filters),
@@ -256,7 +267,11 @@ export class FipsNostrPubsubClient {
       answerWant(this.protocolContext(), peerId, message.eventId);
       return;
     }
-
+    if (this.acceptAnonymous && message.subscriptionId === undefined) {
+      if (this.events.remember(message.event, peerId, this.limits.maxHops)) this.forwardEvent(message.event, peerId, this.limits.maxHops);
+      this.background(this.send(peerId, { type: 'ok', eventId: message.event.id, accepted: true, message: '' }), { operation: 'send', peerId });
+      return;
+    }
     acceptEvent(this.protocolContext(), peerId, message);
   }
   private forwardEvent(event: NostrVerifiedEvent, sourcePeer: string, hopLimit: number): void {
@@ -365,7 +380,6 @@ export class FipsNostrPubsubClient {
       { operation: 'send', peerId, subscriptionId: subscription.id },
     );
   }
-
   private async sendSubscriptionRequest(
     subscription: FipsPubsubLocalSubscription,
     peerId: string,
@@ -383,13 +397,11 @@ export class FipsNostrPubsubClient {
         subscription.peers.add(peerId);
         return;
       }
-
       await this.send(peerId, { type: 'close', subscriptionId: subscription.id });
     } finally {
       subscription.pendingPeers.delete(peerId);
     }
   }
-
   private closeSubscription(subscriptionId: string): void {
     const subscription = this.subscriptions.get(subscriptionId);
     if (subscription === undefined) return;
@@ -403,7 +415,6 @@ export class FipsNostrPubsubClient {
       });
     }
   }
-
   private admitEvent(event: NostrEvent | NostrVerifiedEvent): NostrVerifiedEvent {
     const verified = verifyNostrEvent(event);
     if (this.allowedKinds !== undefined && !this.allowedKinds.has(verified.kind)) {
@@ -411,7 +422,6 @@ export class FipsNostrPubsubClient {
     }
     return verified;
   }
-
   private currentPeers(): string[] {
     const peers = new Set<string>();
     for (const value of this.peers()) {
@@ -421,49 +431,43 @@ export class FipsNostrPubsubClient {
     }
     return [...peers].sort();
   }
-
   private send(peerId: string, message: FipsPubsubWireMessage): Promise<void> {
     const transport = this.transport;
     if (transport === undefined) return Promise.reject(clientError('client is not started'));
     try {
+      this.privacy.outbound(message);
       transport.queueFrame(peerId, this.codec.encodeFrame(message));
       return Promise.resolve();
     } catch (error) {
       return Promise.reject(error);
     }
   }
-
   private background(task: Promise<unknown>, context: FipsNostrPubsubClientErrorContext): void {
     void this.track(task).catch((error: unknown) => this.report(error, context));
   }
-
   private track<T>(task: Promise<T>): Promise<T> {
     this.pending.add(task);
     void task.finally(() => this.pending.delete(task)).catch(() => {});
     return task;
   }
-
   private handlePeerEvent(event: unknown): void {
     const parsed = parseConnectionEvent(event);
     if (parsed === undefined) return;
     if (parsed.connected) this.refreshPeers();
     else this.dropPeer(parsed.peerId);
   }
-
   private handleSessionEvent(event: unknown): void {
     const parsed = parseConnectionEvent(event);
     if (parsed === undefined) return;
     if (parsed.connected) this.refreshPeers();
     else this.dropPeer(parsed.peerId);
   }
-
   private dropPeer(peerId: string): void {
     void this.transport?.abortPeer(peerId).catch((error: unknown) => {
       this.report(error, { operation: 'receive', peerId });
     });
     this.handleTransportDisconnected(peerId, false);
   }
-
   private handleTransportConnected(peerId: string): void {
     if (!this.currentPeers().includes(peerId)) {
       void this.transport?.abortPeer(peerId);
@@ -476,7 +480,6 @@ export class FipsNostrPubsubClient {
       }
     }
   }
-
   private handleTransportDisconnected(peerId: string, reconnect = true): void {
     this.peerSubscriptions.removePeer(peerId);
     for (const subscription of this.subscriptions.values()) {
@@ -487,11 +490,9 @@ export class FipsNostrPubsubClient {
     this.invWant.dropPeer(peerId);
     if (reconnect && this.currentPeers().includes(peerId)) this.connectPeer(peerId);
   }
-
   private requireStarted(): void {
     if (this.transport === undefined) throw clientError('client is not started');
   }
-
   private report(error: unknown, context: FipsNostrPubsubClientErrorContext): void {
     this.onError(error instanceof Error ? error : new Error(String(error)), context);
   }

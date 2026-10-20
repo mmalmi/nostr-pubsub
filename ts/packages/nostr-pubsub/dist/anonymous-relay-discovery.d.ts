@@ -8,6 +8,7 @@ export declare function splitRelayDiscoveryFilters(filters: NostrFilter[]): {
     receiver: NostrFilter[];
     discovery: NostrFilter[][];
 };
+export declare function discoveryScope(filters: NostrFilter[]): string;
 export type AnonymousRelayDiscoveryOptions = Pick<NostrRuntimeOptions, 'relays' | 'store' | 'websocketImplementation' | 'historyTimeoutMs' | 'reconnectDelayMs' | 'onError'> & {
     maxScopes?: number;
 };

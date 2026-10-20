@@ -1,11 +1,11 @@
 import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { NostrRuntime } from './runtime.js';
 import { MemoryEventStore } from './runtime-store.js';
-const authorLookupKinds = new Set([0, 10002, 10050, 30078, 37368]);
+const authorLookupKinds = new Set([0, 1059, 10002, 10050, 30078, 37368, 37195]);
 /** Identify targeted public lookups before validating their scope. */
 export function isRelayDiscoveryFilter(filter) {
     return !!filter.kinds?.some(kind => kind === 37368 || kind === 30078
-        || authorLookupKinds.has(kind) && (filter.authors !== undefined || filter['#p'] !== undefined));
+        || authorLookupKinds.has(kind) && (filter.authors !== undefined || kind !== 1059 && filter['#p'] !== undefined));
 }
 /** Preserve OR semantics while keeping every lookup key in a separate scope. */
 export function splitRelayDiscoveryFilters(filters) {
@@ -16,8 +16,9 @@ export function splitRelayDiscoveryFilters(filters) {
             receiver.push(filter);
             continue;
         }
-        const kinds = filter.kinds.filter(kind => authorLookupKinds.has(kind));
-        const ordinary = filter.kinds.filter(kind => !authorLookupKinds.has(kind));
+        const scopedKind = (kind) => authorLookupKinds.has(kind) && (kind !== 1059 || filter.authors !== undefined);
+        const kinds = filter.kinds.filter(scopedKind);
+        const ordinary = filter.kinds.filter(kind => !scopedKind(kind));
         const authors = filter.authors;
         const devices = filter['#p'];
         if (authors !== undefined && devices !== undefined)
@@ -40,7 +41,7 @@ export function splitRelayDiscoveryFilters(filters) {
     }
     return { receiver, discovery: [...discovery.values()] };
 }
-function discoveryScope(filters) {
+export function discoveryScope(filters) {
     if (!filters.length)
         throw new Error('Discovery requires a public key scope');
     const scopes = filters.map(filter => {

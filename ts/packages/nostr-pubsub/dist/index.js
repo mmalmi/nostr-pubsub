@@ -26,4 +26,6 @@ export { NostrRuntime, createNostrRuntime } from './runtime.js';
 export { createPrivateRelayPublisher, isPrivateRelayEvent, publicationLaneStore, } from './private-relay-publisher.js';
 export { createAnonymousRelayDiscovery, isRelayDiscoveryFilter, splitRelayDiscoveryFilters, } from './anonymous-relay-discovery.js';
 export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
+export { createAnonymousFipsPublisher, createAnonymousFipsDiscovery } from './anonymous-fips.js';
+export { createScopedFipsSource } from './scoped-fips-source.js';
 //# sourceMappingURL=index.js.map

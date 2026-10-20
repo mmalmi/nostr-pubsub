@@ -162,13 +162,32 @@ describe('private publication connection boundary', () => {
 });
 
 describe('anonymous public-key discovery boundary', () => {
+  it('isolates public peer endpoint lookups from own endpoint advert publication and inbox AUTH', async () => {
+    const server = await relay();
+    const receiver = new NostrRuntime({ relays: [await server.url()], websocketImplementation: ws,
+      signAuthEvent: async (_relay, template) => finalizeEvent(template, owner) });
+    const discovery = createAnonymousRelayDiscovery({ relays: [await server.url()], websocketImplementation: ws });
+    cleanup.push(() => receiver.close(), () => discovery.close());
+    receiver.subscribe([{ kinds: [1059], '#p': [ownerKey] }], { onEvent() {} }, { cache: 'network-only' });
+    const advert = finalizeEvent({ kind: 37195, tags: [['d', 'fips-overlay-v1']], content: '', created_at: Math.floor(Date.now() / 1000) }, owner);
+    expect((await receiver.publish(advert)).accepted).toBe(true);
+    expect((await discovery.query([{ kinds: [37195], authors: [recipient], '#d': ['fips-overlay-v1'] }], { cache: 'network-only' })).complete).toBe(true);
+    const own = frames(server).find(connection => auth(connection)?.pubkey === ownerKey)!;
+    const lookup = frames(server).find(connection => connection.some(frame => frame[0] === 'REQ' && JSON.stringify(frame.slice(2)).includes(recipient)))!;
+    expect(lookup).not.toBe(own);
+    expect(auth(lookup).pubkey).not.toBe(ownerKey);
+    expect(lookup.some(frame => frame[0] === 'EVENT')).toBe(false);
+    expect(own.some(frame => frame[0] === 'EVENT' && (frame[1] as NostrEvent).id === advert.id)).toBe(true);
+    expect(JSON.stringify(own.filter(frame => frame[0] === 'REQ'))).not.toContain(recipient);
+  });
+
   it('splits profile/relay-list author batches and mixed own settings without joining lookup identities', async () => {
     const server = await relay();
     const discovery = createAnonymousRelayDiscovery({ relays: [await server.url()], websocketImplementation: ws });
     cleanup.push(() => discovery.close());
     const split = splitRelayDiscoveryFilters([
       { kinds: [0, 10013], authors: [ownerKey] },
-      { kinds: [0, 10002, 10050], authors: [recipient, 'a'.repeat(64)] },
+      { kinds: [0, 1059, 10002, 10050, 37195], authors: [recipient, 'a'.repeat(64)] },
       { kinds: [1060], '#p': [ownerKey] },
       { kinds: [0], limit: 20 },
     ]);

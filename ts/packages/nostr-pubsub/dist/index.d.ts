@@ -28,4 +28,8 @@ export { createPrivateRelayPublisher, isPrivateRelayEvent, publicationLaneStore,
 export { createAnonymousRelayDiscovery, isRelayDiscoveryFilter, splitRelayDiscoveryFilters, type AnonymousRelayDiscovery, type AnonymousRelayDiscoveryOptions, } from './anonymous-relay-discovery.js';
 export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
 export type { NostrRuntimeOptions, RuntimeCacheMode, RuntimeCompletion, RuntimeEventInfo, RuntimeEventStore, RuntimeMetrics, RuntimeOutboxEntry, RuntimePublishOptions, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeRelayStats, RuntimeReconciliationOptions, RuntimeSource, RuntimeSubscribeOptions, RuntimeSubscription, RuntimeSubscriptionHandlers, } from './runtime-types.js';
+export { createAnonymousFipsPublisher, createAnonymousFipsDiscovery, type AnonymousFipsEndpoint, type AnonymousFipsOptions } from './anonymous-fips.js';
+export type { FipsPrivacyRole } from './fips-privacy-role.js';
+export type { FipsRemotePublication, FipsReceiptOptions } from './fips-publication-receipts.js';
+export { createScopedFipsSource, type ScopedFipsSourceOptions } from './scoped-fips-source.js';
 //# sourceMappingURL=index.d.ts.map

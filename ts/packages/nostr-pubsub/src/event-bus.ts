@@ -12,6 +12,8 @@ import {
 
 export interface PublishReport {
   accepted: boolean;
+  /** This event received a remote receipt, even when other source traffic is queued. */
+  remoteAccepted?: boolean;
   priority: number;
   reason?: string;
 }

@@ -102,6 +102,9 @@ function encodeWireMessage(message) {
                 message.payloadBytes,
                 message.hopLimit,
             ];
+        case 'ok':
+            validateEventId(message.eventId, 'OK');
+            return ['OK', message.eventId, message.accepted, message.message];
         case 'want':
             validateEventId(message.eventId, 'WANT');
             return ['WANT', message.eventId];
@@ -128,6 +131,12 @@ function decodeWireMessage(value) {
             throw invalidFrame('CLOSE requires exactly an id');
         }
         return { type: 'close', subscriptionId: value[1] };
+    }
+    if (messageType === 'OK') {
+        if (value.length !== 4 || typeof value[2] !== 'boolean' || typeof value[3] !== 'string')
+            throw invalidFrame('OK requires event id, status and message');
+        validateEventId(value[1], 'OK');
+        return { type: 'ok', eventId: value[1], accepted: value[2], message: value[3] };
     }
     if (messageType === 'EVENT') {
         if (value.length === 2) {

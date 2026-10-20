@@ -3,6 +3,8 @@ import type { EventSource } from './source.js';
 import { type NostrEvent, type NostrFilter, type NostrVerifiedEvent, type QueryOptions } from './types.js';
 export interface PublishReport {
     accepted: boolean;
+    /** This event received a remote receipt, even when other source traffic is queued. */
+    remoteAccepted?: boolean;
     priority: number;
     reason?: string;
 }

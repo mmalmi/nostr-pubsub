@@ -1,3 +1,4 @@
+import { type FipsReceiptOptions, type FipsRemotePublication } from './fips-publication-receipts.js';
 import { type NostrEvent, type NostrFilter, type NostrVerifiedEvent } from './types.js';
 import { FipsPubsubWireCodec } from './wire.js';
 import { type FipsNostrPubsubClientLimits, type FipsNostrPubsubClientOptions, type FipsNostrPubsubEventHandler, type FipsNostrPubsubSubscription } from './fips-pubsub-client-types.js';
@@ -5,6 +6,9 @@ export declare const FIPS_NOSTR_PUBSUB_CAPABILITY = "nostr.pubsub/1";
 export declare class FipsNostrPubsubClient {
     readonly limits: FipsNostrPubsubClientLimits;
     readonly codec: FipsPubsubWireCodec;
+    private readonly privacy;
+    private readonly receipts;
+    private readonly acceptAnonymous;
     private readonly node;
     private readonly localPeerId;
     private readonly peers;
@@ -25,6 +29,7 @@ export declare class FipsNostrPubsubClient {
     stop(): Promise<void>;
     subscribe(filters: NostrFilter[], handler: FipsNostrPubsubEventHandler): FipsNostrPubsubSubscription;
     publish(event: NostrEvent | NostrVerifiedEvent): Promise<void>;
+    publishWithReceipt(event: NostrEvent | NostrVerifiedEvent, options?: FipsReceiptOptions): Promise<FipsRemotePublication>;
     refreshPeers(): void;
     peerSubscriptionCount(peerId: string): number;
     activeSubscriptionCount(): number;

@@ -3,6 +3,7 @@ import { type NostrEvent } from './types.js';
 import type { NostrRuntimeOptions, RuntimeEventStore, RuntimeSource } from './runtime-types.js';
 /** Classify before validation so malformed private traffic cannot fall back to public publication. */
 export declare function isPrivateRelayEvent(event: Pick<NostrEvent, 'kind'>): boolean;
+export declare function privateEnvelopeAllowed(event: NostrEvent): boolean;
 /**
  * Keep retry queues in their intended connection lane, retaining quarantined
  * records in storage. Historical received events remain locally readable.

@@ -6,7 +6,7 @@ import { verifyNostrEvent } from './types.js';
 export function isPrivateRelayEvent(event) {
     return event.kind === 1059 || event.kind === 1060 || event.kind === 21111;
 }
-function privateEnvelopeAllowed(event) {
+export function privateEnvelopeAllowed(event) {
     if (!isPrivateRelayEvent(event) || !Array.isArray(event.tags)
         || !event.tags.every(tag => Array.isArray(tag) && tag.every(part => typeof part === 'string')))
         return false;

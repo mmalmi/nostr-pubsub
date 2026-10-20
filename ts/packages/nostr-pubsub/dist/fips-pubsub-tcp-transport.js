@@ -335,6 +335,9 @@ class NotifyingEndpoint {
         });
     }
     sendDatagram(args) {
+        // TCP may flush a record queued before its peer was revoked.
+        if (!this.admitsPeer(args.dst))
+            return Promise.reject(storage('FIPS pubsub peer is no longer admitted'));
         return this.endpoint.sendDatagram(args);
     }
 }
