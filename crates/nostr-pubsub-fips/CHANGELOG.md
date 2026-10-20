@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.37 - 2026-10-21
+
+- Use FIPS core 0.4.107 and TCP endpoint 0.2.42 for BLE reconnect recovery.
+  Preserve pubsub wire formats, privacy roles, provider receipts, and resource bounds.
+
 ## 0.5.36 - 2026-10-20
 
 - Require an explicit public-author allowlist for every identified receiver EVENT and INV export, including cached public profiles, endpoint adverts, unknown kinds and retained exact-ID replay. Keep the full public-gossip role unchanged.
