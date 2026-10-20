@@ -135,6 +135,9 @@ impl ClientInner {
                 link_id: PeerLinkEpoch::Routed,
             })
             .collect::<Vec<_>>();
+        if !self.role.advertises() {
+            return Ok(peers);
+        }
         // Routed discovery cannot prove which transports a path will use.
         let unrestricted =
             self.peer_transport.is_none() && self.excluded_peer_transports.is_empty();
@@ -160,6 +163,7 @@ impl ClientInner {
             .into_iter()
             .filter(|peer| {
                 peer.connected
+                    && !self.options.accept_anonymous_publications
                     && self
                         .peer_transport
                         .is_none_or(|transport| peer.transport_type.as_deref() == Some(transport))

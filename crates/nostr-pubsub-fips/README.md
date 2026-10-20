@@ -139,3 +139,27 @@ available while peers request them; the client itself is not a durable store.
 The package also exports the lower-level `FipsInvWantTcpDriver` for non-Nostr
 mesh protocols, plus transport-neutral FIPS peerfinding and reputation
 adapters. It targets the FIPS `0.4.x` endpoint API.
+
+## Private provider operations
+
+Use `FipsAnonymousPublisher::start` with a fresh random endpoint and explicit
+public provider identities, then consume it with `publish_once(event, timeout)`.
+Each event, recipient copy and retry needs a different endpoint. Success is an
+exact-event `OK` from an explicitly selected provider, never a local cache report.
+An older or unavailable provider leaves application-owned durable queues pending.
+The caller owns endpoint shutdown. Network addresses and timing remain observable.
+
+Public providers opt in with `accept_anonymous_publications: true` and bounded
+`max_inbound_routed_peers`. Verified submissions enter policy/cache/fanout without
+promoting inbound clients into the outgoing provider roster. Receipts acknowledge
+remote admission, not durable storage or final recipient decryption.
+
+Use `start_receive_only` on identified receivers. Private envelopes can be
+received but cannot be exported through cache, inventory, exact-ID or external
+retained replay requests. `start_receive_only_with_public_authors` additionally
+permits explicit own/public service authors, never private contacts. Public peer
+profiles, authorization, invites and endpoint-advert lookups use a separate fresh
+`start_anonymous_discovery` endpoint with a fixed `FipsDiscoveryScope`. Disable
+identity-coupled built-in endpoint discovery before binding; route own adverts
+and public peer lookups through their separate application transports. These
+roles preserve the existing full client for trusted sibling/live/public services.

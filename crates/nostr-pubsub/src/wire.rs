@@ -25,6 +25,13 @@ pub enum FipsPubsubWireMessage {
         subscription_id: Option<SubscriptionId>,
         event: VerifiedEvent,
     },
+    /// A provider receipt for one submitted event. This is remote admission,
+    /// not the local cache-only publication report.
+    Ok {
+        event_id: EventId,
+        accepted: bool,
+        message: String,
+    },
     /// A subscription-scoped live-event inventory announcement.
     Inv {
         subscription_ids: Vec<SubscriptionId>,
@@ -139,6 +146,11 @@ impl FipsPubsubWireCodec {
                 subscription_id: Some(subscription_id),
                 event,
             } => RelayMessage::event(subscription_id.clone(), event.as_event().clone()).as_json(),
+            FipsPubsubWireMessage::Ok {
+                event_id,
+                accepted,
+                message,
+            } => RelayMessage::ok(*event_id, *accepted, message.clone()).as_json(),
             FipsPubsubWireMessage::Inv {
                 subscription_ids,
                 event_id,
@@ -190,6 +202,23 @@ impl FipsPubsubWireCodec {
             ("CLOSE", 2) => decode_close(value),
             ("EVENT", 2) => decode_published_event(value),
             ("EVENT", 3) => decode_delivered_event(value),
+            ("OK", 4) => {
+                let message =
+                    RelayMessage::from_value(value).map_err(|error| message_error(&error))?;
+                let RelayMessage::Ok {
+                    event_id,
+                    status,
+                    message,
+                } = message
+                else {
+                    return Err(invalid_frame("expected OK message"));
+                };
+                Ok(FipsPubsubWireMessage::Ok {
+                    event_id,
+                    accepted: status,
+                    message: message.into_owned(),
+                })
+            }
             ("INV", 6) => decode_inv(&value),
             ("WANT", 2) => decode_want(&value),
             ("REQ", _) => Err(invalid_frame("REQ requires an id and at least one filter")),
@@ -287,6 +316,7 @@ impl FipsPubsubWireAdapter {
                 PubsubSubscriptionUpdate::Closed
             }
             FipsPubsubWireMessage::Event { .. }
+            | FipsPubsubWireMessage::Ok { .. }
             | FipsPubsubWireMessage::Inv { .. }
             | FipsPubsubWireMessage::Want { .. } => PubsubSubscriptionUpdate::Ignored,
         };

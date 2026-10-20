@@ -77,6 +77,9 @@ impl super::ClientInner {
             subscription.delivery.close();
             self.send_close(&key, subscription.peers);
         }
+        if let Ok(mut publications) = self.publications.lock() {
+            publications.clear();
+        }
         if let Ok(mut pending) = self.pending_wants.lock() {
             pending.clear();
         }

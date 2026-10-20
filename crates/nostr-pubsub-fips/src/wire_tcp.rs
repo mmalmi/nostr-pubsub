@@ -59,10 +59,20 @@ pub(crate) struct WireTcpDriver {
 }
 
 impl WireTcpDriver {
+    #[cfg(test)]
     pub async fn bind(
         endpoint: Arc<FipsEndpoint>,
         options: WireTcpOptions,
         isn_seed: u64,
+    ) -> Result<Self> {
+        Self::bind_for_role(endpoint, options, isn_seed, true).await
+    }
+
+    pub async fn bind_for_role(
+        endpoint: Arc<FipsEndpoint>,
+        options: WireTcpOptions,
+        isn_seed: u64,
+        advertise: bool,
     ) -> Result<Self> {
         let max_connections = options
             .peer_capacity
@@ -80,9 +90,20 @@ impl WireTcpDriver {
             FIPS_NOSTR_PUBSUB_SERVICE_PORT,
         );
         let local_npub = endpoint.npub().to_string();
-        let tcp = FipsTcpEndpoint::bind_with_capability(endpoint, capability, tcp_config, isn_seed)
+        let tcp = if advertise {
+            FipsTcpEndpoint::bind_with_capability(endpoint, capability, tcp_config, isn_seed)
+                .await
+                .map_err(|error| storage_error("bind TCP/FIPS Nostr pubsub service", error))?
+        } else {
+            FipsTcpEndpoint::bind(
+                endpoint,
+                FIPS_NOSTR_PUBSUB_SERVICE_PORT,
+                tcp_config,
+                isn_seed,
+            )
             .await
-            .map_err(|error| storage_error("bind TCP/FIPS Nostr pubsub service", error))?;
+            .map_err(|error| storage_error("bind anonymous TCP/FIPS Nostr pubsub service", error))?
+        };
         Ok(Self {
             local_npub,
             selected_peers: BTreeMap::new(),

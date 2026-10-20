@@ -22,7 +22,13 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+mod anonymous_publication;
 mod client_inner;
+mod client_publication;
+mod client_received_event;
+mod privacy_roles;
+pub use anonymous_publication::{FipsAnonymousPublisher, FipsRemotePublication};
+pub use privacy_roles::FipsDiscoveryScope;
 mod client_lifecycle;
 mod client_peers;
 mod client_reputation;
@@ -89,6 +95,9 @@ pub struct FipsPubsubClientOptions {
     /// reserved from the outgoing peer roster; idle leases
     /// expire and never trigger outgoing connections or subscription replay.
     pub max_inbound_routed_peers: usize,
+    /// Admit verified one-shot EVENT submissions and return a remote OK receipt.
+    /// Requires bounded inbound slots; anonymous clients are never selected as providers.
+    pub accept_anonymous_publications: bool,
     /// Maximum subscribed peers selected for one live inventory fanout.
     pub fanout: usize,
     /// Maximum simultaneous application streaming or query subscriptions.
@@ -116,6 +125,7 @@ impl Default for FipsPubsubClientOptions {
             max_connected_peers: 64,
             routed_peers: Vec::new(),
             max_inbound_routed_peers: 0,
+            accept_anonymous_publications: false,
             fanout: DEFAULT_INV_WANT_FANOUT,
             max_active_subscriptions: 64,
             max_filters_per_subscription: 4,
@@ -171,6 +181,11 @@ impl FipsPubsubClientOptions {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.accept_anonymous_publications && self.max_inbound_routed_peers == 0 {
+            return Err(invalid_option(
+                "anonymous publication admission requires bounded inbound slots",
+            ));
+        }
         if self.max_inbound_routed_peers > self.max_connected_peers {
             return Err(invalid_option(
                 "max_inbound_routed_peers cannot exceed max_connected_peers",
@@ -249,6 +264,9 @@ async fn run_default_peerfinding(
 }
 
 async fn publish_local_fips_advert(inner: &ClientInner) -> Duration {
+    if !inner.role.advertises() {
+        return FIPS_PEER_ADVERT_REFRESH_INTERVAL;
+    }
     let Ok(Some(event)) = inner.endpoint.local_nostr_discovery_advert_event().await else {
         return FIPS_PEER_ADVERT_REFRESH_INTERVAL;
     };
@@ -409,6 +427,25 @@ impl FipsPubsubClient {
         excluded_peer_transports: HashSet<String>,
         policies: FipsPubsubClientPolicies,
     ) -> Result<Self> {
+        Self::start_for_role(
+            endpoint,
+            options,
+            peer_transport,
+            excluded_peer_transports,
+            policies,
+            privacy_roles::ClientRole::Full,
+        )
+        .await
+    }
+
+    async fn start_for_role(
+        endpoint: Arc<FipsEndpoint>,
+        options: FipsPubsubClientOptions,
+        peer_transport: Option<&'static str>,
+        excluded_peer_transports: HashSet<String>,
+        policies: FipsPubsubClientPolicies,
+        role: privacy_roles::ClientRole,
+    ) -> Result<Self> {
         let restricted = peer_transport.is_some() || !excluded_peer_transports.is_empty();
         options.validate_peer_transport(restricted)?;
         let routed_peers = client_peers::validate_routed_peers(
@@ -418,17 +455,14 @@ impl FipsPubsubClient {
             restricted,
         )?;
         let codec = FipsPubsubWireCodec::new(options.max_frame_bytes)?;
-        let subscription_capacity = options.max_active_subscriptions.saturating_add(1);
         let subscription_limits = options.subscription_limits();
         let max_replay_events = options.max_replay_events;
-        let max_pending_events = subscription_capacity
-            .saturating_mul(options.max_replay_events)
-            .max(1);
-        let max_pending_alternatives = options.max_connected_peers;
-        let driver = WireTcpDriver::bind(
+        let pending_wants = PendingWants::from_options(&options);
+        let driver = WireTcpDriver::bind_for_role(
             Arc::clone(&endpoint),
             options.wire_tcp_options(),
             tcp_isn_seed(endpoint.npub()),
+            role.advertises(),
         )
         .await?;
         let command_capacity = options
@@ -439,6 +473,8 @@ impl FipsPubsubClient {
         let (replay_tx, replay_rx) = mpsc::channel(options.max_connected_peers);
         let inner = Arc::new(ClientInner {
             admission: Mutex::new(true),
+            role,
+            publications: Mutex::new(HashMap::new()),
             endpoint: Arc::clone(&endpoint),
             codec,
             options,
@@ -483,10 +519,7 @@ impl FipsPubsubClient {
                 FIPS_NOSTR_PUBSUB_MAX_OBSERVED_IDS,
             )),
             provider_behavior: Mutex::new(provider_behavior::ProviderBehavior::default()),
-            pending_wants: Mutex::new(PendingWants::new(
-                max_pending_events,
-                max_pending_alternatives,
-            )),
+            pending_wants: Mutex::new(pending_wants),
         });
         let peerfinding_subscription = inner
             .subscribe(vec![default_peerfinding_filter()], true)

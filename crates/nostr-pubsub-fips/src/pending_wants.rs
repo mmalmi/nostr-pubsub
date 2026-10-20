@@ -46,6 +46,17 @@ pub(super) struct PendingWants {
 }
 
 impl PendingWants {
+    pub(super) fn from_options(options: &crate::FipsPubsubClientOptions) -> Self {
+        Self::new(
+            options
+                .max_active_subscriptions
+                .saturating_add(1)
+                .saturating_mul(options.max_replay_events)
+                .max(1),
+            options.max_connected_peers,
+        )
+    }
+
     pub(super) fn new(max_events: usize, max_alternatives: usize) -> Self {
         Self {
             max_events,

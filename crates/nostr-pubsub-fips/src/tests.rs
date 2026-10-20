@@ -27,6 +27,7 @@ mod delivery;
 mod late_events;
 mod managed_reputation;
 mod peer_policy;
+mod privacy;
 mod replay;
 mod replay_source;
 mod reputation;

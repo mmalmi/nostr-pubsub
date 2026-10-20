@@ -1,11 +1,10 @@
 use super::{
-    Arc, AtomicU64, AtomicUsize, EventId, EventPolicyContext, EventSource, Filter, FipsEndpoint,
+    Arc, AtomicU64, AtomicUsize, EventId, EventSource, Filter, FipsEndpoint,
     FipsPubsubClientOptions, FipsPubsubSubscription, FipsPubsubWireCodec, FipsPubsubWireMessage,
-    HashMap, HashSet, Mutex, Ordering, PeerIdentity, PolicyDecision, PublishReport, PubsubError,
-    PubsubPeerInterest, PubsubPeerSubscriptionStore, PubsubPolicy, Result,
-    SOURCE_PRIORITY_FIPS_ENDPOINT, SourceId, SubscriptionDeliveryStatus, SubscriptionId,
-    TransportCommand, VecDeque, VerifiedEvent, bounded_delivery_targets, event_payload_bytes, mpsc,
-    no_connected_peers, now_ms, poisoned, publish_report, storage_error,
+    HashMap, HashSet, Mutex, Ordering, PeerIdentity, PubsubError, PubsubPeerInterest,
+    PubsubPeerSubscriptionStore, PubsubPolicy, Result, SourceId, SubscriptionDeliveryStatus,
+    SubscriptionId, TransportCommand, VecDeque, VerifiedEvent, bounded_delivery_targets,
+    event_payload_bytes, mpsc, no_connected_peers, now_ms, poisoned, storage_error,
 };
 use crate::client_peers::PeerLinkEpoch;
 use crate::local_delivery::LocalDelivery;
@@ -16,6 +15,9 @@ use crate::seen_ids::ScopedSeenIds;
 
 pub(super) struct ClientInner {
     pub(super) admission: Mutex<bool>,
+    pub(super) role: crate::privacy_roles::ClientRole,
+    pub(super) publications:
+        Mutex<HashMap<EventId, crate::anonymous_publication::PendingPublication>>,
     pub(super) endpoint: Arc<FipsEndpoint>,
     pub(super) codec: FipsPubsubWireCodec,
     pub(super) options: FipsPubsubClientOptions,
@@ -103,6 +105,7 @@ impl ClientInner {
                 self.options.max_filters_per_subscription
             )));
         }
+        self.role.validate_filters(&filters)?;
         for filter in &mut filters {
             filter.limit = Some(
                 filter
@@ -181,6 +184,7 @@ impl ClientInner {
     }
 
     pub(super) fn send_frame(&self, peer: PeerIdentity, frame: Vec<u8>) -> Result<()> {
+        self.validate_outbound(&peer, &frame)?;
         self.transport_tx
             .try_send(TransportCommand::Send { peer, frame })
             .map_err(|error| storage_error("queue TCP/FIPS Nostr pubsub frame", error))
@@ -195,6 +199,13 @@ impl ClientInner {
         let source_npub = source_peer.npub();
         let source_id = SourceId::new(source_npub.clone());
         match message {
+            FipsPubsubWireMessage::Ok {
+                event_id,
+                accepted,
+                message,
+            } => {
+                self.handle_publication_receipt(&source_npub, event_id, accepted, &message);
+            }
             FipsPubsubWireMessage::Req {
                 subscription_id,
                 filters,
@@ -210,51 +221,8 @@ impl ClientInner {
                 subscription_id,
                 event,
             } => {
-                self.event_frames_received.fetch_add(1, Ordering::Relaxed);
-                let is_subscribed =
-                    self.event_matches_subscription(&source_npub, subscription_id.as_ref(), &event);
-                let fresh_id = if is_subscribed && subscription_id.is_some() {
-                    self.fresh_response_subscription(&source_npub, &event)
-                } else {
-                    None
-                };
-                let response_id = fresh_id.as_ref().or(subscription_id.as_ref());
-                let subscription_key = response_id.map(ToString::to_string).unwrap_or_default();
-                let event_id = event.as_event().id.to_string();
-                let observation = self.observed_full_events.lock().ok().map(|mut seen| {
-                    seen.observe_response(
-                        &source_npub,
-                        subscription_id.as_ref().map(SubscriptionId::as_str),
-                        &subscription_key,
-                        &event_id,
-                        is_subscribed,
-                    )
-                });
-                let Some(observation) = observation else {
-                    return;
-                };
-                if !is_subscribed {
-                    // A response to a retried WANT may already be in flight at
-                    // local CLOSE. The exact previously matched observation is
-                    // harmless; new unsolicited IDs still count as violations.
-                    if !observation.previously_matched {
-                        self.record_provider_violation(
-                            source_peer,
-                            ProviderViolation::OutOfFilterEvent {
-                                repeated: !observation.first,
-                            },
-                        );
-                    }
-                    return;
-                }
-                if !observation.first {
-                    return;
-                }
-                let source = EventSource::fips_endpoint(&source_npub);
-                if !self.event_is_admitted(&event, &source).await {
-                    return;
-                }
-                self.handle_event(&source_npub, &source_id, response_id, &event);
+                self.handle_received_event(source_peer, subscription_id, event)
+                    .await;
             }
             FipsPubsubWireMessage::Inv {
                 subscription_ids,
@@ -438,7 +406,7 @@ impl ClientInner {
         delivered
     }
 
-    fn event_matches_subscription(
+    pub(super) fn event_matches_subscription(
         &self,
         source_npub: &str,
         subscription_id: Option<&SubscriptionId>,
@@ -475,83 +443,6 @@ impl ClientInner {
             .lock()
             .map_err(|_| poisoned("FIPS recent event cache"))
             .map(|mut events| events.insert(event, source, hop_limit))
-    }
-
-    pub(super) async fn publish(
-        &self,
-        event: VerifiedEvent,
-        source: EventSource,
-    ) -> Result<PublishReport> {
-        drop(self.admit()?);
-        let decision = self.event_decision(&event, &source).await?;
-        drop(self.admit()?);
-        let (accepted, priority, reason) = decision_report(&decision);
-        if !accepted {
-            return Ok(PublishReport {
-                accepted,
-                priority,
-                reason,
-            });
-        }
-
-        let subscribed = self.peer_delivery_targets(&event, None)?;
-        let _admission = self.admit()?;
-        let is_new = self
-            .recent_events
-            .lock()
-            .map_err(|_| poisoned("FIPS recent event cache"))?
-            .insert_for_publish(event.clone(), source, self.options.max_hops);
-        if !is_new {
-            return Ok(PublishReport {
-                accepted: true,
-                priority,
-                reason: Some("event was already published".to_string()),
-            });
-        }
-
-        if !subscribed.is_empty() {
-            let peer_count = subscribed.len();
-            let sent = self.send_inventories(subscribed, &event, self.options.max_hops);
-            let mut report = publish_report(sent, peer_count, "subscribed FIPS peers")?;
-            report.priority = priority;
-            if report.reason.is_none() {
-                report.reason = reason;
-            }
-            return Ok(report);
-        }
-
-        Ok(PublishReport {
-            accepted: true,
-            priority,
-            reason: Some("cached for live FIPS subscriptions".to_string()),
-        })
-    }
-
-    pub(super) async fn event_is_admitted(
-        &self,
-        event: &VerifiedEvent,
-        source: &EventSource,
-    ) -> bool {
-        self.event_decision(event, source)
-            .await
-            .is_ok_and(|decision| !matches!(decision, PolicyDecision::Drop { .. }))
-    }
-
-    async fn event_decision(
-        &self,
-        event: &VerifiedEvent,
-        source: &EventSource,
-    ) -> Result<PolicyDecision> {
-        match &self.event_policy {
-            Some(policy) => {
-                policy
-                    .check_event(EventPolicyContext { event, source })
-                    .await
-            }
-            None => Ok(PolicyDecision::allow_with_priority(
-                SOURCE_PRIORITY_FIPS_ENDPOINT,
-            )),
-        }
     }
 
     pub(super) fn recent_matching_events(&self, filters: &[Filter]) -> Result<Vec<CachedEvent>> {
@@ -940,7 +831,11 @@ impl ClientInner {
             .is_ok_and(|mut behavior| behavior.is_in_cooldown(peer_npub, now_ms))
     }
 
-    fn record_provider_violation(&self, peer: PeerIdentity, violation: ProviderViolation) {
+    pub(super) fn record_provider_violation(
+        &self,
+        peer: PeerIdentity,
+        violation: ProviderViolation,
+    ) {
         let peer_npub = peer.npub();
         let cooldown = self
             .provider_behavior
@@ -955,14 +850,6 @@ impl ClientInner {
         {
             self.provider_cooldowns.fetch_add(1, Ordering::Relaxed);
         }
-    }
-}
-
-fn decision_report(decision: &PolicyDecision) -> (bool, i32, Option<String>) {
-    match decision {
-        PolicyDecision::Allow { priority } => (true, *priority, None),
-        PolicyDecision::Throttle { priority, reason } => (true, *priority, Some(reason.clone())),
-        PolicyDecision::Drop { reason } => (false, 0, Some(reason.clone())),
     }
 }
 

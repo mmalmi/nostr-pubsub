@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.18 - 2026-10-20
+
+- Encode and verify standard Nostr OK receipts for exact-event remote provider admission. Keep local cache publication reports distinct from remote receipts.
+
 ## 0.1.17 - 2026-10-14
 
 - Add a bounded signature verification cache for repeated events. Cache hits still verify the complete event body and require the exact previously verified signature.

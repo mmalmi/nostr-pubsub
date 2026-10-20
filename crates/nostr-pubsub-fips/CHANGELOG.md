@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.35 - 2026-10-20
+
+- Add consuming, anonymous one-event publisher operations with provider-bound OK receipts. Older or unreachable providers cannot acknowledge a local cache-only send.
+- Add receive-only and one-subject anonymous discovery roles. Block private cache, inventory and retained replay export from identified receivers.
+- Opt public providers into bounded anonymous submissions without adding unknown senders to the provider roster. Keep default admission closed.
+
 ## 0.5.34 - 2026-10-18
 
 - Use FIPS core 0.4.106 and TCP endpoint 0.2.41 to retain the refreshed WebRTC
