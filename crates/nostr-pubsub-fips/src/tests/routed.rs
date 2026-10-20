@@ -230,7 +230,16 @@ async fn known_service_peers_exchange_events_over_real_udp_without_discovery() {
 }
 
 pub(super) async fn udp_endpoint(secret: [u8; 32], peers: Vec<PeerConfig>) -> Arc<FipsEndpoint> {
+    udp_endpoint_with_role(secret, peers, false).await
+}
+
+pub(super) async fn udp_endpoint_with_role(
+    secret: [u8; 32],
+    peers: Vec<PeerConfig>,
+    leaf_only: bool,
+) -> Arc<FipsEndpoint> {
     let mut config = Config::new();
+    config.node.leaf_only = leaf_only;
     config.node.identity = IdentityConfig {
         nsec: Some(hex::encode(secret)),
         persistent: false,
