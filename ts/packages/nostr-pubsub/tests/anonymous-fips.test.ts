@@ -99,3 +99,51 @@ it('keeps mixed invite inbox and reverse-device lookup filters on their own role
   expect(split.receiver).toEqual([{ kinds: [1059], '#p': [key] }]);
   expect(split.discovery).toEqual([[{ kinds: [37368], '#p': [key] }]]);
 });
+
+it('blocks cached public profile, endpoint advert and future-kind exports by unapproved authors', () => {
+  const own = 'a'.repeat(64);
+  const receiver = new FipsPrivacyRolePolicy('receiver', () => [own]);
+  for (const kind of [0, 37195, 54321]) {
+    const event = verifyNostrEvent(finalizeEvent({ kind, tags: [], content: 'private lookup cache', created_at: 1700000000 }, generateSecretKey()));
+    expect(() => receiver.outbound({ type: 'event', event })).toThrow();
+    expect(() => receiver.outbound({ type: 'inv', eventId: event.id, eventKind: kind, payloadBytes: 500, hopLimit: 1, subscriptionIds: ['stranger'] })).toThrow();
+  }
+});
+
+it('never exports private lookup authors from live cache or retained restart replay over actual TCP', async () => {
+  for (const primeCache of [true, false]) {
+    const network = new MemoryFipsNetwork();
+    const receiverId = `02${'44'.repeat(32)}`;
+    const requesterId = `02${'55'.repeat(32)}`;
+    const ownSecret = generateSecretKey();
+    const approved = verifyNostrEvent(finalizeEvent({ kind: 1, tags: [], content: 'approved public head', created_at: 1700000000 }, ownSecret));
+    const foreign = [0, 37195, 54321].map(kind => verifyNostrEvent(finalizeEvent({ kind, tags: [], content: 'private lookup cache', created_at: 1700000000 }, generateSecretKey())));
+    const receiver = new FipsNostrPubsubClient({ node: network.node(receiverId), localPeerId: receiverId, peers: () => [requesterId], role: 'receiver', receiverPublicAuthors: () => [approved.pubkey],
+      retainedEventReader: { query: async () => ({ complete: true, events: [...foreign, approved].map(event => ({ event, source: { kind: 'local-index', id: 'shared-history' }, priority: 0 })) }) },
+    }).start();
+    const requester = new FipsNostrPubsubClient({ node: network.node(requesterId), localPeerId: requesterId, peers: () => [receiverId] }).start();
+    clients.push(receiver, requester);
+    const kinds = [0, 1, 37195, 54321];
+    if (primeCache) {
+      const seeded: string[] = [];
+      const seed = receiver.subscribe([{ kinds }], event => seeded.push(event.id));
+      await vi.waitFor(() => expect(requester.peerSubscriptionCount(receiverId)).toBe(1));
+      for (const event of foreign) await requester.publish(event);
+      await vi.waitFor(() => expect(seeded).toHaveLength(3));
+      seed.close();
+    }
+    const frames: FipsPubsubWireMessage[] = [];
+    const decode = requester.codec.decodeFrame.bind(requester.codec);
+    vi.spyOn(requester.codec, 'decodeFrame').mockImplementation(frame => { const message = decode(frame); frames.push(message); return message; });
+    const received: string[] = [];
+    requester.subscribe([{ kinds }], event => received.push(event.id));
+    await vi.waitFor(() => expect(received).toContain(approved.id));
+    const raw = requester as unknown as { send(peer: string, message: FipsPubsubWireMessage): Promise<void> };
+    for (const event of foreign) await raw.send(receiverId, { type: 'want', eventId: event.id });
+    for (let turn = 0; turn < 4; turn++) { await receiver.idle(); await requester.idle(); }
+    expect(received).toEqual([approved.id]);
+    const foreignIds = new Set(foreign.map(event => event.id));
+    expect(frames.filter(frame => frame.type === 'event' ? foreignIds.has(frame.event.id) : frame.type === 'inv' && foreignIds.has(frame.eventId))).toEqual([]);
+    await receiver.stop(); await requester.stop();
+  }
+});

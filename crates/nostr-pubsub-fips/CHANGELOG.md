@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.36 - 2026-10-20
+
+- Require an explicit public-author allowlist for every identified receiver EVENT and INV export, including cached public profiles, endpoint adverts, unknown kinds and retained exact-ID replay. Keep the full public-gossip role unchanged.
+
 ## 0.5.35 - 2026-10-20
 
 - Add consuming, anonymous one-event publisher operations with provider-bound OK receipts. Older or unreachable providers cannot acknowledge a local cache-only send.

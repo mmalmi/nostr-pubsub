@@ -144,15 +144,25 @@ impl ClientRole {
         Ok(())
     }
 
-    pub(super) fn validate_publication(&self, event: &VerifiedEvent) -> Result<()> {
-        if matches!(self, Self::Publisher | Self::Discovery(_))
-            || (matches!(self, Self::Receiver(_)) && is_private(event.as_event().kind.as_u16()))
-        {
-            return Err(invalid_option(
-                "publication is not allowed on this FIPS privacy role",
-            ));
+    pub(super) fn can_export(&self, event: &VerifiedEvent) -> bool {
+        match self {
+            Self::Full => true,
+            Self::Receiver(authors) => {
+                !is_private(event.as_event().kind.as_u16())
+                    && authors.contains(&event.as_event().pubkey)
+            }
+            Self::Discovery(_) | Self::Publisher => false,
         }
-        Ok(())
+    }
+
+    pub(super) fn validate_publication(&self, event: &VerifiedEvent) -> Result<()> {
+        if self.can_export(event) {
+            Ok(())
+        } else {
+            Err(invalid_option(
+                "publication is not allowed on this FIPS privacy role",
+            ))
+        }
     }
 }
 
@@ -232,11 +242,23 @@ impl ClientInner {
             }
 
             (ClientRole::Receiver(_), FipsPubsubWireMessage::Event { event, .. }) => {
-                !is_private(event.as_event().kind.as_u16())
+                self.role.can_export(event)
             }
-            (ClientRole::Receiver(_), FipsPubsubWireMessage::Inv { event_kind, .. }) => {
-                !is_private(*event_kind)
-            }
+            (
+                ClientRole::Receiver(_),
+                FipsPubsubWireMessage::Inv {
+                    event_id,
+                    event_kind,
+                    ..
+                },
+            ) => self
+                .recent_events
+                .lock()
+                .map_err(|_| poisoned("FIPS recent event cache"))?
+                .event(&event_id.to_hex())
+                .is_some_and(|event| {
+                    event.as_event().kind.as_u16() == *event_kind && self.role.can_export(event)
+                }),
 
             (
                 ClientRole::Publisher,

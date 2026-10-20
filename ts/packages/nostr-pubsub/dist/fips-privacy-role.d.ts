@@ -10,8 +10,9 @@ export declare class FipsPrivacyRolePolicy {
     private readonly scope?;
     constructor(role?: FipsPrivacyRole, publicAuthors?: () => readonly string[]);
     filters(filters: NostrFilter[]): void;
+    canExport(event: NostrEvent): boolean;
     publication(event: NostrEvent): void;
-    outbound(message: FipsPubsubWireMessage): void;
+    outbound(message: FipsPubsubWireMessage, inventoryEvent?: NostrEvent): void;
     get ignoresRequests(): boolean;
     assertPublisher(event: NostrEvent): void;
 }

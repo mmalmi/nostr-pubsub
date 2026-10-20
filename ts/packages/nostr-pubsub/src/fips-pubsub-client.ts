@@ -85,7 +85,7 @@ export class FipsNostrPubsubClient {
     this.peerSubscriptions = createClientPeerSubscriptionStore(this.limits);
     this.retained = new FipsRetainedReplay(this.events, options.retainedEventReader, this.limits.maxReplayEvents, this.limits.maxHops,
       (event) => this.admitEvent(event),
-      (peer, id, event) => this.currentPeers().includes(peer) && this.peerSubscriptions.matchingSubscriptions(peer, event).some((sub) => sub.subscriptionId === id),
+      (peer, id, event) => this.privacy.canExport(event) && this.currentPeers().includes(peer) && this.peerSubscriptions.matchingSubscriptions(peer, event).some((sub) => sub.subscriptionId === id),
       (peer, message) => this.send(peer, message));
   }
   start(): this {
@@ -435,7 +435,7 @@ export class FipsNostrPubsubClient {
     const transport = this.transport;
     if (transport === undefined) return Promise.reject(clientError('client is not started'));
     try {
-      this.privacy.outbound(message);
+      this.privacy.outbound(message, message.type === 'inv' ? this.events.get(message.eventId)?.event : undefined);
       transport.queueFrame(peerId, this.codec.encodeFrame(message));
       return Promise.resolve();
     } catch (error) {

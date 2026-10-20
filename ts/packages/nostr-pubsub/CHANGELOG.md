@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.19 - 2026-10-20
+
+- Restrict every identified receiver EVENT and INV export to explicit public authors. Public profiles, endpoint adverts and future kinds fetched privately cannot escape through broad requests, stale cache or retained exact-ID replay. Preserve full public-gossip and trusted-sibling roles.
+
 ## 0.5.18 - 2026-10-20
 
 - Add fresh anonymous FIPS publication operations with provider-bound remote OK receipts and one-subject lookup scopes. Keep identified receivers from exporting private cache or retained replay.

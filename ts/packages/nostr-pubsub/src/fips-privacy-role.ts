@@ -27,18 +27,20 @@ export class FipsPrivacyRolePolicy {
         throw new Error('Private receive filter requires an inbox or session key');
     }
   }
-  publication(event: NostrEvent): void {
-    if (this.role !== 'full' && (this.role !== 'receiver' || isPrivateRelayEvent(event)))
-      throw new Error('Publication is forbidden on this FIPS role');
+  canExport(event: NostrEvent): boolean {
+    return this.role === 'full' || this.role === 'receiver' && !isPrivateRelayEvent(event) && this.publicAuthors().includes(event.pubkey);
   }
-  outbound(message: FipsPubsubWireMessage): void {
+  publication(event: NostrEvent): void {
+    if (!this.canExport(event)) throw new Error('Publication is forbidden on this FIPS role');
+  }
+  outbound(message: FipsPubsubWireMessage, inventoryEvent?: NostrEvent): void {
     if (this.role === 'full') return;
     if (message.type === 'req') { this.filters(message.filters); return; }
     if (message.type === 'close') return;
     if (this.role === 'publisher' && message.type === 'event' && message.subscriptionId === undefined && privateEnvelopeAllowed(message.event)) return;
     if (this.role !== 'publisher' && message.type === 'want') return;
-    if (this.role === 'receiver' && ((message.type === 'event' && !isPrivateRelayEvent(message.event))
-      || (message.type === 'inv' && !isPrivateRelayEvent({ kind: message.eventKind })))) return;
+    if (this.role === 'receiver' && ((message.type === 'event' && this.canExport(message.event))
+      || (message.type === 'inv' && inventoryEvent?.id === message.eventId && inventoryEvent.kind === message.eventKind && this.canExport(inventoryEvent)))) return;
     throw new Error('Outbound frame is forbidden on this FIPS role');
   }
   get ignoresRequests(): boolean { return this.role !== 'full' && this.role !== 'receiver'; }

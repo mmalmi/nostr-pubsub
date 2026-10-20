@@ -562,6 +562,24 @@ impl ClientInner {
         event: &VerifiedEvent,
         hop_limit: u8,
     ) -> Result<Vec<u8>> {
+        if !self.role.can_export(event) {
+            return Err(super::invalid_option(
+                "inventory author is not public on this receiver",
+            ));
+        }
+        if matches!(&self.role, crate::privacy_roles::ClientRole::Receiver(_)) {
+            // Retained readers may return an approved body outside the live
+            // window. Keep its verified author available to the final INV guard
+            // and its WANT response, within the existing bounded payload cache.
+            self.recent_events
+                .lock()
+                .map_err(|_| poisoned("FIPS recent event cache"))?
+                .insert_for_publish(
+                    event.clone(),
+                    EventSource::local_index("approved-public-replay"),
+                    hop_limit,
+                );
+        }
         let payload_bytes = event_payload_bytes(event)?;
         self.codec.encode_frame(&FipsPubsubWireMessage::inv(
             subscription_ids,

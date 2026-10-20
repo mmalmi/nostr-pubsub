@@ -32,11 +32,14 @@ export class FipsPrivacyRolePolicy {
                 throw new Error('Private receive filter requires an inbox or session key');
         }
     }
+    canExport(event) {
+        return this.role === 'full' || this.role === 'receiver' && !isPrivateRelayEvent(event) && this.publicAuthors().includes(event.pubkey);
+    }
     publication(event) {
-        if (this.role !== 'full' && (this.role !== 'receiver' || isPrivateRelayEvent(event)))
+        if (!this.canExport(event))
             throw new Error('Publication is forbidden on this FIPS role');
     }
-    outbound(message) {
+    outbound(message, inventoryEvent) {
         if (this.role === 'full')
             return;
         if (message.type === 'req') {
@@ -49,8 +52,8 @@ export class FipsPrivacyRolePolicy {
             return;
         if (this.role !== 'publisher' && message.type === 'want')
             return;
-        if (this.role === 'receiver' && ((message.type === 'event' && !isPrivateRelayEvent(message.event))
-            || (message.type === 'inv' && !isPrivateRelayEvent({ kind: message.eventKind }))))
+        if (this.role === 'receiver' && ((message.type === 'event' && this.canExport(message.event))
+            || (message.type === 'inv' && inventoryEvent?.id === message.eventId && inventoryEvent.kind === message.eventKind && this.canExport(inventoryEvent))))
             return;
         throw new Error('Outbound frame is forbidden on this FIPS role');
     }

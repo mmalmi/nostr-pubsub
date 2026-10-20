@@ -527,3 +527,181 @@ async fn anonymous_publisher_cleans_owned_tasks_on_validation_timeout_and_cancel
         endpoint.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn receiver_rejects_cached_public_profile_advert_and_unknown_author_exports() {
+    let endpoint = udp_endpoint([147; 32], Vec::new()).await;
+    let own = Keys::generate();
+    let stranger =
+        PeerIdentity::from_npub(&Identity::from_secret_bytes(&[148; 32]).unwrap().npub()).unwrap();
+    let client = FipsPubsubClient::start_receive_only_with_public_authors(
+        endpoint.clone(),
+        FipsPubsubClientOptions::default(),
+        vec![own.public_key()],
+    )
+    .await
+    .unwrap();
+    for kind in [0, 37195, 54321] {
+        let event = VerifiedEvent::try_from(
+            EventBuilder::new(Kind::Custom(kind), "privately looked-up public event")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+        )
+        .unwrap();
+        client
+            .inner
+            .remember_event(
+                event.clone(),
+                EventSource::local_index("stale-private-lookup"),
+                4,
+            )
+            .unwrap();
+        for message in [
+            FipsPubsubWireMessage::deliver(SubscriptionId::new("stranger"), event.clone()),
+            FipsPubsubWireMessage::inv(
+                vec![SubscriptionId::new("stranger")],
+                event.as_event().id,
+                kind,
+                500,
+                1,
+            ),
+        ] {
+            let frame = client.inner.codec.encode_frame(&message).unwrap();
+            assert!(
+                client.inner.validate_outbound(&stranger, &frame).is_err(),
+                "identified receiver exported unapproved public author kind {kind}"
+            );
+        }
+    }
+    client.shutdown().await;
+    endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+async fn receiver_public_author_allowlist_covers_broad_cache_and_restart_exact_id_replay() {
+    let own = Keys::generate();
+    let approved = VerifiedEvent::try_from(
+        EventBuilder::new(Kind::TextNote, "approved public head")
+            .sign_with_keys(&own)
+            .unwrap(),
+    )
+    .unwrap();
+    let foreign = [0, 37195, 54321].map(|kind| {
+        VerifiedEvent::try_from(
+            EventBuilder::new(Kind::Custom(kind), "public body from private peer lookup")
+                .tags([Tag::identifier("fips-overlay-v1")])
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+        )
+        .unwrap()
+    });
+    let store = Arc::new(InMemoryEventBus::default());
+    for event in foreign.iter().chain(std::iter::once(&approved)) {
+        store
+            .publish(
+                event.clone(),
+                EventSource::local_index("shared-local-cache"),
+            )
+            .await
+            .unwrap();
+    }
+    for restart in [false, true] {
+        let endpoint = udp_endpoint([149; 32], Vec::new()).await;
+        let address = endpoint.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+        let stranger_endpoint = udp_endpoint(
+            [150; 32],
+            vec![PeerConfig::new(endpoint.npub(), "udp", &address)],
+        )
+        .await;
+        let receiver = FipsPubsubClient::start_receive_only_with_public_authors(
+            endpoint.clone(),
+            FipsPubsubClientOptions {
+                routed_peers: vec![stranger_endpoint.npub().into()],
+                ..Default::default()
+            },
+            vec![own.public_key()],
+        )
+        .await
+        .unwrap();
+        receiver.set_replay_source(Some(store.clone())).unwrap();
+        if !restart {
+            for event in foreign.iter().chain(std::iter::once(&approved)) {
+                receiver
+                    .inner
+                    .remember_event(
+                        event.clone(),
+                        EventSource::local_index("stale-private-lookup"),
+                        4,
+                    )
+                    .unwrap();
+            }
+        }
+        let stranger = FipsPubsubClient::start(
+            stranger_endpoint.clone(),
+            FipsPubsubClientOptions {
+                routed_peers: vec![endpoint.npub().into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut incoming = stranger
+            .subscribe(vec![Filter::new().kinds([
+                Kind::Metadata,
+                Kind::TextNote,
+                Kind::Custom(37195),
+                Kind::Custom(54321),
+            ])])
+            .await
+            .unwrap();
+        let delivered = timeout(Duration::from_secs(10), incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            delivered.event.as_event().id,
+            approved.as_event().id,
+            "identified receiver exposed privately cached public author"
+        );
+        assert!(
+            timeout(Duration::from_millis(150), incoming.recv())
+                .await
+                .is_err()
+        );
+        let before = stranger.delivery_snapshot();
+        let peer = PeerIdentity::from_npub(endpoint.npub()).unwrap();
+        for event in &foreign {
+            stranger
+                .inner
+                .send_frame(
+                    peer,
+                    stranger
+                        .inner
+                        .codec
+                        .encode_frame(&FipsPubsubWireMessage::want(event.as_event().id))
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        assert!(
+            timeout(Duration::from_millis(150), incoming.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            stranger.delivery_snapshot().event_frames_received,
+            before.event_frames_received,
+            "exact-ID WANT leaked a private lookup author"
+        );
+        assert_eq!(
+            stranger.delivery_snapshot().inv_frames_received,
+            before.inv_frames_received,
+            "private lookup inventory leaked after restart"
+        );
+        receiver.shutdown().await;
+        stranger.shutdown().await;
+        endpoint.shutdown().await.unwrap();
+        stranger_endpoint.shutdown().await.unwrap();
+    }
+}
