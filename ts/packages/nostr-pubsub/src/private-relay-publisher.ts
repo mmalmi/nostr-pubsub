@@ -1,7 +1,7 @@
 import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { NostrRuntime } from './runtime.js';
 import { MemoryEventStore } from './runtime-store.js';
-import type { NostrEvent } from './types.js';
+import { verifyNostrEvent, type NostrEvent } from './types.js';
 import type { NostrRuntimeOptions, RuntimeEventStore, RuntimeSource } from './runtime-types.js';
 
 /** Classify before validation so malformed private traffic cannot fall back to public publication. */
@@ -78,6 +78,8 @@ export function createPrivateRelayPublisher(options: PrivateRelayPublisherOption
   const publish: NostrRuntime['publish'] = (event, publishOptions = {}) => {
     if (stopped) return Promise.reject(new Error('Private publisher is closed'));
     if (!privateEnvelopeAllowed(event)) return Promise.reject(new Error('Private publisher requires a recipient-specific encrypted event'));
+    try { event = verifyNostrEvent(event); }
+    catch (error) { return Promise.reject(error); }
     const existing = active.get(event.id);
     if (existing) return existing.result;
     const authenticationKey = generateSecretKey();
@@ -99,7 +101,19 @@ export function createPrivateRelayPublisher(options: PrivateRelayPublisherOption
       onError: options.onError,
       signAuthEvent: async (_relay, template) => finalizeEvent(template, authenticationKey),
     });
-    const result = runtime.publish(event, publishOptions).finally(async () => {
+    const result = (async () => {
+      const queue = !publishOptions.requireAck && publishOptions.queue !== false;
+      if (queue) await operationStore.putPending({
+        event, attempts: 0, updatedAt: Date.now(), relays: publishOptions.relays, sources: publishOptions.sources,
+      });
+      // Queue ownership stays outside the disposable operation. Hosts may extend
+      // ordinary runtime publication to return after local persistence; queue:false
+      // still awaits delivery before this event's connection can be closed.
+      const report = await runtime.publish(event, { ...publishOptions, queue: false });
+      const retired = report.sources.some(source => source.id === 'local-cache' && !!source.error);
+      if (queue && (report.accepted || retired)) await store.deletePending(event.id);
+      return { ...report, queued: queue && !report.accepted && !retired };
+    })().finally(async () => {
       await runtime.close(); active.delete(event.id);
     });
     active.set(event.id, { runtime, result });

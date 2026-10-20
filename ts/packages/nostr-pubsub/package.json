@@ -1,11 +1,15 @@
 {
   "name": "nostr-pubsub",
-  "version": "0.5.16",
+  "version": "0.5.17",
   "description": "Browser-ready Nostr event and source routing primitives",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./private-relays": {
+      "types": "./dist/private-relays.d.ts",
+      "import": "./dist/private-relays.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

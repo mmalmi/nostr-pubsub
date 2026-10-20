@@ -112,6 +112,17 @@ describe('private publication connection boundary', () => {
     expect(isPrivateRelayEvent(event(1060, []))).toBe(true);
   });
 
+  it('rejects invalid signatures before durable intent and retires expired queued events', async () => {
+    const store = new MemoryEventStore(); const sender = createPrivateRelayPublisher({ store });
+    cleanup.push(() => sender.close());
+    const invalid = { ...event(), content: 'modified ciphertext' };
+    await expect(sender.publish(invalid)).rejects.toThrow();
+    expect(await store.listPending()).toEqual([]);
+    const expired = event(1060, [['p', recipient], ['v', '2'], ['expiration', '1']]);
+    expect((await sender.publish(expired)).queued).toBe(false);
+    expect(await store.listPending()).toEqual([]);
+  });
+
   it('quarantines old private and group records before receiver retries without deleting them', async () => {
     const server = await relay(); const store = new MemoryEventStore();
     const privateEvent = event(); const bareGroup = event(1060, [['v', '2']]);

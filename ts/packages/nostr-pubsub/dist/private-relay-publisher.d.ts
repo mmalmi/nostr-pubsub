@@ -1,5 +1,5 @@
 import { NostrRuntime } from './runtime.js';
-import type { NostrEvent } from './types.js';
+import { type NostrEvent } from './types.js';
 import type { NostrRuntimeOptions, RuntimeEventStore, RuntimeSource } from './runtime-types.js';
 /** Classify before validation so malformed private traffic cannot fall back to public publication. */
 export declare function isPrivateRelayEvent(event: Pick<NostrEvent, 'kind'>): boolean;

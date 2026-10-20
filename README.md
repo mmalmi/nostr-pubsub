@@ -147,6 +147,9 @@ Iris browser apps can later consume it with a local dependency such as:
 "nostr-pubsub": "link:../nostr-pubsub/ts/packages/nostr-pubsub"
 ```
 
+For relay-only browser bundles, import these APIs from
+`nostr-pubsub/private-relays` to avoid loading optional FIPS adapters.
+
 For private messaging, use `createPrivateRelayPublisher` for recipient-specific
 encrypted kinds 1059, 1060 (v2), and 21111. Each event and retry opens independent
 relay connections with a fresh anonymous NIP-42 key. The publisher exposes no

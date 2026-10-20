@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.17 - 2026-10-20
+
+- Keep durable private queue ownership outside each disposable send operation,
+  including hosts which return ordinary local queue acceptance before delivery.
+- Add a relay-only `nostr-pubsub/private-relays` entry point so browser bundlers
+  can consume privacy transports without loading optional FIPS adapters.
+
 ## 0.5.16 - 2026-10-20
 
 - Add an encrypted-event publisher with fresh relay connections and anonymous
