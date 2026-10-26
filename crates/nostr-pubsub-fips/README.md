@@ -52,6 +52,8 @@ shutdown leaves the application-owned endpoint running.
 The high-level client uses the same bounded quality selector as the lower-level
 mesh. With a peer policy, direct connections and inventory fanout prefer higher
 scores while retaining `unknown_peer_reserve` exploration slots (one by default).
+Equal-quality live recipients rotate deterministically by event and local identity;
+connection selection stays stable rather than reconnecting for each event.
 Explicit routed identities keep priority if admitted by the policy. Changing
 shared policy state updates existing connections and subscriptions; rejected
 peers release their pubsub state while application-owned FIPS links stay intact.

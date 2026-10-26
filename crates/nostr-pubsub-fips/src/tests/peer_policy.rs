@@ -256,11 +256,12 @@ fn high_level_peer_selection_keeps_unknown_capacity_and_bounds_fanout() {
         ["blocked", "second", "unknown", "best", "best"].map(str::to_owned),
         2,
         1,
+        None,
     )
     .unwrap();
     assert_eq!(selected, ["best", "unknown"]);
     assert_eq!(
-        crate::client_peers::select_policy_peers(&policy, ["best".to_owned()], 0, 1,)
+        crate::client_peers::select_policy_peers(&policy, ["best".to_owned()], 0, 1, None)
             .unwrap()
             .len(),
         0
@@ -278,15 +279,241 @@ fn high_level_peer_selection_cannot_substitute_an_authenticated_identity() {
             )))
         }
     }
+    let event_id = EventId::from_hex(&"01".repeat(32)).unwrap();
+    for live_event in [None, Some((&event_id, "local-peer"))] {
+        assert_eq!(
+            crate::client_peers::select_policy_peers(
+                &Substitute,
+                ["authenticated-identity".to_owned()],
+                1,
+                0,
+                live_event,
+            )
+            .unwrap(),
+            ["authenticated-identity"]
+        );
+    }
+}
+
+#[test]
+fn policy_live_fanout_rotates_equal_quality_without_changing_connection_selection() {
+    let peers = (0..32)
+        .map(|index| format!("peer-{index:02}"))
+        .collect::<Vec<_>>();
+    let policy = MutablePeerPolicy(RwLock::new(
+        peers.iter().map(|peer| (peer.clone(), Some(80))).collect(),
+    ));
+    let select = |ids: Vec<String>, live_event| {
+        crate::client_peers::select_policy_peers(&policy, ids, 4, 1, live_event).unwrap()
+    };
+    let connections = select(peers.clone(), None);
+    assert_eq!(connections, peers[..4]);
+    let mut reached = HashSet::new();
+    let mut local_selection_differs = false;
+    for index in 0..128 {
+        let event_id = EventId::from_hex(&format!("{index:064x}")).unwrap();
+        let context = Some((&event_id, "local-peer"));
+        let selected = select(peers.clone(), context);
+        assert_eq!(selected.len(), 4);
+        let mut shuffled = peers.iter().rev().cloned().collect::<Vec<_>>();
+        shuffled.extend(peers.iter().cloned());
+        assert_eq!(selected, select(shuffled, context));
+        local_selection_differs |=
+            selected != select(peers.clone(), Some((&event_id, "another-local-peer")));
+        reached.extend(selected);
+        assert_eq!(select(peers.clone(), None), connections);
+    }
     assert_eq!(
-        crate::client_peers::select_policy_peers(
-            &Substitute,
-            ["authenticated-identity".to_owned()],
+        reached.len(),
+        peers.len(),
+        "live traffic must reach beyond one fixed subset"
+    );
+    assert!(
+        local_selection_differs,
+        "different forwarding nodes should not correlate their choices"
+    );
+}
+
+#[test]
+fn policy_live_fanout_preserves_quality_admission_and_unknown_exploration() {
+    let policy = MutablePeerPolicy(RwLock::new(HashMap::from([
+        ("best".into(), Some(100)),
+        ("second".into(), Some(90)),
+        ("poor".into(), Some(-10)),
+        ("blocked".into(), None),
+    ])));
+    let peers = [
+        "best",
+        "second",
+        "poor",
+        "blocked",
+        "unknown-a",
+        "unknown-b",
+    ];
+    let mut unknowns = HashSet::new();
+    for index in 0..32 {
+        let event_id = EventId::from_hex(&format!("{index:064x}")).unwrap();
+        let context = Some((&event_id, "local-peer"));
+        let selected = crate::client_peers::select_policy_peers(
+            &policy,
+            peers.map(str::to_owned),
+            2,
             1,
-            0,
+            context,
         )
-        .unwrap(),
-        ["authenticated-identity"]
+        .unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], "best");
+        assert!(selected[1].starts_with("unknown-"));
+        unknowns.insert(selected[1].clone());
+        assert!(
+            crate::client_peers::select_policy_peers(
+                &policy,
+                peers.map(str::to_owned),
+                0,
+                1,
+                context,
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+    assert_eq!(
+        unknowns.len(),
+        2,
+        "exploration must not freeze on one unknown peer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_live_fanout_delivers_fresh_events_beyond_one_fixed_udp_peer_subset() {
+    const LEAVES: usize = 6;
+    const FANOUT: usize = 2;
+    let hub_endpoint = routed::udp_endpoint([170; 32], Vec::new()).await;
+    let hub_addr = hub_endpoint.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+    let hub = FipsPubsubClient::start_with_policies(
+        hub_endpoint.clone(),
+        FipsPubsubClientOptions {
+            max_connected_peers: LEAVES,
+            fanout: FANOUT,
+            max_hops: 1,
+            ..Default::default()
+        },
+        FipsPubsubClientPolicies {
+            peers: Some(Arc::new(MutablePeerPolicy::default())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (sender, mut received) = mpsc::unbounded_channel();
+    let mut leaves = Vec::new();
+    let mut subscriptions = Vec::new();
+    for secret in 171..177 {
+        let endpoint = routed::udp_endpoint(
+            [secret; 32],
+            vec![PeerConfig::new(hub_endpoint.npub(), "udp", &hub_addr)],
+        )
+        .await;
+        let client = FipsPubsubClient::start(
+            endpoint.clone(),
+            FipsPubsubClientOptions {
+                max_connected_peers: 1,
+                fanout: 1,
+                max_hops: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let sender = sender.clone();
+        let recipient = endpoint.npub().to_owned();
+        subscriptions.push(
+            NostrEventSubscriber::subscribe(
+                &client,
+                // A reconnect must not replay history and mask live starvation.
+                vec![Filter::new().kind(Kind::TextNote).limit(0)],
+                Arc::new(move |event| {
+                    sender.send((recipient.clone(), event)).unwrap();
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        leaves.push((endpoint, client));
+    }
+    drop(sender);
+    let signer = Keys::new(nostr::SecretKey::from_slice(&[177; 32]).unwrap());
+    let events = (0..32)
+        .map(|index| {
+            VerifiedEvent::try_from(
+                EventBuilder::text_note(format!("policy live fairness {index}"))
+                    .custom_created_at(Timestamp::from(1))
+                    .sign_with_keys(&signer)
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let interested = hub
+                .inner
+                .peer_subscriptions
+                .lock()
+                .unwrap()
+                .interested_peers(&events[0])
+                .len();
+            if interested == LEAVES && hub.connected_peer_count().unwrap() == LEAVES {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("all live subscriptions settle before the first event exists in replay");
+
+    let outcome = timeout(Duration::from_secs(15), async {
+        let mut reached = HashSet::new();
+        for event in events {
+            assert!(
+                hub.publish(event.clone(), EventSource::local_index("fairness-test"))
+                    .await
+                    .unwrap()
+                    .accepted
+            );
+            let mut recipients = HashSet::new();
+            for _ in 0..FANOUT {
+                let (recipient, incoming) = received.recv().await.unwrap();
+                assert_eq!(incoming.event, event);
+                assert_eq!(
+                    incoming.source,
+                    EventSource::fips_endpoint(hub_endpoint.npub())
+                );
+                assert!(recipients.insert(recipient));
+            }
+            reached.extend(recipients);
+        }
+        reached
+    })
+    .await;
+    for subscription in subscriptions {
+        subscription.close().await.unwrap();
+    }
+    for (_, client) in &leaves {
+        client.shutdown_shared().await;
+    }
+    hub.shutdown().await;
+    for (endpoint, _) in leaves {
+        endpoint.shutdown().await.unwrap();
+    }
+    hub_endpoint.shutdown().await.unwrap();
+    assert_eq!(
+        outcome
+            .expect("fresh inventories reach their selected UDP subscribers")
+            .len(),
+        LEAVES,
+        "a stable peer policy must not starve every leaf outside the first fanout subset"
     );
 }
 

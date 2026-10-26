@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.41 - 2026-10-26
+
+- Rotate equally rated live inventory recipients by event and local identity,
+  preserving quality ranking and unknown-peer exploration. Keep connection
+  selection stable so fair event forwarding does not churn FIPS streams.
+
 ## 0.5.40 - 2026-10-26
 
 - Use FIPS core 0.4.110 and TCP endpoint 0.2.45 for the DTLS cryptography

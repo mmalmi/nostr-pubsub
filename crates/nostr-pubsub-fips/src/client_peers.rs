@@ -1,4 +1,7 @@
-use super::{ConnectedPeerLink, PeerIdentity, Result, invalid_option, poisoned, storage_error};
+use super::{
+    ConnectedPeerLink, DefaultHasher, EventId, Hash, HashMap, Hasher, PeerIdentity, Result,
+    invalid_option, poisoned, storage_error,
+};
 use crate::client_inner::ClientInner;
 use crate::{FIPS_NOSTR_PUBSUB_CAPABILITY, FIPS_NOSTR_PUBSUB_SERVICE_PORT};
 use nostr_pubsub::{MeshPeerPolicy, select_mesh_peers};
@@ -23,19 +26,38 @@ pub(super) fn select_policy_peers(
     ids: impl IntoIterator<Item = String>,
     capacity: usize,
     unknown_reserve: usize,
+    live_event: Option<(&EventId, &str)>,
 ) -> Result<Vec<String>> {
     let mut candidates = Vec::new();
+    let mut authenticated_ids = HashMap::new();
     for id in ids {
         if let Some(mut candidate) = policy.select_mesh_peer(&id)? {
             // A policy scores an authenticated identity; it cannot replace it.
             candidate.id = id;
+            if let Some((event_id, local_npub)) = live_event {
+                // Change only the core selector's identity tie-breaker. Its
+                // quality ranking and unknown-peer reserve remain canonical.
+                // Local identity avoids correlated forwarding at every node.
+                let mut hasher = DefaultHasher::new();
+                event_id.hash(&mut hasher);
+                local_npub.hash(&mut hasher);
+                candidate.id.hash(&mut hasher);
+                let order_key = format!("{:016x}:{}", hasher.finish(), candidate.id);
+                authenticated_ids.insert(order_key.clone(), candidate.id);
+                candidate.id = order_key;
+            }
             candidates.push(candidate);
         }
     }
     Ok(
         select_mesh_peers(&candidates, None, capacity, unknown_reserve)
             .into_iter()
-            .map(|peer| peer.id)
+            .map(|peer| match live_event {
+                None => peer.id,
+                Some(_) => authenticated_ids
+                    .remove(&peer.id)
+                    .expect("selected live peer retains its authenticated identity"),
+            })
             .collect(),
     )
 }
@@ -54,6 +76,7 @@ pub(super) fn select_links(
         links.iter().map(|link| link.npub.clone()),
         capacity,
         unknown_reserve,
+        None,
     )?;
     let by_identity = links
         .iter()

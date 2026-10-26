@@ -514,6 +514,7 @@ impl ClientInner {
                 targets.iter().map(|(id, _)| id.clone()),
                 self.options.fanout,
                 self.unknown_peer_reserve,
+                Some((&event.as_event().id, self.endpoint.npub())),
             )?;
             let mut by_identity = targets.into_iter().collect::<HashMap<_, _>>();
             return Ok(selected
