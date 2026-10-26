@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.40 - 2026-10-26
+
+- Use FIPS core 0.4.110 and TCP endpoint 0.2.45 for the DTLS cryptography
+  security update. Preserve pubsub wire formats, privacy roles, and resource bounds.
+
 ## 0.5.37 - 2026-10-21
 
 - Use FIPS core 0.4.107 and TCP endpoint 0.2.42 for BLE reconnect recovery.
