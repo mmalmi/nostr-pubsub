@@ -176,6 +176,71 @@ async fn service_retry_simultaneous_healthy_clients_do_not_replay_idle_streams()
     assert_eq!(delivered.unwrap().unwrap().event, event);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopped_client_restarts_on_the_same_fips_link_in_both_stream_directions() {
+    for reverse in [false, true] {
+        let (network, a, b) = endpoints().await;
+        let (a, b) = if reverse { (b, a) } else { (a, b) };
+        let before = link_id(&a, b.npub()).await;
+        let (alice, bob) = tokio::join!(start_sim_client(&a, "Alice"), start_sim_client(&b, "Bob"));
+        let filter = Filter::new().kind(Kind::TextNote).limit(0);
+        wait_for_pubsub_connections(&alice, 1).await;
+        wait_for_default_peer_subscription(&alice).await;
+        wait_for_default_peer_subscription(&bob).await;
+        let mut bob_events = bob.subscribe(vec![filter.clone()]).await.unwrap();
+        alice.shutdown().await;
+
+        // No physical link restart, discovery refresh or arbitrary grace sleep.
+        let alice = start_sim_client(&a, "replacement Alice").await;
+        let mut alice_events = alice.subscribe(vec![filter.clone()]).await.unwrap();
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if alice
+                    .peer_subscription_snapshot()
+                    .unwrap()
+                    .subscription_count
+                    >= 2
+                    && bob.peer_subscription_snapshot().unwrap().subscription_count >= 2
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replacement restores subscriptions on the live FIPS link");
+        let event = signed_note("fresh event after pubsub-only restart");
+        alice
+            .publish(event.clone(), EventSource::local_index("restart"))
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(5), bob_events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .event,
+            event
+        );
+        let reply = signed_note("fresh reverse event after pubsub-only restart");
+        bob.publish(reply.clone(), EventSource::local_index("restart"))
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(5), alice_events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .event,
+            reply
+        );
+        assert_eq!(link_id(&a, b.npub()).await, before);
+        alice.shutdown().await;
+        bob.shutdown().await;
+        shutdown(&network, a, b).await;
+    }
+}
+
 async fn reject_service(
     endpoint: Arc<FipsEndpoint>,
     accept_close: bool,

@@ -2,6 +2,7 @@ use super::{FipsPubsubClient, JoinHandle};
 
 pub(super) struct ClientTasks {
     pub(super) transport: Option<JoinHandle<()>>,
+    pub(super) transport_stop: Option<tokio::sync::oneshot::Sender<()>>,
     pub(super) peerfinding: Option<JoinHandle<()>>,
     pub(super) reputation: Option<JoinHandle<()>>,
     pub(super) replay: Option<JoinHandle<()>>,
@@ -40,7 +41,15 @@ impl FipsPubsubClient {
     pub async fn shutdown_shared(&self) {
         self.inner.close_all();
         let mut tasks = self.tasks.lock().await;
-        tasks.abort_all();
+        if let Some(stop) = tasks.transport_stop.take() {
+            let _ = stop.send(());
+        }
+        for task in [&tasks.reputation, &tasks.replay, &tasks.peerfinding]
+            .into_iter()
+            .flatten()
+        {
+            task.abort();
+        }
         for slot in tasks.slots() {
             if let Some(task) = slot.as_mut() {
                 let _ = task.await;

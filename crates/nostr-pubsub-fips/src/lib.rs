@@ -524,8 +524,13 @@ impl FipsPubsubClient {
         let peerfinding_subscription = inner
             .subscribe(vec![default_peerfinding_filter()], true)
             .await?;
-        let transport_task =
-            tokio::spawn(transport_loop(Arc::downgrade(&inner), driver, transport_rx));
+        let (transport_stop, transport_stopped) = tokio::sync::oneshot::channel();
+        let transport_task = tokio::spawn(transport_loop(
+            Arc::downgrade(&inner),
+            driver,
+            transport_rx,
+            transport_stopped,
+        ));
         let replay_task = tokio::spawn(replay_source::run(Arc::downgrade(&inner), replay_rx));
         let peerfinding_task = Some(tokio::spawn(run_default_peerfinding(
             Arc::clone(&inner),
@@ -535,6 +540,7 @@ impl FipsPubsubClient {
             inner,
             tasks: tokio::sync::Mutex::new(ClientTasks {
                 transport: Some(transport_task),
+                transport_stop: Some(transport_stop),
                 peerfinding: peerfinding_task,
                 reputation: None,
                 replay: Some(replay_task),

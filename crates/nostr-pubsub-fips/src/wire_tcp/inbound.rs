@@ -19,6 +19,10 @@ impl InboundPeers {
         self.0.remove(peer);
     }
 
+    pub fn peers(&self) -> impl Iterator<Item = &String> {
+        self.0.keys()
+    }
+
     pub fn admit(
         &mut self,
         peer: &PeerIdentity,

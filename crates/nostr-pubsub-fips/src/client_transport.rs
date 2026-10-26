@@ -14,6 +14,7 @@ pub(super) async fn transport_loop(
     inner: Weak<ClientInner>,
     mut driver: WireTcpDriver,
     mut commands: mpsc::Receiver<TransportCommand>,
+    mut stopped: tokio::sync::oneshot::Receiver<()>,
 ) {
     let start = tokio::time::Instant::now();
     let mut peer_tick = tokio::time::interval_at(start + PEER_SYNC_INTERVAL, PEER_SYNC_INTERVAL);
@@ -35,6 +36,7 @@ pub(super) async fn transport_loop(
             .next_poll_at(now)
             .map(|due| Duration::from_millis(due.saturating_sub(now)));
         let (first, already_written) = tokio::select! {
+            _ = &mut stopped => break,
             command = commands.recv() => {
                 let Some(command) = command else {
                     break;
@@ -90,6 +92,14 @@ pub(super) async fn transport_loop(
             already_written,
         )
         .await;
+    }
+    // Release the remote TCP tuples before dropping our service receiver.
+    // Otherwise a replacement client can collide with a still-live stream on
+    // the same FIPS link, without any physical reconnect to reset it.
+    let errors = driver.shutdown().await;
+    if let Some(inner) = inner.upgrade() {
+        inner.transport_errors.fetch_add(errors, Ordering::Relaxed);
+        inner.connected_transport_peers.store(0, Ordering::Relaxed);
     }
 }
 

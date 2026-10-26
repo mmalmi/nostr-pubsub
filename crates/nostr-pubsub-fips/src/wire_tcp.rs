@@ -349,6 +349,24 @@ impl WireTcpDriver {
         self.abort_peer(peer).await
     }
 
+    pub async fn shutdown(&mut self) -> u64 {
+        let peers = self
+            .selected_peers
+            .keys()
+            .chain(self.inbound.peers())
+            .chain(self.connections.values().map(|connection| &connection.peer))
+            .filter_map(|peer| PeerIdentity::from_npub(peer).ok())
+            .map(|peer| (peer.npub(), peer))
+            .collect::<BTreeMap<_, _>>();
+        let mut errors = 0;
+        for peer in peers.into_values() {
+            if self.forget_peer(peer).await.is_err() {
+                errors += 1;
+            }
+        }
+        errors
+    }
+
     pub(crate) fn next_poll_at(&self, now_ms: u64) -> Option<u64> {
         if self.continue_ready {
             Some(now_ms)
