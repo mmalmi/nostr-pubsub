@@ -303,7 +303,7 @@ fn policy_live_fanout_rotates_equal_quality_without_changing_connection_selectio
     let policy = MutablePeerPolicy(RwLock::new(
         peers.iter().map(|peer| (peer.clone(), Some(80))).collect(),
     ));
-    let select = |ids: Vec<String>, live_event| {
+    let select = |ids: Vec<String>, live_event: Option<(&EventId, &str)>| {
         crate::client_peers::select_policy_peers(&policy, ids, 4, 1, live_event).unwrap()
     };
     let connections = select(peers.clone(), None);
