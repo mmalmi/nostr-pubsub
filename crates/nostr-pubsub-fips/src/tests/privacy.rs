@@ -1,4 +1,4 @@
-use super::routed::udp_endpoint;
+use super::routed::{udp_endpoint, udp_endpoint_with_role};
 use super::*;
 use crate::privacy_roles::ClientRole;
 
@@ -136,11 +136,27 @@ async fn anonymous_private_copies_and_retry_use_distinct_sources_with_real_provi
         ([135; 32], event.clone()),
         ([136; 32], event.clone()),
     ] {
-        let endpoint = udp_endpoint(
+        let endpoint = udp_endpoint_with_role(
             secret,
             vec![PeerConfig::new(transit.npub(), "udp", &address)],
+            true,
         )
         .await;
+        timeout(Duration::from_secs(15), async {
+            loop {
+                let status = endpoint.routing_status().await.unwrap();
+                assert!(status.client_only_requested);
+                if status.client_only
+                    && status.connected_peers > 0
+                    && status.peers_without_client_support == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("current transit must negotiate the requested client role before publication");
         assert!(sources.insert(endpoint.npub().to_string()));
         let publisher = FipsAnonymousPublisher::start(
             endpoint.clone(),
@@ -164,6 +180,7 @@ async fn anonymous_private_copies_and_retry_use_distinct_sources_with_real_provi
             .unwrap();
         assert_eq!(receipt.event_id, event.as_event().id);
         assert_eq!(receipt.provider, provider_endpoint.npub());
+        assert!(endpoint.routing_status().await.unwrap().client_only);
         assert!(
             provider
                 .inner
