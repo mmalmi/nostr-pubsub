@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.42 - 2026-10-27
+
+- Release remote TCP state before explicit client shutdown completes, so a
+  replacement client restores subscriptions on an existing FIPS connection.
+- Use FIPS core 0.4.111 and TCP endpoint 0.2.46 for immediate service
+  re-registration after shutdown. Preserve the existing wire protocol.
+
 ## 0.5.41 - 2026-10-26
 
 - Rotate equally rated live inventory recipients by event and local identity,
