@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.45 - 2026-10-27
+
+- Use FIPS core 0.4.114 and TCP endpoint 0.2.49 for the route-refresh
+  allocation improvement while preserving FIPS protocol behavior.
+
 ## 0.5.44 - 2026-10-27
 
 - Use FIPS core 0.4.113 and TCP endpoint 0.2.48 for the control-handler
