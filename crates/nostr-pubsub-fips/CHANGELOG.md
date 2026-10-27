@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.44 - 2026-10-27
+
+- Use FIPS core 0.4.113 and TCP endpoint 0.2.48 for the control-handler
+  allocation improvement and safe Tokio descriptor registration.
+
 ## 0.5.42 - 2026-10-27
 
 - Release remote TCP state before explicit client shutdown completes, so a
