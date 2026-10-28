@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.46 - 2026-10-28
+
+- Use FIPS core 0.4.115 and TCP endpoint 0.2.50 for the verified
+  allocation improvement while preserving FIPS protocol behavior.
+- Use social-graph 0.2.4 to reuse verified rating parsing in publication
+  decisions, replay, and recording.
+
 ## 0.5.45 - 2026-10-27
 
 - Use FIPS core 0.4.114 and TCP endpoint 0.2.49 for the route-refresh
