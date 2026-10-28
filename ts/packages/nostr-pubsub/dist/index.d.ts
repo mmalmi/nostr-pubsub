@@ -32,4 +32,7 @@ export { createAnonymousFipsPublisher, createAnonymousFipsDiscovery, type Anonym
 export type { FipsPrivacyRole } from './fips-privacy-role.js';
 export type { FipsRemotePublication, FipsReceiptOptions } from './fips-publication-receipts.js';
 export { createScopedFipsSource, type ScopedFipsSourceOptions } from './scoped-fips-source.js';
+export { RetainedEvents, retainedEventIsCurrent, MAX_RETAINED_EVENTS, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_SNAPSHOT_BYTES } from './retained-events.js';
+export { IndexedDbEventBus } from './indexed-db-event-bus.js';
+export { RetainedPeerDiscovery } from './retained-peer-discovery.js';
 //# sourceMappingURL=index.d.ts.map

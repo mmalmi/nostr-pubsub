@@ -28,4 +28,7 @@ export { createAnonymousRelayDiscovery, isRelayDiscoveryFilter, splitRelayDiscov
 export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
 export { createAnonymousFipsPublisher, createAnonymousFipsDiscovery } from './anonymous-fips.js';
 export { createScopedFipsSource } from './scoped-fips-source.js';
+export { RetainedEvents, retainedEventIsCurrent, MAX_RETAINED_EVENTS, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_SNAPSHOT_BYTES } from './retained-events.js';
+export { IndexedDbEventBus } from './indexed-db-event-bus.js';
+export { RetainedPeerDiscovery } from './retained-peer-discovery.js';
 //# sourceMappingURL=index.js.map
