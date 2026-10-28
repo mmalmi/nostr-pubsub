@@ -16,9 +16,27 @@ export class RetainedEvents {
     this.policy = structuredClone(policy);
   }
   restore(events: readonly NostrEvent[]): void {
-    for (const event of events) {
-      try { this.insert(event); } catch { /* Persistent bytes must pass signature admission again. */ }
+    const candidates = [...this.events];
+    for (const input of events) {
+      try {
+        if (bytes(input) > MAX_RETAINED_EVENT_BYTES) continue;
+        const event = verifyNostrEvent(input);
+        if (retentionAcceptsEvent(this.policy, event) && retainedEventIsCurrent(event)) candidates.push(event);
+      } catch { /* Persistent bytes must pass signature admission again. */ }
     }
+    candidates.sort(eventOrder);
+    const seen = new Set<string>();
+    const retained: NostrVerifiedEvent[] = [];
+    let size = 128;
+    for (const event of candidates) {
+      const key = coordinate(event) ?? event.id;
+      if (seen.has(key) || !retainedEventIsCurrent(event)) continue;
+      seen.add(key);
+      size += bytes(event) + 1;
+      if (retained.length === this.policy.maxEvents || size > MAX_RETAINED_SNAPSHOT_BYTES) break;
+      retained.push(event);
+    }
+    this.events = retained;
   }
   insert(input: NostrEvent): boolean {
     const event = verifyNostrEvent(input);
