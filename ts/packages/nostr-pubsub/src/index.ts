@@ -256,4 +256,3 @@ export { RetainedEvents, retainedEventIsCurrent, MAX_RETAINED_EVENTS, MAX_RETAIN
 export { IndexedDbEventBus } from './indexed-db-event-bus.js';
 export { RetainedPeerDiscovery } from './retained-peer-discovery.js';
 
-export { selectStoredEvents } from './runtime-store.js';
