@@ -232,6 +232,86 @@ fn publisher_coalesces_material_changes_and_refreshes() {
 }
 
 #[test]
+fn publisher_rejects_invalid_events_without_changing_cadence() {
+    let root = deterministic_keys(1);
+    let other = deterministic_keys(2);
+    let root_hex = root.public_key().to_hex();
+    let other_hex = other.public_key().to_hex();
+    let now_ms = 1_000_000;
+    let valid = rating_event_with_samples(&root, &root_hex, &other_hex, 80, 1_000, 3);
+    let changed = rating_event_with_samples(&root, &root_hex, &other_hex, 0, 1_001, 3);
+    let mut bad_signature = valid.clone();
+    bad_signature.sig = changed.sig;
+    assert!(bad_signature.verify_id());
+    let mut bad_body = valid.clone();
+    bad_body.content.push(' ');
+    assert!(!bad_body.verify_id());
+    let mut bad_id = valid.clone();
+    bad_id.id = changed.id;
+    let foreign_author = rating_event_with_samples(&other, &root_hex, &other_hex, 0, 1_000, 3);
+    let foreign_rater = rating_event_with_samples(&root, &other_hex, &other_hex, 0, 1_000, 3);
+    let mut wrong_scope_rating = Rating::new(&root_hex, &other_hex, 0, 0, 100);
+    wrong_scope_rating.scope = Some("other.scope".to_string());
+    wrong_scope_rating.created_at = 1_000;
+    wrong_scope_rating.sample_count = Some(3);
+    let wrong_scope = wrong_scope_rating
+        .to_event(&root)
+        .expect("signed wrong scope");
+
+    for event in [
+        bad_signature,
+        bad_body,
+        bad_id,
+        foreign_author,
+        foreign_rater,
+        wrong_scope,
+    ] {
+        let mut publisher = PeerRatingPublisher::new(
+            &root_hex,
+            DEFAULT_PEER_RATING_SCOPE,
+            PeerRatingPublisherConfig::default(),
+        )
+        .expect("publisher");
+        assert!(publisher.record_published_event(&valid, now_ms));
+        let before = publisher.published.clone();
+        assert!(!publisher.should_publish_event(&event, now_ms + 1));
+        assert!(!publisher.record_published_event(&event, now_ms + 1));
+        assert_eq!(publisher.published, before);
+        let replay = PeerRatingPublisher::from_events_at(
+            &root_hex,
+            DEFAULT_PEER_RATING_SCOPE,
+            PeerRatingPublisherConfig::default(),
+            [&valid, &event],
+            now_ms,
+        )
+        .expect("replay ignores invalid events");
+        assert_eq!(replay.published, before);
+    }
+}
+
+#[test]
+fn publisher_replay_keeps_newest_rating_independent_of_input_order() {
+    let root = deterministic_keys(1);
+    let subject = deterministic_keys(2).public_key().to_hex();
+    let root_hex = root.public_key().to_hex();
+    let old = rating_event_with_samples(&root, &root_hex, &subject, 80, 1_000, 3);
+    let newest = rating_event_with_samples(&root, &root_hex, &subject, 0, 1_010, 3);
+    for events in [[&old, &newest, &old], [&newest, &old, &newest]] {
+        let replay = PeerRatingPublisher::from_events_at(
+            &root_hex,
+            DEFAULT_PEER_RATING_SCOPE,
+            PeerRatingPublisherConfig::default(),
+            events,
+            1_010_000,
+        )
+        .expect("replay");
+        let stored = replay.published.get(&subject).expect("newest rating");
+        assert_eq!(stored.published_at_ms, 1_010_000);
+        assert_eq!(stored.class, PeerRatingClass::Negative);
+    }
+}
+
+#[test]
 fn publisher_from_events_matches_explicit_wall_clock_replay() {
     let root = Keys::generate();
     let subject = Keys::generate().public_key().to_hex();

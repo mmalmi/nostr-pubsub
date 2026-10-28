@@ -583,10 +583,7 @@ impl PeerRatingPublisher {
     ) -> Result<Self> {
         let mut publisher = Self::new(local_pubkey, scope, config)?;
         for event in events {
-            let Some(publication) = publisher.publication(event) else {
-                continue;
-            };
-            let Ok(rating) = rating_from_event(event) else {
+            let Some((publication, rating)) = publisher.publication(event) else {
                 continue;
             };
             let published_at_ms = rating.created_at.saturating_mul(1_000);
@@ -610,10 +607,7 @@ impl PeerRatingPublisher {
 
     #[must_use]
     pub fn should_publish_event(&self, event: &Event, now_ms: u64) -> bool {
-        let Some(candidate) = self.publication(event) else {
-            return false;
-        };
-        let Ok(rating) = rating_from_event(event) else {
+        let Some((candidate, rating)) = self.publication(event) else {
             return false;
         };
         let minimum_samples = if candidate.class == PeerRatingClass::Negative {
@@ -641,7 +635,7 @@ impl PeerRatingPublisher {
     }
 
     pub fn record_published_event(&mut self, event: &Event, now_ms: u64) -> bool {
-        let Some(publication) = self.publication(event) else {
+        let Some((publication, _)) = self.publication(event) else {
             return false;
         };
         self.record(publication, now_ms);
@@ -676,13 +670,12 @@ impl PeerRatingPublisher {
         before.saturating_sub(self.published.len())
     }
 
-    fn publication(&self, event: &Event) -> Option<RatingPublication> {
-        if event.kind != Kind::Custom(RATING_KIND)
-            || event.verify().is_err()
-            || event.pubkey.to_hex() != self.local_root
-        {
+    fn publication(&self, event: &Event) -> Option<(RatingPublication, Rating)> {
+        if event.kind != Kind::Custom(RATING_KIND) || event.pubkey.to_hex() != self.local_root {
             return None;
         }
+        // The parser verifies the raw event ID and signature. Reuse its result
+        // for publication metadata instead of parsing and verifying it again.
         let rating = rating_from_event(event).ok()?;
         if rating.scope.as_deref() != Some(self.scope.as_str())
             || parse_pubkey(&rating.rater, "rating rater").ok()? != self.local_root
@@ -696,11 +689,14 @@ impl PeerRatingPublisher {
             std::cmp::Ordering::Equal => PeerRatingClass::Neutral,
             std::cmp::Ordering::Greater => PeerRatingClass::Positive,
         };
-        Some(RatingPublication {
-            subject,
-            score,
-            class,
-        })
+        Some((
+            RatingPublication {
+                subject,
+                score,
+                class,
+            },
+            rating,
+        ))
     }
 
     fn record(&mut self, publication: RatingPublication, now_ms: u64) {
