@@ -188,18 +188,71 @@ Reviewability is enforced: every Rust source file is at most 1,000 lines, and
 every TypeScript package source file is at most 500 lines.
 
 ```sh
-cargo test --workspace
-cargo test -p nostr-pubsub-sim --test source_size
-cargo test -p nostr-pubsub-sim --features cashu-integration \
+cargo test --locked --workspace
+cargo test --locked -p nostr-pubsub-sim --test source_size
+cargo test --locked -p nostr-pubsub-sim --features cashu-integration \
   --test cashu_integration -- --nocapture
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 pnpm --dir ts --filter nostr-pubsub build
 pnpm --dir ts --filter nostr-pubsub check
 pnpm --dir ts --filter nostr-pubsub test
-cargo test -p nostr-pubsub@0.1.11 --test typescript_interop
-cargo run -p nostr-pubsub-sim -- --nodes 1000 --attackers 200
-cargo test --release -p nostr-pubsub-sim --test release_gate -- \
+cargo test --locked -p nostr-pubsub@0.1.18 --test typescript_interop
+cargo run --locked -p nostr-pubsub-sim -- --nodes 1000 --attackers 200
+cargo test --locked --release -p nostr-pubsub-sim --test release_gate -- \
   --ignored --nocapture --test-threads=1
-cargo test --release -p nostr-pubsub-sim --test incentives \
+cargo test --locked --release -p nostr-pubsub-sim --test incentives \
   thousand_node_adversarial_incentive_gate -- --ignored --nocapture
 ```
+
+## Library releases
+
+Commit the manifests, root `Cargo.lock`, source and required scripts before
+qualification. Use a full commit and a clean checkout. The focused social-graph
+qualification uses preinstalled Rust/Cargo 1.99.0, the default features, and
+`aarch64-apple-darwin` on an Apple silicon Mac with Xcode's macOS 27 SDK and
+Clang, targeting macOS 14. It requires no additional system libraries or
+privileged prerequisite installation. Reuse a compatible Cargo target directory
+with one writer; record any explicit compiler/linker flags with the result.
+
+```sh
+cargo +1.99.0 test --frozen --release --target aarch64-apple-darwin \
+  -p nostr-pubsub-social-graph --lib -- --test-threads=1
+cargo +1.99.0 test --frozen --release --target aarch64-apple-darwin \
+  -p nostr-pubsub-fips --test inv_want_stream -- --test-threads=1
+```
+
+`scripts/release-library.py` performs source, Cargo package, and release-ref
+publication as separate steps. It uses Python 3.11+ and Git. Its preinstalled
+Hashtree helper is pinned by executable and archive SHA-256 in the script and
+checked before execution. It downloads no helper or toolchain. Cargo uses the
+committed lock; registry archives are verified against its checksums.
+
+Supply a private JSON plan and a fresh evidence directory for each step:
+
+```sh
+python3 scripts/release-library.py source "$RELEASE_PLAN" "$SOURCE_EVIDENCE"
+python3 scripts/release-library.py package "$RELEASE_PLAN" "$PACKAGE_EVIDENCE"
+python3 scripts/release-library.py refs "$RELEASE_PLAN" "$REF_EVIDENCE"
+```
+
+The plan contains `root`, `workspace` (relative to root), `target`, `head` (full
+commit), `helper_directory`, and `source` with the established `remote`,
+`existing_url` and explicit `public_url`. Set `entry_bytes`, `floor_bytes`,
+`growth_bytes`, `seconds` and `phase_seconds` to the admitted resource budget.
+Package/ref steps additionally need `crate`, `crate_path` (relative to root),
+`version`, `source_receipt`, `package_receipt`, `tag`, and `push_master`.
+`dependency_requirements` pins normalized manifest requirements;
+`registry_checksums` maps `name@version` to expected archive checksums, including
+workspace libraries resolved from the registry during packaging.
+
+The source step preserves existing remote refs, publishes an immutable commit
+ref, then fetches full history into an empty cache with local daemon use disabled.
+It verifies the revision, reachable objects and strict Git integrity. The package
+step checks clean source provenance, source bytes and executable metadata,
+locked dependency versions, and downloaded registry bytes. Packaging uses
+`--no-verify` because focused qualification is a separate required gate; it must
+not be substituted for those tests. Inspect a failed or uncertain publication
+and verify the registry before retrying; never upload changed bytes at an
+existing version. Retain receipts privately and publish refs only after package
+verification. These checks establish source availability and archive identity;
+they are not a full dependency source audit or proof of native binary reproduction.
