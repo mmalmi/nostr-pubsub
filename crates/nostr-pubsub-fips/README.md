@@ -9,9 +9,8 @@ crate opens no Nostr relay socket.
 
 The Rust dependencies are published as `nvpn-fips-core`, `nvpn-fips-tcp`, and
 `nvpn-fips-tcp-endpoint`. Source imports abbreviate these names locally.
-Version `0.5.22` requires `nostr-pubsub` `0.1.16` or later for subscription
-delivery status and uses FIPS core `0.4.95`, TCP `0.2.5`, and TCP endpoint
-`0.2.30`.
+Version `0.5.47` requires `nostr-pubsub` `0.1.19` or later and uses FIPS
+core `0.4.115`, TCP `0.2.6`, and TCP endpoint `0.2.50`.
 
 Every high-level client keeps one bounded default subscription for signed
 `fips-overlay-v1` kind `37195` endpoint adverts. It publishes its FIPS-generated
@@ -165,3 +164,18 @@ profiles, authorization, invites and endpoint-advert lookups use a separate fres
 identity-coupled built-in endpoint discovery before binding; route own adverts
 and public peer lookups through their separate application transports. These
 roles preserve the existing full client for trusted sibling/live/public services.
+
+### Durable public discovery
+
+Attach an application-owned local `EventBus` with
+`client.set_peer_announcement_store(Some(store.clone())).await`. This restores
+its signed kind-37195 announcements through the normal FIPS validator and
+retains the default public stream plus the current local advert. App-specific
+streams can use `FipsPeerfinder::with_store` with their configured scope.
+
+Attach that store, or a composition of local indexes, with `set_replay_source`
+to serve ordinary peer requests after restart. Never use a network-fetching
+router or a private contact-discovery cache as the public replay source.
+The core crate's optional `file-store` adapter provides bounded atomic native
+storage. After stopping consumers, await `FileEventBus::close` to finish an
+owned write and release the writer lease before reopening the same path.

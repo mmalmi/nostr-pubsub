@@ -53,6 +53,7 @@ pub struct FipsPeerfinder {
     endpoint: Arc<FipsEndpoint>,
     filter: Filter,
     max_events: usize,
+    store: Option<Arc<dyn EventBus>>,
 }
 
 impl FipsPeerfinder {
@@ -80,7 +81,39 @@ impl FipsPeerfinder {
                 .kind(Kind::Custom(ADVERT_KIND))
                 .identifier(identifier),
             max_events: config.advert_cache_max_entries.max(1),
+            store: None,
         })
+    }
+
+    /// Use an application-selected local store for signed announcements.
+    /// Attach this store (or its permission-filtered view) as the provider's
+    /// replay source. Never pass a network router as the local store.
+    #[must_use]
+    pub fn with_store(mut self, store: Arc<dyn EventBus>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Seed discovery from durable events before contacting a relay or peer.
+    pub async fn restore(&self) -> Result<FipsPeerfindingRefresh> {
+        let Some(store) = &self.store else {
+            return Ok(FipsPeerfindingRefresh::default());
+        };
+        let report = store
+            .query(
+                vec![self.filter.clone()],
+                QueryOptions {
+                    limit: Some(self.max_events),
+                },
+            )
+            .await?;
+        let received = report.events.len();
+        let mut accepted = 0;
+        for event in report.events {
+            accepted +=
+                usize::from(ingest_fips_discovery_event(&self.endpoint, event.event).await?);
+        }
+        Ok(FipsPeerfindingRefresh { received, accepted })
     }
 
     #[must_use]
@@ -102,6 +135,14 @@ impl FipsPeerfinder {
             return Ok(None);
         };
         let event = VerifiedEvent::try_from(event)?;
+        if let Some(store) = &self.store {
+            store
+                .publish(
+                    event.clone(),
+                    EventSource::local_index("local-peer-announcement"),
+                )
+                .await?;
+        }
         bus.publish(
             event,
             EventSource::fips_endpoint(self.endpoint.npub().to_string()),
@@ -134,7 +175,13 @@ impl FipsPeerfinder {
 
     /// Ingest one event from an open pubsub subscription.
     pub async fn ingest(&self, event: VerifiedEvent) -> Result<bool> {
-        ingest_fips_discovery_event(&self.endpoint, event).await
+        let accepted = ingest_fips_discovery_event(&self.endpoint, event.clone()).await?;
+        if accepted && let Some(store) = &self.store {
+            store
+                .publish(event, EventSource::local_index("peer-announcements"))
+                .await?;
+        }
+        Ok(accepted)
     }
 }
 
@@ -147,4 +194,74 @@ pub async fn ingest_fips_discovery_event(
         .ingest_nostr_discovery_event(event.into_event())
         .await
         .map_err(|error| storage_error("ingest FIPS Nostr discovery event", error))
+}
+
+impl super::FipsPubsubClient {
+    /// Retain the default public discovery stream and restore it without a
+    /// network query. The application owns the path, scope and privacy policy.
+    /// Use set_replay_source with this store (or a local permission-filtered
+    /// composition) to serve it to peers. Private discovery stores must never
+    /// be exposed through an identified client's replay service.
+    pub async fn set_peer_announcement_store(
+        &self,
+        store: Option<Arc<dyn EventBus>>,
+    ) -> Result<()> {
+        drop(store.as_ref().map(|_| self.inner.admit()).transpose()?);
+        if let Some(store) = &store {
+            let report = store
+                .query(
+                    vec![Filter::new().kind(Kind::Custom(ADVERT_KIND))],
+                    QueryOptions {
+                        limit: Some(nostr_pubsub::MAX_RETAINED_EVENTS),
+                    },
+                )
+                .await?;
+            for event in report
+                .events
+                .into_iter()
+                .take(nostr_pubsub::MAX_RETAINED_EVENTS)
+            {
+                ingest_fips_discovery_event(&self.inner.endpoint, event.event).await?;
+            }
+        }
+        let _admission = store.as_ref().map(|_| self.inner.admit()).transpose()?;
+        let retain_local = store.is_some() && self.inner.role.advertises();
+        *self
+            .inner
+            .peer_announcement_store
+            .lock()
+            .map_err(|_| super::poisoned("peer announcement store"))? = store;
+        drop(_admission);
+        // The periodic advertiser may have run before the app attached storage.
+        // Persist this device's current event immediately as well.
+        if retain_local
+            && let Some(event) = self
+                .inner
+                .endpoint
+                .local_nostr_discovery_advert_event()
+                .await
+                .map_err(|error| storage_error("snapshot local peer announcement", error))?
+        {
+            self.inner
+                .retain_peer_announcement(VerifiedEvent::try_from(event)?)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+impl super::ClientInner {
+    pub(super) async fn retain_peer_announcement(&self, event: VerifiedEvent) -> Result<()> {
+        let store = self
+            .peer_announcement_store
+            .lock()
+            .map_err(|_| super::poisoned("peer announcement store"))?
+            .clone();
+        if let Some(store) = store {
+            store
+                .publish(event, EventSource::local_index("public-peer-announcements"))
+                .await?;
+        }
+        Ok(())
+    }
 }

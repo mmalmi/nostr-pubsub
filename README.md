@@ -56,7 +56,14 @@ total sample counts so a policy can distinguish evidence types.
 
 The core crate also defines the retention contract for bounded event caches:
 which Nostr filters a local store should retain and how many matching events it
-may keep. Durable implementations belong in adapter repos. For example, a
+may keep. The optional native 'file-store' feature provides FileEventBus with
+an atomic snapshot and exclusive writer lock (Rust 1.89+); browsers can use
+IndexedDbEventBus with atomic transactions across tabs. Both revalidate signed
+events on reload, retain NIP-01 coordinate winners, reject ephemeral/future
+events, honor expiration on reads, and bound event, snapshot and entry sizes.
+Use an explicit owner/scope/privacy-lane path or database name. Existing durable
+application adapters remain supported; no filesystem or browser store is opened
+implicitly. RetainedEvents exposes the same rules to custom adapters. For example, a
 hashtree-backed local index can implement the bounded cache while FIPS, Nostr
 VPN, and Iris Drive choose the small event sets they need.
 
@@ -196,7 +203,7 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 pnpm --dir ts --filter nostr-pubsub build
 pnpm --dir ts --filter nostr-pubsub check
 pnpm --dir ts --filter nostr-pubsub test
-cargo test --locked -p nostr-pubsub@0.1.18 --test typescript_interop
+cargo test --locked -p nostr-pubsub@0.1.19 --test typescript_interop
 cargo run --locked -p nostr-pubsub-sim -- --nodes 1000 --attackers 200
 cargo test --locked --release -p nostr-pubsub-sim --test release_gate -- \
   --ignored --nocapture --test-threads=1
@@ -256,3 +263,23 @@ and verify the registry before retrying; never upload changed bytes at an
 existing version. Retain receipts privately and publish refs only after package
 verification. These checks establish source availability and archive identity;
 they are not a full dependency source audit or proof of native binary reproduction.
+
+### Durable peer announcements
+
+Select only public discovery filters in the local event store. A FipsPeerfinder
+can use with_store followed by restore before network discovery; accepted
+incoming and locally published announcements then reach the same store.
+Use FipsPubsubClient::set_replay_source with that local store, or a permission-
+filtered composition of existing local indexes, to answer ordinary Nostr REQ
+messages. Keep anonymous per-author discovery caches separate from identified
+replay services. Never attach a network router as a replay source.
+
+Announcements are discovery candidates: FIPS still checks namespace, schema and
+freshness, and authenticates a connection. Retain successful address memory
+separately for outages longer than an announcement's signed lifetime.
+
+Native applications can use `FileEventBus` with the `file-store` feature;
+browsers can use `IndexedDbEventBus` and `RetainedPeerDiscovery`. Choose an
+explicit owner/scope database or file path, and close the store after stopping
+its consumers. Native `close().await` drains an already-owned write before
+releasing its writer lease. No adapter opens a relay or changes peer authorization.

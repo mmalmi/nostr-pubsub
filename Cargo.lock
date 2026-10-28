@@ -2525,19 +2525,20 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "nostr",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.5.46"
+version = "0.5.47"
 dependencies = [
  "async-trait",
  "hex",
@@ -2552,6 +2553,7 @@ dependencies = [
  "nvpn-fips-tcp-endpoint",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

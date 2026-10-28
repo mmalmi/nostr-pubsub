@@ -77,6 +77,12 @@ impl super::ClientInner {
             .ok()
             .and_then(|mut source| source.take());
         drop(source);
+        let announcements = self
+            .peer_announcement_store
+            .lock()
+            .ok()
+            .and_then(|mut source| source.take());
+        drop(announcements);
         let active = self
             .subscriptions
             .lock()

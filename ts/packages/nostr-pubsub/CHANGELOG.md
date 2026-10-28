@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.20 - 2026-10-28
+
+- Add bounded, signature-checked event snapshots and atomic IndexedDB persistence for explicitly selected announcement scopes.
+- Restore peer discovery from local announcements before network responses, with ordinary local REQ replay, expiry, deterministic replacement, and bounded live writes.
+- Keep private discovery caches local; callers select which public events may be replayed.
+
 ## 0.5.19 - 2026-10-20
 
 - Restrict every identified receiver EVENT and INV export to explicit public authors. Public profiles, endpoint adverts and future kinds fetched privately cannot escape through broad requests, stale cache or retained exact-ID replay. Preserve full public-gossip and trusted-sibling roles.

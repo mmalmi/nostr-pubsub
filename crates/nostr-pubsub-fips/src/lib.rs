@@ -252,6 +252,9 @@ async fn run_default_peerfinding(
             tokio::select! {
                 delivery = subscription.recv() => {
                     let Some(delivery) = delivery else { return; };
+                    if let Err(error) = inner.retain_peer_announcement(delivery.event.clone()).await {
+                        eprintln!("nostr-pubsub: failed to retain peer announcement: {error}");
+                    }
                     let _ = inner
                         .endpoint
                         .ingest_nostr_discovery_event(delivery.event.into_event())
@@ -274,6 +277,9 @@ async fn publish_local_fips_advert(inner: &ClientInner) -> Duration {
     let Ok(event) = VerifiedEvent::try_from(event) else {
         return refresh_after;
     };
+    if let Err(error) = inner.retain_peer_announcement(event.clone()).await {
+        eprintln!("nostr-pubsub: failed to retain local peer announcement: {error}");
+    }
     let _ = inner
         .publish(
             event,
@@ -486,6 +492,7 @@ impl FipsPubsubClient {
             unknown_peer_reserve: policies.unknown_peer_reserve,
             transport_tx,
             replay_source: Mutex::new(None),
+            peer_announcement_store: Mutex::new(None),
             replay_tx,
             connected_transport_peers: AtomicUsize::new(0),
             req_frames_received: AtomicU64::new(0),

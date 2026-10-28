@@ -17,6 +17,12 @@ mod wire;
 mod inv_want;
 mod live_routes;
 mod memory;
+mod retained;
+pub use retained::*;
+#[cfg(feature = "file-store")]
+mod file_store;
+#[cfg(feature = "file-store")]
+pub use file_store::FileEventBus;
 mod router;
 mod routes;
 mod subscriptions;

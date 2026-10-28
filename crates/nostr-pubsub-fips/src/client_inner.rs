@@ -29,6 +29,7 @@ pub(super) struct ClientInner {
     pub(super) unknown_peer_reserve: usize,
     pub(super) transport_tx: mpsc::Sender<TransportCommand>,
     pub(super) replay_source: Mutex<Option<Arc<dyn nostr_pubsub::EventBus>>>,
+    pub(super) peer_announcement_store: Mutex<Option<Arc<dyn nostr_pubsub::EventBus>>>,
     pub(super) replay_tx: mpsc::Sender<crate::replay_source::ReplayRequest>,
     pub(super) connected_transport_peers: AtomicUsize,
     pub(super) req_frames_received: AtomicU64,

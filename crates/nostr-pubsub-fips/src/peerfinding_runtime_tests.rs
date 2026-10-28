@@ -495,3 +495,106 @@ async fn wait_for_peer_subscriptions(client: &FipsPubsubClient, expected: usize)
     .await
     .expect("default advert subscriptions converge");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopened_announcements_answer_peer_req_without_relays_or_original_author() {
+    use nostr_pubsub::{EventRetentionPolicy, FileEventBus, QueryOptions};
+    let directory = tempfile::tempdir().expect("cache directory");
+    let path = directory.path().join("announcements.json");
+    let retention = EventRetentionPolicy::new(256, vec![default_peerfinding_filter()]);
+    let absent_author = Keys::generate();
+    let announcement = signed_public_advert(&absent_author, "8.8.4.9:2121");
+    {
+        let store = FileEventBus::open(&path, retention.clone())
+            .await
+            .expect("initial store");
+        assert!(
+            store
+                .publish(announcement.clone(), EventSource::local_index("fixture"))
+                .await
+                .expect("durable publication")
+                .accepted
+        );
+    }
+    let restored = Arc::new(
+        FileEventBus::open(&path, retention)
+            .await
+            .expect("reopen store"),
+    );
+    let network_id = format!("pubsub-durable-adverts-{}", std::process::id());
+    register_sim_network(&network_id, SimNetwork::new(7_389));
+    let identity_a = Identity::from_secret_bytes(&[71; 32]).expect("A");
+    let identity_b = Identity::from_secret_bytes(&[72; 32]).expect("B");
+    let endpoint_a = advert_endpoint(
+        &network_id,
+        "durable-a",
+        [71; 32],
+        [(identity_b.npub(), "durable-b")],
+        "8.8.4.71:2121",
+    )
+    .await;
+    let endpoint_b = advert_endpoint(
+        &network_id,
+        "durable-b",
+        [72; 32],
+        [(identity_a.npub(), "durable-a")],
+        "8.8.4.72:2121",
+    )
+    .await;
+    wait_for_connected_peer(&endpoint_a, endpoint_b.npub()).await;
+    wait_for_connected_peer(&endpoint_b, endpoint_a.npub()).await;
+    let provider = start_client(&endpoint_a).await;
+    provider
+        .set_peer_announcement_store(Some(restored.clone()))
+        .await
+        .expect("restore discovery");
+    provider
+        .set_replay_source(Some(restored.clone()))
+        .expect("serve local announcements");
+    let requester = start_client(&endpoint_b).await;
+    wait_for_pubsub_connections(&provider, 1).await;
+    wait_for_pubsub_connections(&requester, 1).await;
+    let response = requester
+        .query(
+            vec![Filter::new().id(announcement.as_event().id)],
+            QueryOptions { limit: Some(1) },
+        )
+        .await
+        .expect("ordinary peer REQ");
+    assert_eq!(response.events.len(), 1);
+    assert_eq!(response.events[0].event, announcement);
+    assert_eq!(response.events[0].source.id.as_str(), endpoint_a.npub());
+    for endpoint in [&endpoint_a, &endpoint_b] {
+        assert!(
+            endpoint
+                .relay_statuses()
+                .await
+                .expect("relay snapshot")
+                .is_empty()
+        );
+    }
+    requester.shutdown().await;
+    provider.shutdown().await;
+    endpoint_a.shutdown().await.expect("shutdown A");
+    endpoint_b.shutdown().await.expect("shutdown B");
+    unregister_sim_network(&network_id);
+    restored.close().await;
+    let reopened = FileEventBus::open(
+        &path,
+        EventRetentionPolicy::new(256, vec![default_peerfinding_filter()]),
+    )
+    .await
+    .expect("shutdown released cache writer");
+    assert!(
+        reopened
+            .query(
+                vec![Filter::new().id(announcement.as_event().id)],
+                QueryOptions { limit: Some(1) }
+            )
+            .await
+            .expect("second restart")
+            .events
+            .len()
+            == 1
+    );
+}
