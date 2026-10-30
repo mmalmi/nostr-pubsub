@@ -92,3 +92,22 @@ were missed: reconcile against an authoritative history or event store.
 Reopening resumes live delivery but cannot guarantee recovering an event
 after the provider's replay cache evicts it. Router subscriptions preserve a
 known gap even when another selected provider does not report its health.
+
+## History pagination
+
+`HistoryCursor` keeps one source/filter history cursor. Feed each verified raw
+delivery to `observe` before application filtering or cross-source deduplication.
+Use a separate cursor for every source and query branch; do not pool timestamps.
+
+A completed page advances its inclusive `until` to the oldest observed event.
+At a saturated boundary second, the page limit grows up to the caller's cap;
+reaching that cap reports `Limited` rather than skipping unseen tied events.
+Only a completed, unsaturated boundary can move to the previous second. Empty
+completed pages are exhausted; a timeout or other partial page keeps its cursor
+and reports `Retry`, while exposing its observed oldest timestamp for diagnostics.
+`since` is retained. Page tokens reject late callbacks after completion or cancel.
+
+The cursor does not fetch events or decide how many matching results an app
+needs. The caller owns subscriptions, completion evidence, request/time/byte
+budgets, and the decision to load another page. Existing one-shot query behavior
+is unchanged.

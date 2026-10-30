@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.21 - 2026-10-30
+
+- Add the shared per-source `HistoryCursor`, with bounded inclusive pagination, dense timestamp handling, partial-page retry, and cancellation-safe page tokens. Existing runtime and query behavior is unchanged.
+
 ## 0.5.20 - 2026-10-28
 
 - Add bounded, signature-checked event snapshots and atomic IndexedDB persistence for explicitly selected announcement scopes.

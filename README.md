@@ -90,6 +90,16 @@ indexes, FIPS peers, and traditional relays. Product code can override route
 priority per source, but relay fallback should be explicit rather than the first
 peerfinding path.
 
+## History pagination
+
+Rust and TypeScript export matching `HistoryCursor` primitives for one source and
+one query filter. Raw verified deliveries update that source's own cursor before
+application filtering or global deduplication. Completed pages use inclusive
+boundaries and bounded dense-timestamp expansion; partial pages remain retryable
+without claiming history is exhausted. Generation tokens reject late callbacks.
+The app controls transport lifetimes, budgets, query branches and when enough
+results have arrived. See the core package READMEs for the contract.
+
 ## Crates
 
 - `nostr-pubsub`: core `EventBus`, route, source, query, policy, retention, and

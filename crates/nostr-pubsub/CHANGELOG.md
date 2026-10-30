@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.20 - 2026-10-30
+
+- Add a bounded, per-source history cursor with inclusive time bounds, dense-timestamp expansion, explicit partial completion, and cancellation tokens. Existing event buses and one-shot queries are unchanged.
+
 ## 0.1.18 - 2026-10-20
 
 - Encode and verify standard Nostr OK receipts for exact-event remote provider admission. Keep local cache publication reports distinct from remote receipts.

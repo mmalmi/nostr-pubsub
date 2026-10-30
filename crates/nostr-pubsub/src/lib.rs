@@ -17,6 +17,8 @@ mod wire;
 mod inv_want;
 mod live_routes;
 mod memory;
+mod pagination;
+pub use pagination::*;
 mod retained;
 pub use retained::*;
 #[cfg(feature = "file-store")]
