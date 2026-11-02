@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.16 - 2026-11-02
+
+- Scope historical queries to each bus’s configured relays when multiple buses share an SDK client. Preserve filtering, verification, deduplication, ordering, and limits.
+- Verify query isolation with two actual relays and one shared client.
+
 ## 0.1.14 - 2026-10-14
 
 - Reuse successful signature checks for live events repeated across relays or subscriptions, while preserving duplicate callbacks, filter checks, and tamper rejection.

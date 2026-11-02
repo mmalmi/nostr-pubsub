@@ -2568,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-relay"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "futures-util",

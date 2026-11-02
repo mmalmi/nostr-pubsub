@@ -113,7 +113,11 @@ impl EventBus for RelayEventBus {
         for filter in filters {
             let fetched = self
                 .client
-                .fetch_events(filter.clone(), self.query_timeout)
+                .fetch_events_from(
+                    self.relays.iter().map(String::as_str),
+                    filter.clone(),
+                    self.query_timeout,
+                )
                 .await
                 .map_err(|error| PubsubError::Storage(format!("fetch relay events: {error}")))?;
             for event in fetched {

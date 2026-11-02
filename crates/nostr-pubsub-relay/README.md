@@ -6,6 +6,8 @@ Optional actual-relay backend for `nostr-pubsub`.
 `nostr_pubsub::EventBus` trait. Use it when an application wants normal Nostr
 relays as one source in the pubsub routing graph, usually after local indexes
 and direct peer transports.
+Queries and subscriptions use only the configured relays, including when
+multiple buses share one SDK client.
 
 Live subscriptions recover known SDK notification gaps by replaying their
 original filters on the configured relays, including their time bounds and

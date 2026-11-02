@@ -286,6 +286,59 @@ fn drain_event_notifications(
 }
 
 #[tokio::test]
+async fn shared_client_queries_only_each_bus_configured_relay() {
+    let first_event = event("first relay only");
+    let second_event = event("second relay only");
+    let mut first_relay = RelayFixture::start(vec![first_event.clone()], false).await;
+    let mut second_relay = RelayFixture::start(vec![second_event.clone()], false).await;
+    let client = Client::new(Keys::generate());
+    let first_bus = RelayEventBus::with_client(client.clone(), [first_relay.url.clone()], DEADLINE)
+        .await
+        .expect("first relay bus");
+    let second_bus =
+        RelayEventBus::with_client(client.clone(), [second_relay.url.clone()], DEADLINE)
+            .await
+            .expect("second relay bus");
+    super::tests::wait_until_connected(&first_bus, &first_relay.url).await;
+    super::tests::wait_until_connected(&second_bus, &second_relay.url).await;
+    let filters = vec![Filter::new().kind(Kind::TextNote)];
+
+    let (first, second) = tokio::join!(
+        first_bus.query(filters.clone(), QueryOptions::default()),
+        second_bus.query(filters.clone(), QueryOptions::default()),
+    );
+    let first = first.expect("first query");
+    let second = second.expect("second query");
+    client.shutdown().await;
+
+    let (first_id, first_filters) = first_relay.request_with_filters().await;
+    let (second_id, second_filters) = second_relay.request_with_filters().await;
+    assert_ne!(first_id, second_id);
+    assert_eq!(first_filters, filters);
+    assert_eq!(second_filters, filters);
+    assert!(
+        first_relay.requests.try_recv().is_err(),
+        "the second bus query must not reach the first relay"
+    );
+    assert!(
+        second_relay.requests.try_recv().is_err(),
+        "the first bus query must not reach the second relay"
+    );
+    assert_eq!(first.events.len(), 1);
+    assert_eq!(first.events[0].event.as_event().id, first_event.id);
+    assert_eq!(
+        first.events[0].source,
+        nostr_pubsub::EventSource::relay(first_relay.url.clone())
+    );
+    assert_eq!(second.events.len(), 1);
+    assert_eq!(second.events[0].event.as_event().id, second_event.id);
+    assert_eq!(
+        second.events[0].source,
+        nostr_pubsub::EventSource::relay(second_relay.url.clone())
+    );
+}
+
+#[tokio::test]
 async fn query_discards_unmatched_roots_before_applying_the_result_limit() {
     let keys = Keys::generate();
     let root = |name: &str, timestamp: u64| {
