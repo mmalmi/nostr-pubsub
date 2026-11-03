@@ -82,6 +82,7 @@ export class FipsPubsubInvWantState {
     eventId: string,
     eventKind: number,
     payloadBytes: number,
+    offeredIds?: string[],
   ): number | undefined {
     const pending = this.pending.get(eventId);
     if (
@@ -91,6 +92,8 @@ export class FipsPubsubInvWantState {
       pending.eventKind !== eventKind ||
       pending.payloadBytes !== payloadBytes
     ) return undefined;
+    const provider = [pending.selected, ...pending.previous].find(p => p.peerId === peerId && p.subscriptionIds.has(subscriptionId))!;
+    if (offeredIds) offeredIds.push(...provider.subscriptionIds);
     this.delete(eventId);
     return Math.max(0, pending.hopLimit - 1);
   }

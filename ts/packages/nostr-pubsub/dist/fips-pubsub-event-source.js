@@ -1,3 +1,6 @@
+import { publicFeedSubscribe } from './public-peer-source.js';
+import { FeedWindow } from './fips-feed-sync.js';
+import { fipsEndpointSource } from './source.js';
 import { FipsSourceSubscriptions } from './fips-pubsub-source-subscriptions.js';
 import { SOURCE_PRIORITY_FIPS_ENDPOINT, } from './source.js';
 import { validateQueryOptions, verifyNostrEvent, } from './types.js';
@@ -21,6 +24,12 @@ export class FipsNostrPubsubEventSource {
     async publish(event, _source) {
         await this.client.publish(event);
         return { accepted: true, priority: SOURCE_PRIORITY_FIPS_ENDPOINT };
+    }
+    [publicFeedSubscribe](filter, handler) {
+        const window = new FeedWindow(filter, Math.min(256, this.client.limits.maxCachedEvents));
+        return this.client.subscribe([filter], (event, peer) => handler({
+            event, source: fipsEndpointSource(peer), priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
+        }), window);
     }
     subscribe(filters, handler) {
         return this.subscriptions.subscribe(filters, handler);

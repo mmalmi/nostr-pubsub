@@ -1,5 +1,6 @@
 import type { NostrEventPublisher, NostrEventReader, NostrEventSubscriber, NostrEventSubscription, PublishReport, QueryEvent, QueryReport } from './event-bus.js';
 import { FipsNostrPubsubClient } from './fips-pubsub-client.js';
+import { publicFeedSubscribe } from './public-peer-source.js';
 import { type EventSource } from './source.js';
 import { type NostrEvent, type NostrFilter, type QueryOptions } from './types.js';
 export declare const DEFAULT_FIPS_PUBSUB_QUERY_WINDOW_MS = 1000;
@@ -12,6 +13,7 @@ export declare class FipsNostrPubsubEventSource implements NostrEventReader, Nos
     private readonly subscriptions;
     constructor(client: FipsNostrPubsubClient, queryWindowMs?: number, id?: string);
     publish(event: NostrEvent, _source: EventSource): Promise<PublishReport>;
+    [publicFeedSubscribe](filter: NostrFilter, handler: (event: QueryEvent) => void): NostrEventSubscription;
     subscribe(filters: NostrFilter[], handler: (event: QueryEvent) => void): Promise<NostrEventSubscription>;
     query(filters: NostrFilter[], options?: QueryOptions): Promise<QueryReport>;
 }

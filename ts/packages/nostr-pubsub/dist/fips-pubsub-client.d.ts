@@ -1,3 +1,4 @@
+import { FeedWindow } from './fips-feed-sync.js';
 import { type FipsReceiptOptions, type FipsRemotePublication } from './fips-publication-receipts.js';
 import { type NostrEvent, type NostrFilter, type NostrVerifiedEvent } from './types.js';
 import { FipsPubsubWireCodec } from './wire.js';
@@ -19,6 +20,7 @@ export declare class FipsNostrPubsubClient {
     private readonly events;
     private readonly retained;
     private readonly invWant;
+    private readonly feeds;
     private readonly pending;
     private transport?;
     private removePeerListener?;
@@ -27,7 +29,7 @@ export declare class FipsNostrPubsubClient {
     constructor(options: FipsNostrPubsubClientOptions);
     start(): this;
     stop(): Promise<void>;
-    subscribe(filters: NostrFilter[], handler: FipsNostrPubsubEventHandler): FipsNostrPubsubSubscription;
+    subscribe(filters: NostrFilter[], handler: FipsNostrPubsubEventHandler, feed?: FeedWindow): FipsNostrPubsubSubscription;
     publish(event: NostrEvent | NostrVerifiedEvent): Promise<void>;
     publishWithReceipt(event: NostrEvent | NostrVerifiedEvent, options?: FipsReceiptOptions): Promise<FipsRemotePublication>;
     refreshPeers(): void;
@@ -50,7 +52,6 @@ export declare class FipsNostrPubsubClient {
     private background;
     private track;
     private handlePeerEvent;
-    private handleSessionEvent;
     private dropPeer;
     private handleTransportConnected;
     private handleTransportDisconnected;

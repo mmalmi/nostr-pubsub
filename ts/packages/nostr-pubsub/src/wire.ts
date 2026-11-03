@@ -13,6 +13,7 @@ export const FIPS_NOSTR_PUBSUB_SERVICE_PORT = 7368;
 
 export type FipsPubsubWireMessage =
   | { type: 'req'; subscriptionId: string; filters: NostrFilter[] }
+  | { type: 'sync'; action: 'open' | 'step' | 'reply' | 'end' | 'decline'; subscriptionId: string; payload: string }
   | { type: 'close'; subscriptionId: string }
   | { type: 'event'; event: NostrVerifiedEvent; subscriptionId?: string }
   | {
@@ -111,6 +112,11 @@ function encodeWireMessage(message: FipsPubsubWireMessage): unknown[] {
         throw invalidFrame('REQ requires at least one filter');
       }
       return ['REQ', message.subscriptionId, ...message.filters.map(normalizeFilter)];
+    case 'sync': {
+      const frame = ['FEED-SYNC/1', message.action, message.subscriptionId, message.payload];
+      decodeFeedSync(frame);
+      return frame;
+    }
     case 'close':
       return ['CLOSE', message.subscriptionId];
     case 'event': {
@@ -147,11 +153,22 @@ function encodeWireMessage(message: FipsPubsubWireMessage): unknown[] {
   }
 }
 
+function decodeFeedSync(frame: unknown[]): Extract<FipsPubsubWireMessage, { type: 'sync' }> {
+  const [, action, subscriptionId, payload] = frame;
+  if (frame.length !== 4 || (action !== 'open' && action !== 'step' && action !== 'reply' && action !== 'end' && action !== 'decline') ||
+    typeof subscriptionId !== 'string' || !/^wf1-ts-[0-9a-z]{1,12}$/.test(subscriptionId) || typeof payload !== 'string' ||
+    (action === 'end' || action === 'decline' ? payload !== '' : (payload.length > 16_384 || !/^(?:[0-9a-f]{2})+$/.test(payload)))) {
+    throw invalidFrame('Invalid public feed sync frame');
+  }
+  return { type: 'sync', action, subscriptionId, payload };
+}
+
 function decodeWireMessage(value: unknown): FipsPubsubWireMessage {
   if (!Array.isArray(value)) throw invalidFrame('message must be a JSON array');
   const [messageType] = value;
   if (typeof messageType !== 'string') throw invalidFrame('message type must be a string');
 
+  if (messageType === 'FEED-SYNC/1') return decodeFeedSync(value);
   if (messageType === 'REQ') {
     if (value.length < 3 || typeof value[1] !== 'string') {
       throw invalidFrame('REQ requires an id and at least one filter');

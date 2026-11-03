@@ -9,6 +9,11 @@ export type FipsPubsubWireMessage = {
     subscriptionId: string;
     filters: NostrFilter[];
 } | {
+    type: 'sync';
+    action: 'open' | 'step' | 'reply' | 'end' | 'decline';
+    subscriptionId: string;
+    payload: string;
+} | {
     type: 'close';
     subscriptionId: string;
 } | {

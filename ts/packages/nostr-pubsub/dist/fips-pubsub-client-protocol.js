@@ -1,3 +1,4 @@
+import { publicFeedId } from './fips-feed-sync.js';
 import { subscriptionFiltersMatch } from './filter.js';
 import { rememberId } from './fips-pubsub-client-support.js';
 export class FipsPubsubEventCache {
@@ -47,11 +48,11 @@ export function inventoryMessage(event, subscriptionIds, hopLimit) {
     };
 }
 export function acceptInventory(context, peerId, message) {
-    if (context.events.has(message.eventId) ||
-        message.subscriptionIds.length > context.maxActiveSubscriptions)
+    if (message.subscriptionIds.length > context.maxActiveSubscriptions)
         return;
     const valid = context.validSubscriptionIds(peerId, message.subscriptionIds, message.eventId);
-    if (valid.length === 0)
+    // A general cache hit may reflect a private navigation. Feed WANT decisions only consult their own window.
+    if (!valid.length || (context.events.has(message.eventId) && !valid.some(id => publicFeedId.test(id))))
         return;
     const want = context.invWant.accept(peerId, message, valid, Date.now());
     if (want !== undefined)
@@ -69,13 +70,14 @@ export function answerWant(context, peerId, eventId) {
 }
 export function acceptEvent(context, peerId, message) {
     let hopLimit = context.maxHops;
+    const offeredIds = [];
     if (message.subscriptionId !== undefined) {
-        const completed = context.invWant.complete(peerId, message.subscriptionId, message.event.id, message.event.kind, eventPayloadBytes(message.event));
+        const completed = context.invWant.complete(peerId, message.subscriptionId, message.event.id, message.event.kind, eventPayloadBytes(message.event), offeredIds);
         if (completed === undefined)
             return;
         hopLimit = completed;
     }
-    if (!context.deliverEvent(peerId, message.event))
+    if (!context.deliverEvent(peerId, message.event, offeredIds))
         return;
     if (context.events.remember(message.event, peerId, hopLimit)) {
         context.forwardEvent(peerId, message.event, hopLimit);

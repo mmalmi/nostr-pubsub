@@ -10,6 +10,9 @@ export interface FipsPubsubLocalSubscription {
     readonly id: string;
     readonly filters: NostrFilter[];
     readonly handler: (event: NostrVerifiedEvent, sourcePeer: string) => void;
+    readonly feed?: import('./fips-feed-sync.js').FeedWindow;
+    readonly wireIds: Map<string, string>;
+    readonly opened: Set<string>;
     readonly peers: Set<string>;
     readonly pendingPeers: Set<string>;
     readonly recentIds: Set<string>;
@@ -36,7 +39,7 @@ export interface FipsPubsubProtocolContext {
         subscriptionId: string;
         event: NostrVerifiedEvent;
     } | undefined;
-    deliverEvent(peerId: string, event: NostrVerifiedEvent): boolean;
+    deliverEvent(peerId: string, event: NostrVerifiedEvent, offeredIds: readonly string[]): boolean;
     forwardEvent(peerId: string, event: NostrVerifiedEvent, hopLimit: number): void;
     send(peerId: string, message: FipsPubsubWireMessage): void;
 }

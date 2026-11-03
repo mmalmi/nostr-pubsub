@@ -48,6 +48,8 @@ export class FipsPrivacyRolePolicy {
         }
         if (message.type === 'close')
             return;
+        if (message.type === 'sync' && this.role === 'receiver')
+            return;
         if (this.role === 'publisher' && message.type === 'event' && message.subscriptionId === undefined && privateEnvelopeAllowed(message.event))
             return;
         if (this.role !== 'publisher' && message.type === 'want')

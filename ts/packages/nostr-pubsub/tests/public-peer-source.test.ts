@@ -2,7 +2,7 @@ import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { expect, it, vi } from 'vitest';
 import {
   FipsNostrPubsubClient, FipsNostrPubsubEventSource, localIndexSource,
-  publicPeerSource, subscribePublicPeerFeed, type NostrFilter, type QueryEvent, type RuntimeSource,
+  openPublicPeerFeedSource, publicPeerSource, subscribePublicPeerFeed, type NostrFilter, type QueryEvent, type RuntimeSource,
 } from '../src/index.js';
 import { MemoryFipsNetwork } from './helpers/memory-fips.js';
 
@@ -53,7 +53,6 @@ it('requires verified public follows and sends no global fallback for an empty l
 });
 
 it('matches exact lookups locally and drops old history and late callbacks when the feed rotates', async () => {
-  const { openPublicPeerFeedSource } = await import('../src/index.js');
   const subscriptions: Array<{close: ReturnType<typeof vi.fn>; push: (event: QueryEvent) => void}> = [];
   const wirePublish = vi.fn(async () => ({ accepted: true, priority: 10 }));
   const source: RuntimeSource = { id: 'fips', publish: wirePublish, subscribe: (_, push) => {
@@ -101,4 +100,37 @@ it('batches every signed follow deterministically and cleans up when a carrier r
   expect(filters.map(filter => filter.authors!.length)).toEqual([256, 256, 88]);
   expect(filters.flatMap(filter => filter.authors!)).toEqual(authors);
   expect(close).toHaveBeenCalledTimes(2);
+});
+
+it('keeps notification and bulk feeds independent, deduplicates overlaps, and erases all windows on owner transitions', async () => {
+  const feeds: Array<{ filters: NostrFilter[]; emit: (record: QueryEvent) => void; close: ReturnType<typeof vi.fn> }> = [];
+  const source: RuntimeSource = { id: 'test', subscribe(filters, emit) {
+    const entry = { filters, emit, close: vi.fn() }; feeds.push(entry); return entry;
+  } };
+  const latest = { type: 'latest' as const }, alice = sign(3), bob = sign(3), kinds = [1, 6, 7, 16, 20, 1111, 9735, 30023];
+  const notifications = { type: 'notifications' as const, owner: alice.pubkey, kinds };
+  const combined = await openPublicPeerFeedSource(source, [latest, notifications]);
+  const note = sign(1, [['p', alice.pubkey]]), handler = vi.fn(), origin = localIndexSource('test');
+  const record = { event: note, source: origin, priority: 1 };
+  await combined.subscribe!([{}], handler);
+  expect(feeds.map(f => f.filters)).toEqual([[{ kinds: [1] }], [{ kinds, '#p': [alice.pubkey] }]]);
+  feeds[0].emit(record); feeds[1].emit(record);
+  expect(handler).toHaveBeenCalledTimes(1);
+  await combined.replaceFeed([notifications, { type: 'following', owner: alice.pubkey, contacts: alice }]);
+  expect(feeds[0].close).toHaveBeenCalledOnce(); expect(feeds[1].close).not.toHaveBeenCalled();
+  expect((await combined.query!([{}])).events).toHaveLength(1);
+  await combined.replaceFeed([latest, { ...notifications, owner: bob.pubkey }]);
+  feeds[1].emit(record);
+  expect((await combined.query!([{}])).events).toEqual([]);
+  feeds.at(-2)!.emit(record);
+  await combined.replaceFeed(latest);
+  expect((await combined.query!([{}])).events).toEqual([]);
+  feeds.at(-1)!.emit(record);
+  await combined.replaceFeed([latest, notifications]);
+  expect((await combined.query!([{}])).events).toEqual([]);
+  await expect(combined.replaceFeed([notifications, { ...notifications, owner: bob.pubkey }])).rejects.toThrow('one account');
+  await expect(combined.replaceFeed({ ...notifications, kinds: [1059] })).rejects.toThrow();
+  await expect(combined.replaceFeed({ ...notifications, kinds: [0] })).rejects.toThrow();
+  await expect(combined.replaceFeed({ ...notifications, owner: 'bad' })).rejects.toThrow();
+  combined.close();
 });

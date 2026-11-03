@@ -45,13 +45,16 @@ export class FipsPubsubInvWantState {
         this.trim();
         return { peerId, eventId: message.eventId };
     }
-    complete(peerId, subscriptionId, eventId, eventKind, payloadBytes) {
+    complete(peerId, subscriptionId, eventId, eventKind, payloadBytes, offeredIds) {
         const pending = this.pending.get(eventId);
         if (pending === undefined ||
             ![pending.selected, ...pending.previous].some(provider => provider.peerId === peerId && provider.subscriptionIds.has(subscriptionId)) ||
             pending.eventKind !== eventKind ||
             pending.payloadBytes !== payloadBytes)
             return undefined;
+        const provider = [pending.selected, ...pending.previous].find(p => p.peerId === peerId && p.subscriptionIds.has(subscriptionId));
+        if (offeredIds)
+            offeredIds.push(...provider.subscriptionIds);
         this.delete(eventId);
         return Math.max(0, pending.hopLimit - 1);
     }

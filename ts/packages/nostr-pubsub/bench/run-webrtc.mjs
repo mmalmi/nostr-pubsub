@@ -19,7 +19,8 @@ const repeats = Number(process.env.REPEATS || 5);
 if (!process.env.BROWSER_BIN || !sizes.length || sizes.some(n => !Number.isInteger(n) || n < 4 || n > 4096) ||
     modes.some(mode => !['inv-want','negentropy','negentropy-warm'].includes(mode)) || !Number.isInteger(repeats) || repeats < 1) throw new Error('Set BROWSER_BIN and valid trial bounds');
 const output = await vite.build({ root: here, configFile: false, logLevel: 'warn',
-  resolve: {alias: {'pubsub-source': join(pkg, 'src'), 'reconcile-source': resolve(pkg, '../nostr-pubsub-reconcile/src/index.ts'),
+  resolve: {alias: {'pubsub-source': join(pkg, 'src'), 'comparison-pubsub': process.env.LEGACY_PUBSUB_ENTRY
+      ? resolve(process.env.LEGACY_PUBSUB_ENTRY) : join(pkg, 'src/index.ts'), 'reconcile-source': resolve(pkg, '../nostr-pubsub-reconcile/src/index.ts'),
     'nostr-tools/pure': req.resolve('nostr-tools/pure')}},
   build: {write: false, minify: false, target: 'esnext'} });
 const bundle = new Map((Array.isArray(output) ? output : [output]).flatMap(result => result.output)
@@ -70,7 +71,9 @@ try {
   console.log(JSON.stringify({browser:product,sizes,scenarios,modes,repeats,node:process.version}));
   const cpu = async () => (await call('SystemInfo.getProcessInfo')).processInfo.reduce((sum,p) => sum + p.cpuTime, 0);
   const trial = (mode,n,scenario) => evaluate('bench.run(' + [mode,n,scenario].map(v => JSON.stringify(v)).join(',') + ')');
-  for (const n of sizes) {
+  if (process.env.VERIFY_WARM === '1') {
+    console.log(JSON.stringify(await evaluate('bench.verify(' + Boolean(process.env.LEGACY_PUBSUB_ENTRY) + ')')));
+  } else for (const n of sizes) {
     await evaluate('bench.prepare(' + n + ')');
     for (const mode of modes) await trial(mode,n,'tail-1%');
     for (let repeat=0; repeat<repeats; ++repeat) for (const [i,scenario] of scenarios.entries()) {

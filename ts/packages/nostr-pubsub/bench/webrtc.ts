@@ -198,7 +198,10 @@ async function run(strategy: Strategy, count: number, scenario: Scenario) {
     clearTimeout(timer!); client.onmessage = server.onmessage = null; replay.close();
   }
 }
-Object.assign(window, {bench: {run, async prepare(count: number) {
+Object.assign(window, {bench: {run, async verify(legacy: boolean) {
+  const {verifyNegotiation} = await import('./negotiated');
+  return verifyNegotiation(connect, fixture(4), legacy);
+}, async prepare(count: number) {
   fixture(count);
   if (!link) {
     let timeout: ReturnType<typeof setTimeout>;

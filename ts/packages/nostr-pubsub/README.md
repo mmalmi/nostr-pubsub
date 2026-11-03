@@ -135,13 +135,28 @@ peers.close();
 is 1. Applications can configure a fixed list of public kinds at startup. A
 following feed verifies the contact list's author and signature, then sorts and
 batches every public follow. An empty list opens no subscription. Up to 16,384
-authors fit in 256-author batches. Feed changes clear old peer history.
+authors fit in 256-author batches. The optional notifications feed uses
+`{type: 'notifications', owner: signedInPubkey, kinds: [1, 6, 7, 9735]}`.
+Its only subject is the active account's public `#p` tag. Supply up to two feeds
+in an array to `openPublicPeerFeedSource` and `replaceFeed`. Removed scopes lose
+their history, unchanged scopes stay warm, and changing owners clears all scopes.
 Page-level queries match only the last 256 verified feed events in memory.
 The peer source reports partial history. Inbound peer replay must also use
 an independently selected public feed or authored outbox. Connecting an
 application's browsing cache to the carrier would expose its contents.
 
-Give `FipsNostrPubsubClient` a `retainedEventReader` to serve its local event
+An established FIPS feed reconnects with an ordinary REQ carrying a reserved
+opaque subscription ID. Legacy responders replay as usual. An upgraded provider
+can initiate a bounded Negentropy comparison (`FEED-SYNC/1`) for that subscription.
+Its first message fingerprints the window. It offers only its missing posts via
+standard INV/WANT/EVENT. Cold joins and new publications use ordinary inventory.
+Each negotiated window draws from at most 256 verified events received through
+that specific feed and intentionally published public events matching that feed.
+The provider independently checks its export policy. Each client permits 16
+concurrent comparisons, up to four per peer per direction, with 16 rounds and
+a 2.5-second deadline. Failure returns to the configured bounded replay once.
+
+Give `FipsNostrPubsubClient` a `retainedEventReader` to serve its public service event
 index through the same FIPS node used by Hashtree files. Queries are bounded by
 the configured replay count, two seconds, and 32 concurrent requests. The reader
 must be local-only; incoming peer requests must not trigger network fetches.
@@ -338,6 +353,15 @@ uses the reconciliation library with an experimental NIP-77 control envelope.
 ```sh
 node packages/nostr-pubsub/bench/run-webrtc.mjs > results.jsonl
 ```
+
+Set `VERIFY_WARM=1` to run the production FIPS clients over actual RTC data channels.
+The check disconnects two peer endpoints in Chromium, publishes while offline, reconnects,
+and verifies the missing post and a subsequent live post. It also checks the wire for
+a navigation-only ID and duplicate announcements. Set `LEGACY_PUBSUB_ENTRY` to the
+absolute path of a verified older package's `dist/index.js` with its dependencies
+available to exercise both mixed-version pairings. The result includes datagram bytes
+and elapsed time for reconnect and delivery. These include the test adapter's port
+header, FIPS/TCP records, and live post. The matrix above measures catch-up alone.
 
 `SIZES`, `SCENARIOS`, `STRATEGIES`, and `REPEATS` select the benchmark matrix.
 Add `negentropy-warm` to `STRATEGIES=inv-want,negentropy` to compare the optional

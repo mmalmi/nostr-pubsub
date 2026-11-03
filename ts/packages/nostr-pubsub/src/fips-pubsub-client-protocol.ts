@@ -1,3 +1,4 @@
+import { publicFeedId } from './fips-feed-sync.js';
 import { subscriptionFiltersMatch } from './filter.js';
 import { FipsPubsubInvWantState } from './fips-pubsub-invwant.js';
 import { rememberId } from './fips-pubsub-client-support.js';
@@ -14,6 +15,9 @@ export interface FipsPubsubLocalSubscription {
   readonly id: string;
   readonly filters: NostrFilter[];
   readonly handler: (event: NostrVerifiedEvent, sourcePeer: string) => void;
+  readonly feed?: import('./fips-feed-sync.js').FeedWindow;
+  readonly wireIds: Map<string, string>;
+  readonly opened: Set<string>;
   readonly peers: Set<string>;
   readonly pendingPeers: Set<string>;
   readonly recentIds: Set<string>;
@@ -68,7 +72,7 @@ export interface FipsPubsubProtocolContext {
   eventForWant(peerId: string, eventId: string):
     | { subscriptionId: string; event: NostrVerifiedEvent }
     | undefined;
-  deliverEvent(peerId: string, event: NostrVerifiedEvent): boolean;
+  deliverEvent(peerId: string, event: NostrVerifiedEvent, offeredIds: readonly string[]): boolean;
   forwardEvent(peerId: string, event: NostrVerifiedEvent, hopLimit: number): void;
   send(peerId: string, message: FipsPubsubWireMessage): void;
 }
@@ -94,11 +98,11 @@ export function acceptInventory(
   message: Extract<FipsPubsubWireMessage, { type: 'inv' }>,
 ): void {
   if (
-    context.events.has(message.eventId) ||
     message.subscriptionIds.length > context.maxActiveSubscriptions
   ) return;
   const valid = context.validSubscriptionIds(peerId, message.subscriptionIds, message.eventId);
-  if (valid.length === 0) return;
+  // A general cache hit may reflect a private navigation. Feed WANT decisions only consult their own window.
+  if (!valid.length || (context.events.has(message.eventId) && !valid.some(id => publicFeedId.test(id)))) return;
   const want = context.invWant.accept(peerId, message, valid, Date.now());
   if (want !== undefined) context.send(want.peerId, { type: 'want', eventId: want.eventId });
 }
@@ -123,18 +127,19 @@ export function acceptEvent(
   message: Extract<FipsPubsubWireMessage, { type: 'event' }>,
 ): void {
   let hopLimit = context.maxHops;
+  const offeredIds: string[] = [];
   if (message.subscriptionId !== undefined) {
     const completed = context.invWant.complete(
       peerId,
       message.subscriptionId,
       message.event.id,
       message.event.kind,
-      eventPayloadBytes(message.event),
+      eventPayloadBytes(message.event), offeredIds,
     );
     if (completed === undefined) return;
     hopLimit = completed;
   }
-  if (!context.deliverEvent(peerId, message.event)) return;
+  if (!context.deliverEvent(peerId, message.event, offeredIds)) return;
   if (context.events.remember(message.event, peerId, hopLimit)) {
     context.forwardEvent(peerId, message.event, hopLimit);
   }

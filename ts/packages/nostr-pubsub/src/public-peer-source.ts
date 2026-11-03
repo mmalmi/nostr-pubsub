@@ -9,6 +9,7 @@ import { validateQueryOptions, verifyNostrEvent, type NostrEvent, type NostrFilt
 
 export type PublicPeerFeed = (
   | { type: 'latest' }
+  | { type: 'notifications'; owner: string }
   | { type: 'following'; owner: string; contacts: NostrEvent }
 ) & { kinds?: readonly number[] };
 
@@ -21,8 +22,19 @@ function privateKind(kind: number): boolean {
   return kind === 4 || kind === 13 || kind === 14 || isPrivateRelayEvent({ kind });
 }
 
-function privateEvent(event: NostrEvent): boolean {
+export function privatePeerEvent(event: NostrEvent): boolean {
   return privateKind(event.kind) || (event.kind === 37368 && event.tags.some(tag => tag[0] === 'type' && tag[1] === 'group_roster'));
+}
+
+const notificationKinds = [1, 6, 7, 16, 20, 1111, 9735, 30023];
+export function validPublicFeedFilter(filter: NostrFilter): boolean {
+  const kinds = filter.kinds;
+  if (!kinds?.length || kinds.length > 64 || kinds.some(privateKind)) return false;
+  const keys = Object.keys(filter).filter(key => key !== 'kinds');
+  if (!keys.length) return true;
+  if (keys.length !== 1) return false;
+  if (keys[0] === 'authors') return Boolean(filter.authors?.length && filter.authors.length <= maxAuthorsPerFilter);
+  return keys[0] === '#p' && filter['#p']?.length === 1 && kinds.every(kind => notificationKinds.includes(kind));
 }
 
 function feedFilters(feed: PublicPeerFeed): NostrFilter[] {
@@ -30,6 +42,12 @@ function feedFilters(feed: PublicPeerFeed): NostrFilter[] {
   if (!kinds.length || kinds.length > 64 || kinds.some(kind => !Number.isSafeInteger(kind) || kind < 0 ||
     kind > 65535 || privateKind(kind))) {
     throw new RangeError('Choose public event kinds for the peer feed');
+  }
+  if (feed.type === 'notifications') {
+    if (!/^[0-9a-f]{64}$/.test(feed.owner) || kinds.some(kind => !notificationKinds.includes(kind))) {
+      throw new Error('Notifications require the signed-in account and public notification kinds');
+    }
+    return [{ kinds, '#p': [feed.owner] }];
   }
   if (feed.type === 'latest') return [{ kinds }];
   if (feed.type !== 'following') throw new Error('Unknown peer feed');
@@ -51,15 +69,25 @@ export async function subscribePublicPeerFeed(source: RuntimeSource, feed: Publi
   return openFilters(source, feedFilters(feed), receive);
 }
 
+/** Internal carrier binding. Only feedFilters can construct an account-lifetime subscription. */
+export const publicFeedSubscribe = Symbol('publicFeedSubscribe');
+export interface PublicFeedCarrier {
+  [publicFeedSubscribe]?(filter: NostrFilter, receive: Receive): NostrEventSubscription;
+}
+
 async function openFilters(source: RuntimeSource, filters: NostrFilter[], receive: Receive): Promise<NostrEventSubscription> {
-  if (!source.subscribe) throw new Error('Peer feed subscription unavailable');
+  const carrier = source as RuntimeSource & PublicFeedCarrier;
+  if (!source.subscribe && !carrier[publicFeedSubscribe]) throw new Error('Peer feed subscription unavailable');
   let closed = false;
-  const results = await Promise.allSettled(filters.map(async filter => source.subscribe!([filter], record => {
-    if (closed) return;
-    const event = verifyNostrEvent(record.event);
-    if (privateEvent(event)) return;
-    if (matchFilters([filter], event) && !expired(event)) receive({ ...record, event });
-  })));
+  const results = await Promise.allSettled(filters.map(async filter => {
+    const handler = (record: QueryEvent) => {
+      if (closed) return;
+      const event = verifyNostrEvent(record.event);
+      if (privatePeerEvent(event)) return;
+      if (matchFilters([filter], event) && !expired(event)) receive({ ...record, event });
+    };
+    return carrier[publicFeedSubscribe]?.(filter, handler) ?? source.subscribe!([filter], handler);
+  }));
   const handles = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
   const close = () => {
     closed = true;
@@ -76,7 +104,7 @@ export function publicPeerSource(source: RuntimeSource): RuntimeSource {
     id: source.id, publishAcceptance: source.publishAcceptance,
     ...(source.publish && { async publish(input: NostrEvent, origin: EventSource) {
       const event = verifyNostrEvent(input);
-      if (privateEvent(event)) {
+      if (privatePeerEvent(event)) {
         throw new Error('Private event cannot be published on a public peer feed');
       }
       return source.publish!(event, origin);
@@ -90,47 +118,68 @@ export function publicPeerSource(source: RuntimeSource): RuntimeSource {
   };
 }
 
+type FeedSet = PublicPeerFeed | readonly PublicPeerFeed[];
 export interface PublicPeerFeedSource extends RuntimeSource {
-  replaceFeed(feed: PublicPeerFeed): Promise<void>;
+  replaceFeed(feed: FeedSet): Promise<void>;
   close(): void;
 }
 
-/** One account-lifetime peer feed. All application filters match the bounded feed window locally. */
-export async function openPublicPeerFeedSource(source: RuntimeSource, feed: PublicPeerFeed): Promise<PublicPeerFeedSource> {
-  const records = new Map<string, QueryEvent>();
+/** One account-lifetime source. Overlapping feeds share a bounded local display window. */
+export async function openPublicPeerFeedSource(source: RuntimeSource, feed: FeedSet): Promise<PublicPeerFeedSource> {
+  type Entry = { filter: NostrFilter; handle?: NostrEventSubscription; ready?: Promise<void> };
+  const scopes = new Map<string, Entry>();
+  const records = new Map<string, { record: QueryEvent; scopes: Set<Entry> }>();
   const listeners = new Set<{ filters: NostrFilter[]; receive: Receive }>();
-  let subscription: NostrEventSubscription | undefined;
-  let generation = 0;
-  let closed = false;
-  function retire() {
-    generation++;
-    subscription?.close();
-    subscription = undefined;
-    records.clear();
+  let owner: string | undefined, closed = false;
+  function retire(key: string, entry: Entry) {
+    scopes.delete(key);
+    entry.handle?.close();
+    for (const [id, held] of records) {
+      held.scopes.delete(entry);
+      if (!held.scopes.size) records.delete(id);
+    }
   }
   const result: PublicPeerFeedSource = {
     ...publicPeerSource(source),
     async replaceFeed(next) {
       if (closed) throw new Error('Peer feed is closed');
-      retire();
-      const version = generation;
-      const handle = await subscribePublicPeerFeed(source, next, record => {
-        if (generation !== version || records.has(record.event.id)) return;
-        records.set(record.event.id, record);
-        if (records.size > 256) records.delete(records.keys().next().value!);
-        for (const listener of listeners) if (matchFilters(listener.filters, record.event)) listener.receive(record);
-      }).catch(error => {
-        if (generation === version) retire();
-        throw error;
+      const feeds: readonly PublicPeerFeed[] = Array.isArray(next) ? next : [next as PublicPeerFeed];
+      if (feeds.length > 2) throw new Error('Choose at most two account feeds');
+      const owners = new Set(feeds.flatMap(f => f.type === 'latest' ? [] : [f.owner]));
+      if (owners.size > 1) throw new Error('Peer feeds must belong to one account');
+      const nextOwner = [...owners][0];
+      const selected = new Map(feeds.flatMap(feedFilters).map(filter => [JSON.stringify(filter), filter]));
+      for (const [key, entry] of scopes) if (owner !== nextOwner || !selected.has(key)) retire(key, entry);
+      owner = nextOwner;
+      const batch = [...selected].map(([key, filter]) => {
+        const active = scopes.get(key);
+        if (active) return active;
+        const entry: Entry = { filter };
+        scopes.set(key, entry);
+        entry.ready = openFilters(source, [filter], record => {
+          if (scopes.get(key) !== entry) return;
+          const held = records.get(record.event.id);
+          if (held) { held.scopes.add(entry); return; }
+          records.set(record.event.id, { record, scopes: new Set([entry]) });
+          if (records.size > 256) records.delete(records.keys().next().value!);
+          for (const listener of listeners) if (matchFilters(listener.filters, record.event)) listener.receive(record);
+        }).then(handle => {
+          if (scopes.get(key) === entry) entry.handle = handle;
+          else handle.close();
+        });
+        return entry;
       });
-      if (generation === version) subscription = handle;
-      else handle.close();
+      try { await Promise.all(batch.map(entry => entry.ready)); }
+      catch (error) {
+        for (const [key, entry] of scopes) if (batch.includes(entry)) retire(key, entry);
+        throw error;
+      }
     },
     async query(filters, options = {}) {
       validateQueryOptions(options);
       options.signal?.throwIfAborted();
-      const events = selectStoredEvents(Array.from(records.values(), record => record.event), filters, options);
-      return { events: events.map(event => records.get(event.id)!), complete: false };
+      const events = selectStoredEvents(Array.from(records.values(), held => held.record.event), filters, options);
+      return { events: events.map(event => records.get(event.id)!.record), complete: false };
     },
     subscribe(filters, receive) {
       if (closed) throw new Error('Peer feed is closed');
@@ -138,7 +187,7 @@ export async function openPublicPeerFeedSource(source: RuntimeSource, feed: Publ
       listeners.add(listener);
       return { close() { listeners.delete(listener); } };
     },
-    close() { closed = true; retire(); listeners.clear(); },
+    close() { closed = true; for (const [key, entry] of scopes) retire(key, entry); listeners.clear(); },
   };
   await result.replaceFeed(feed);
   return result;

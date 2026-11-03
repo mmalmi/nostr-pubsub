@@ -13,7 +13,7 @@ export declare class FipsPubsubInvWantState {
     accept(peerId: string, message: Extract<FipsPubsubWireMessage, {
         type: 'inv';
     }>, validSubscriptionIds: string[], nowMs: number): WantRequest | undefined;
-    complete(peerId: string, subscriptionId: string, eventId: string, eventKind: number, payloadBytes: number): number | undefined;
+    complete(peerId: string, subscriptionId: string, eventId: string, eventKind: number, payloadBytes: number, offeredIds?: string[]): number | undefined;
     retryDue(nowMs: number, retryAfterMs: number): WantRequest[];
     removeSubscription(subscriptionId: string): void;
     dropPeer(peerId: string): void;

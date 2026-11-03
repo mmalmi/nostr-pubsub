@@ -8,6 +8,9 @@ import type {
   QueryReport,
 } from './event-bus.js';
 import { FipsNostrPubsubClient } from './fips-pubsub-client.js';
+import { publicFeedSubscribe } from './public-peer-source.js';
+import { FeedWindow } from './fips-feed-sync.js';
+import { fipsEndpointSource } from './source.js';
 import { FipsSourceSubscriptions } from './fips-pubsub-source-subscriptions.js';
 import {
   SOURCE_PRIORITY_FIPS_ENDPOINT,
@@ -42,6 +45,13 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
   async publish(event: NostrEvent, _source: EventSource): Promise<PublishReport> {
     await this.client.publish(event);
     return { accepted: true, priority: SOURCE_PRIORITY_FIPS_ENDPOINT };
+  }
+
+  [publicFeedSubscribe](filter: NostrFilter, handler: (event: QueryEvent) => void): NostrEventSubscription {
+    const window = new FeedWindow(filter, Math.min(256, this.client.limits.maxCachedEvents));
+    return this.client.subscribe([filter], (event, peer) => handler({
+      event, source: fipsEndpointSource(peer), priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
+    }), window);
   }
 
   subscribe(
