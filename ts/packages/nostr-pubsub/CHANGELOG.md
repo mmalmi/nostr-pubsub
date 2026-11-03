@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.23 - 2026-11-04
+
+- Reuse the immutable event size and UTF-8 codecs for repeated peer inventory and event records.
+- Pin the compatible Negentropy 0.1.1 library with faster ID comparisons and an optional single-fingerprint opening for repeated feed comparisons.
+
 ## 0.5.22 - 2026-11-04
 
 - Keep viewed posts, profiles, and search filters local on browser peer sources. An optional background feed can fetch recent public events globally or in batches from a signed follow list. Explicit publishing retains its peer delivery path.

@@ -1,6 +1,6 @@
 {
   "name": "nostr-pubsub",
-  "version": "0.5.22",
+  "version": "0.5.23",
   "description": "Browser-ready Nostr event and source routing primitives",
   "type": "module",
   "main": "dist/index.js",
@@ -42,7 +42,7 @@
   ],
   "dependencies": {
     "@fips/tcp": "https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-v0.2.4/fips-tcp-0.2.3.tgz",
-    "nostr-pubsub-reconcile": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-reconcile-ts-v0.1.0/nostr-pubsub-reconcile-0.1.0.tgz"
+    "nostr-pubsub-reconcile": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-reconcile-ts-v0.1.1/nostr-pubsub-reconcile-0.1.1.tgz"
   },
   "peerDependencies": {
     "nostr-tools": ">=2.23.3 <3"

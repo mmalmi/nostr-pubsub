@@ -26,6 +26,9 @@ export type FipsPubsubWireMessage =
   | { type: 'want'; eventId: string }
   | { type: 'ok'; eventId: string; accepted: boolean; message: string };
 
+const frameEncoder = new TextEncoder();
+const frameDecoder = new TextDecoder('utf-8', { fatal: true });
+
 export class FipsPubsubWireCodec {
   readonly maxFrameBytes: number;
 
@@ -38,7 +41,7 @@ export class FipsPubsubWireCodec {
 
   encodeFrame(message: FipsPubsubWireMessage): Uint8Array {
     const wireMessage = encodeWireMessage(message);
-    const frame = new TextEncoder().encode(JSON.stringify(wireMessage));
+    const frame = frameEncoder.encode(JSON.stringify(wireMessage));
     this.checkFrameSize(frame.byteLength);
     return frame;
   }
@@ -49,7 +52,7 @@ export class FipsPubsubWireCodec {
 
     let value: unknown;
     try {
-      const json = new TextDecoder('utf-8', { fatal: true }).decode(frame);
+      const json = frameDecoder.decode(frame);
       value = JSON.parse(json) as unknown;
     } catch (error) {
       throw invalidFrame(`invalid JSON: ${errorMessage(error)}`);

@@ -39,13 +39,19 @@ export class Reconciliation {
     this.storage = new Storage(records, filter.since, filter.until, maxRecords);
   }
 
-  async initiate(): Promise<Uint8Array> {
+  /** A repeat sync of the same public feed can start with one whole-window fingerprint. */
+  async initiate(options: { fingerprintFirst?: boolean } = {}): Promise<Uint8Array> {
     if (this.initiator) throw new Error('already initiated');
     this.enter();
     try {
       this.initiator = true;
       const out = new Writer(); out.append([0x61]);
-      await this.split(0, this.storage.items.length, infinity, out);
+      const count = this.storage.items.length;
+      if (options.fingerprintFirst && count > 0) {
+        out.bound(infinity); out.varint(1n); out.append(await this.storage.fingerprint(0, count));
+      } else {
+        await this.split(0, count, infinity, out);
+      }
       return out.finish();
     } finally { this.busy = false; }
   }

@@ -181,7 +181,12 @@ export function replayLocalSubscription(
   }
 }
 
+// Verified events and their tags are immutable. A replay or fanout can reuse their wire size.
+const payloadSizes = new WeakMap<NostrVerifiedEvent, number>();
+const encoder = new TextEncoder();
 function eventPayloadBytes(event: NostrVerifiedEvent): number {
+  const cached = payloadSizes.get(event);
+  if (cached !== undefined) return cached;
   const wireEvent = {
     content: event.content,
     created_at: event.created_at,
@@ -191,5 +196,7 @@ function eventPayloadBytes(event: NostrVerifiedEvent): number {
     sig: event.sig,
     tags: event.tags,
   };
-  return new TextEncoder().encode(JSON.stringify(wireEvent)).byteLength;
+  const size = encoder.encode(JSON.stringify(wireEvent)).byteLength;
+  payloadSizes.set(event, size);
+  return size;
 }

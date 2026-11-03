@@ -4,6 +4,8 @@ import { PubsubPeerSubscriptionStore, } from './subscription.js';
 export const FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES = 65_525;
 export const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES = FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES;
 export const FIPS_NOSTR_PUBSUB_SERVICE_PORT = 7368;
+const frameEncoder = new TextEncoder();
+const frameDecoder = new TextDecoder('utf-8', { fatal: true });
 export class FipsPubsubWireCodec {
     maxFrameBytes;
     constructor(maxFrameBytes = DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES) {
@@ -14,7 +16,7 @@ export class FipsPubsubWireCodec {
     }
     encodeFrame(message) {
         const wireMessage = encodeWireMessage(message);
-        const frame = new TextEncoder().encode(JSON.stringify(wireMessage));
+        const frame = frameEncoder.encode(JSON.stringify(wireMessage));
         this.checkFrameSize(frame.byteLength);
         return frame;
     }
@@ -24,7 +26,7 @@ export class FipsPubsubWireCodec {
             throw invalidFrame('frame is empty');
         let value;
         try {
-            const json = new TextDecoder('utf-8', { fatal: true }).decode(frame);
+            const json = frameDecoder.decode(frame);
             value = JSON.parse(json);
         }
         catch (error) {

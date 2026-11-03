@@ -26,6 +26,12 @@ must agree on the inclusive time filter and record semantics. Snapshots are copi
 and immutable. Timestamps support the full u64 range except the reserved infinity
 value. Calls on one session must be sequential.
 
+For a repeat sync of the same feed and window, `await session.initiate({ fingerprintFirst: true })`
+can open with a single standard range fingerprint. Equal nonempty sets then need only
+one comparison. Different inventories can require an extra round trip. The ordinary
+`initiate()` keeps its partitioned opening for general catch-up. Both openings work
+with existing Negentropy v1 responders.
+
 Optional limits: `maxRecords` (100,000), `maxFrameBytes` (16,384), `maxRounds`
 (256). Exceeding a limit throws; it never claims partial history is complete.
 Split larger histories into agreed windows and discard expired sessions.

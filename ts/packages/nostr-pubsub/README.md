@@ -72,7 +72,7 @@ application already owns a worker; forward operations instead of starting a
 second pool in the UI.
 
 ```ts
-import { NostrRuntime, FipsNostrPubsubEventSource } from 'nostr-pubsub';
+import { NostrRuntime, FipsNostrPubsubEventSource, publicPeerSource } from 'nostr-pubsub';
 
 const runtime = new NostrRuntime({
   relays: configuredRelays,
@@ -324,3 +324,27 @@ avoid a repeated signature check only for immutable events returned by
 `verifyNostrEvent()`. Use `publish()`, `replayToPeer()`, or `receive()` for
 untrusted input. Type assertions are not a trust boundary and are rejected by
 the verified fast paths.
+
+
+### Measuring WebRTC catch-up
+
+From the frozen TypeScript workspace, run the following with a Chromium executable in
+`BROWSER_BIN`. The driver connects two local endpoints over one ordered RTC data channel with
+synthetic signed public posts and compares the exact differences in both inventories.
+Both strategies fetch the missing events in one direction using the same WANT and EVENT
+records. INV/WANT exercises the retained replayer and wire codec. The Negentropy peer
+uses the reconciliation library with an experimental NIP-77 control envelope.
+
+```sh
+node packages/nostr-pubsub/bench/run-webrtc.mjs > results.jsonl
+```
+
+`SIZES`, `SCENARIOS`, `STRATEGIES`, and `REPEATS` select the benchmark matrix.
+Add `negentropy-warm` to `STRATEGIES=inv-want,negentropy` to compare the optional
+whole-window opening. JSON rows include per-direction application bytes, signed event
+bytes, protocol-message count, catch-up milliseconds and CPU milliseconds summed across
+the dedicated browser's processes. Setup, fixture signing, a completion marker and
+SCTP/DTLS/IP headers are excluded from application traffic. Connection establishment
+and fixture signing precede timing. The loopback link has no injected WAN latency
+or loss. Use the same public feed for comparison across peers. Browsing history
+and arbitrary local caches are ineligible for peer reconciliation.

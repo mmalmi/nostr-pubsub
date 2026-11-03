@@ -1,6 +1,6 @@
 {
   "name": "nostr-pubsub-reconcile",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bounded Negentropy reconciliation shared with native clients",
   "type": "module",
   "exports": {

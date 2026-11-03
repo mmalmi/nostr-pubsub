@@ -14,9 +14,10 @@ function record(n: number): ReconciliationRecord {
 }
 
 describe('native and TypeScript Negentropy peers', () => {
-  for (const browserInitiates of [true, false]) {
-    it(`exchanges real bounded frames with ${browserInitiates ? 'TypeScript' : 'Rust'} initiating`, async () => {
-      const rust = spawn('cargo', ['run', '--quiet', '-p', 'nostr-pubsub-reconcile', '--example', 'reconcile-stdio'], {
+  for (const initiator of ['TypeScript', 'TypeScript fingerprint first', 'Rust']) {
+    const browserInitiates = initiator !== 'Rust';
+    it(`exchanges real bounded frames with ${initiator} initiating`, async () => {
+      const rust = spawn('cargo', ['run', '--locked', '--quiet', '-p', 'nostr-pubsub-reconcile', '--example', 'reconcile-stdio'], {
         cwd: fileURLToPath(new URL('../../../../', import.meta.url)), stdio: 'pipe',
       });
       let errors = ''; rust.stderr.on('data', v => { errors += v; });
@@ -37,7 +38,7 @@ describe('native and TypeScript Negentropy peers', () => {
         const filter = { since: record(3).timestamp, until: record(9990).timestamp };
         const typescript = new Reconciliation(a, filter, { maxFrameBytes: 4096 });
         await command({ command: 'new', records: b.map(r => ({ timestamp: String(r.timestamp), id: hex(r.id) })), since: String(filter.since), until: String(filter.until), frameBytes: 4096 });
-        let frame = browserInitiates ? await typescript.initiate() : bytes((await command({ command: 'initiate' })).next);
+        let frame = browserInitiates ? await typescript.initiate({fingerprintFirst: initiator === 'TypeScript fingerprint first'}) : bytes((await command({ command: 'initiate' })).next);
         const have: string[] = [], need: string[] = [];
         for (let round = 0; ; round++) {
           expect(round).toBeLessThan(256); expect(frame.length).toBeLessThanOrEqual(4096);
@@ -122,4 +123,24 @@ it('reconciles distinct Buffer subarrays with nonzero offsets correctly', async 
   }
   expect(have.sort()).toEqual(records.slice(0,32).map(r=>hex(r.id)).sort());
   expect(need.sort()).toEqual(records.slice(32).map(r=>hex(r.id)).sort());
+});
+
+
+it('can open a repeated window with one standard fingerprint and still recover both differences', async () => {
+  const records = Array.from({length: 96}, (_, i) => record(i));
+  const filter = {since: 0n, until: 6_000_000_000n};
+  for (const remote of [records, [record(200), ...records.slice(1)]]) {
+    const client = new Reconciliation(records, filter);
+    const server = new Reconciliation(remote, filter);
+    let frame: Uint8Array | undefined = await client.initiate({fingerprintFirst: true});
+    expect(frame).toHaveLength(20);
+    const have: string[] = [], need: string[] = [];
+    while (frame) {
+      const step = await client.reconcile(await server.respond(frame));
+      have.push(...step.have.map(hex)); need.push(...step.need.map(hex));
+      frame = step.next;
+    }
+    expect(have).toEqual(remote === records ? [] : [hex(records[0].id)]);
+    expect(need).toEqual(remote === records ? [] : [hex(record(200).id)]);
+  }
 });

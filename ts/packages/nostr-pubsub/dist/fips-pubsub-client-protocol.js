@@ -107,7 +107,13 @@ export function replayLocalSubscription(events, subscription, replayLimit, recen
         }
     }
 }
+// Verified events and their tags are immutable. A replay or fanout can reuse their wire size.
+const payloadSizes = new WeakMap();
+const encoder = new TextEncoder();
 function eventPayloadBytes(event) {
+    const cached = payloadSizes.get(event);
+    if (cached !== undefined)
+        return cached;
     const wireEvent = {
         content: event.content,
         created_at: event.created_at,
@@ -117,6 +123,8 @@ function eventPayloadBytes(event) {
         sig: event.sig,
         tags: event.tags,
     };
-    return new TextEncoder().encode(JSON.stringify(wireEvent)).byteLength;
+    const size = encoder.encode(JSON.stringify(wireEvent)).byteLength;
+    payloadSizes.set(event, size);
+    return size;
 }
 //# sourceMappingURL=fips-pubsub-client-protocol.js.map

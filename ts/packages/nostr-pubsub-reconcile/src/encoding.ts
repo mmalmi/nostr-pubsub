@@ -12,7 +12,8 @@ export function compare(a: Bound, b: Bound): number {
   return a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : compareIds(a.id, b.id);
 }
 export function key(id: Uint8Array): string {
-  return Array.from(id, n => n.toString(16).padStart(2, '0')).join('');
+  // A byte maps to exactly one UTF-16 code unit. These keys never leave the local map.
+  return String.fromCharCode(...id);
 }
 export class Reader {
   offset = 0;
