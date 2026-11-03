@@ -77,7 +77,7 @@ import { NostrRuntime, FipsNostrPubsubEventSource } from 'nostr-pubsub';
 const runtime = new NostrRuntime({
   relays: configuredRelays,
   store: applicationEventStore,
-  sources: [new FipsNostrPubsubEventSource(pubsub)],
+  sources: [publicPeerSource(new FipsNostrPubsubEventSource(pubsub))],
 });
 const subscription = runtime.subscribe([{ kinds: [1], authors }], {
   onEvent: (event, info) => renderEvent(event, info.cached),
@@ -113,6 +113,33 @@ acceptance. `requireAck: true` disables both pre-acceptance local delivery and
 queueing; the first positive acknowledgment completes without waiting for silent
 relays. Optional `signAuthEvent(relay, template)` handles relay authentication
 using the application's existing signer.
+
+For a browser application, use `publicPeerSource(carrier)` to keep page queries,
+subscriptions and searches off peer connections while retaining explicit signed
+public publication. To also receive posts, open one feed at account startup:
+
+```ts
+const carrier = new FipsNostrPubsubEventSource(pubsub);
+const peers = await openPublicPeerFeedSource(carrier, {
+  type: 'following', owner: accountPubkey, contacts: signedKind3,
+});
+runtime.addSource(peers);
+// On a verified follow-list update:
+await peers.replaceFeed({ type: 'following', owner: accountPubkey, contacts: newKind3 });
+// On shutdown:
+runtime.removeSource(peers.id);
+peers.close();
+```
+
+`{type: 'latest'}` receives recent posts from any author. The default feed kind
+is 1. Applications can configure a fixed list of public kinds at startup. A
+following feed verifies the contact list's author and signature, then sorts and
+batches every public follow. An empty list opens no subscription. Up to 16,384
+authors fit in 256-author batches. Feed changes clear old peer history.
+Page-level queries match only the last 256 verified feed events in memory.
+The peer source reports partial history. Inbound peer replay must also use
+an independently selected public feed or authored outbox. Connecting an
+application's browsing cache to the carrier would expose its contents.
 
 Give `FipsNostrPubsubClient` a `retainedEventReader` to serve its local event
 index through the same FIPS node used by Hashtree files. Queries are bounded by

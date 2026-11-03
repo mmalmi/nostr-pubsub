@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.22 - 2026-11-04
+
+- Keep viewed posts, profiles, and search filters local on browser peer sources. An optional background feed can fetch recent public events globally or in batches from a signed follow list. Explicit publishing retains its peer delivery path.
+
 ## 0.5.21 - 2026-10-30
 
 - Add the shared per-source `HistoryCursor`, with bounded inclusive pagination, dense timestamp handling, partial-page retry, and cancellation-safe page tokens. Existing runtime and query behavior is unchanged.

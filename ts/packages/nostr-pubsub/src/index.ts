@@ -265,3 +265,5 @@ export {
   type HistoryPageToken,
   type HistoryPageStatus,
 } from './pagination.js';
+
+export { publicPeerSource, openPublicPeerFeedSource, subscribePublicPeerFeed, type PublicPeerFeed, type PublicPeerFeedSource } from './public-peer-source.js';
