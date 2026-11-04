@@ -357,7 +357,7 @@ async fn idle_connections_sleep_without_delaying_messages() {
         .subscribe(vec![Filter::new().kind(Kind::TextNote)])
         .await
         .unwrap();
-    wait_for_default_peer_subscription(&bob).await;
+    wait_for_peer_subscription_count(&bob, 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let before = alice.delivery_snapshot();
     policy.0.store(0, Ordering::Relaxed);
