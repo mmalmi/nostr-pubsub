@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.49
+
+- Use FIPS core 0.4.117 and TCP endpoint 0.2.52 to support peer recovery
+  when the underlying FIPS connection switches from UDP to WebSocket.
+
 ## 0.5.48
 
 - Use FIPS core 0.4.116 and TCP endpoint 0.2.51 so applications can pass
