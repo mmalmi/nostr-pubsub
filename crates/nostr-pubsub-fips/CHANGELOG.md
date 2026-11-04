@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.48
+
+- Use FIPS core 0.4.116 and TCP endpoint 0.2.51 so applications can pass
+  their existing FIPS endpoint to the pubsub provider.
+
 ## 0.5.46 - 2026-10-28
 
 - Use FIPS core 0.4.115 and TCP endpoint 0.2.50 for the verified
