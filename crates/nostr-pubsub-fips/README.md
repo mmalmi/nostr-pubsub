@@ -143,6 +143,20 @@ adapters. It targets the FIPS `0.4.x` endpoint API.
 
 ## Private provider operations
 
+Before binding a strict anonymous endpoint, set
+`Config.node.strict_client_only = true`, set
+`node.peer_admission.configured_only = true`, and list allowed providers in
+`Config.peers`. Add forbidden identities to `node.peer_admission.denied_npubs`.
+`FipsEndpoint::update_peer_admission` retires forbidden active and pending
+connections before it returns. The application supplies that endpoint to the
+existing private provider APIs.
+
+For a same-host provider, query
+`authenticated_local_udp_listen_addrs(provider)` on the authenticated discovery
+endpoint and configure the anonymous endpoint with the returned accepting
+listeners. An empty result leaves that provider unavailable. Keep the anonymous
+endpoint separate from the identified discovery endpoint.
+
 Use `FipsAnonymousPublisher::start` with a fresh random endpoint and explicit
 public provider identities, then consume it with `publish_once(event, timeout)`.
 Each event, recipient copy and retry needs a different endpoint. Success is an

@@ -35,6 +35,7 @@ mod routed;
 mod service_retry;
 mod shutdown;
 mod state;
+mod strict_client;
 mod turnover;
 mod websocket_restart;
 

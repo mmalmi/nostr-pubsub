@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.50
+
+- Use FIPS core 0.4.118 and TCP endpoint 0.2.53 for application-owned
+  strict client endpoints, peer admission and authenticated accepting UDP hints.
+
 ## 0.5.49
 
 - Use FIPS core 0.4.117 and TCP endpoint 0.2.52 to support peer recovery
