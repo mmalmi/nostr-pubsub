@@ -9,8 +9,13 @@ crate opens no Nostr relay socket.
 
 The Rust dependencies are published as `nvpn-fips-core`, `nvpn-fips-tcp`, and
 `nvpn-fips-tcp-endpoint`. Source imports abbreviate these names locally.
-Version `0.5.47` requires `nostr-pubsub` `0.1.19` or later and uses FIPS
-core `0.4.115`, TCP `0.2.6`, and TCP endpoint `0.2.50`.
+Version `0.6.0` requires `nostr-pubsub` `0.1.20` or later and pins FIPS
+core `0.4.119`, TCP `0.2.6`, and TCP endpoint `0.2.54`.
+
+The rating facade uses `nostr-pubsub-social-graph` `0.3`, with the social graph
+and social memory `0.2` family. Public reputation options expose the adapter's
+configuration types, so clients constructing those options should update their
+adapter dependency and recompile together with this provider.
 
 Every high-level client keeps one bounded default subscription for signed
 `fips-overlay-v1` kind `37195` endpoint adverts. It publishes its FIPS-generated
