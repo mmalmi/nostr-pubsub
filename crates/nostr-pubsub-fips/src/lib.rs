@@ -476,7 +476,12 @@ impl FipsPubsubClient {
             .saturating_mul(options.receive_batch_size)
             .max(1);
         let (transport_tx, transport_rx) = mpsc::channel(command_capacity);
-        let (replay_tx, replay_rx) = mpsc::channel(options.max_connected_peers);
+        // A transport turn can enqueue an entire receive batch before the
+        // replay workers run. Even a one-peer provider must admit its discovery
+        // and application history requests together. Keep the existing peer
+        // bound for larger meshes and the same default queue capacity.
+        let replay_capacity = options.max_connected_peers.max(options.receive_batch_size);
+        let (replay_tx, replay_rx) = mpsc::channel(replay_capacity);
         let inner = Arc::new(ClientInner {
             admission: Mutex::new(true),
             role,

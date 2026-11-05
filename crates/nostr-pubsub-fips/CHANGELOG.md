@@ -2,6 +2,10 @@
 
 ## 0.5.50
 
+- Reserve room for a receive batch in the bounded retained-history queue,
+  preventing small peer limits from dropping simultaneous discovery and
+  application history requests. The default capacity remains unchanged.
+
 - Use FIPS core 0.4.118 and TCP endpoint 0.2.53 for application-owned
   strict client endpoints, peer admission and authenticated accepting UDP hints.
 

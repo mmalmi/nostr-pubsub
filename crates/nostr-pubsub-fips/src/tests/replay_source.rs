@@ -407,5 +407,8 @@ async fn history_requests_in_one_receive_batch_are_all_queried() {
     .await;
     provider.shutdown().await;
     endpoint.shutdown().await.unwrap();
-    assert!(result.is_ok(), "only {queried}/3 admitted history requests reached the store");
+    assert!(
+        result.is_ok(),
+        "only {queried}/3 admitted history requests reached the store"
+    );
 }
