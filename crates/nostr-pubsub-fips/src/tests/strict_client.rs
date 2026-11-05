@@ -148,6 +148,7 @@ async fn strict_reader_uses_accepting_provider_hint_and_revokes_its_only_path() 
         FipsPubsubClientOptions {
             routed_peers: vec![provider_endpoint.npub().to_owned()],
             max_connected_peers: 1,
+            fanout: 1,
             ..Default::default()
         },
         FipsDiscoveryScope::Author(keys.public_key()),
