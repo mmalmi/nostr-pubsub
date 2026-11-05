@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.51
+
+- Use FIPS core 0.4.119 and TCP endpoint 0.2.54 so receiver reports from
+  strict client neighbors do not trigger ancestry repair traffic.
+  Preserve pubsub behavior and TCP wire 0.2.6.
+
 ## 0.5.50
 
 - Reserve room for a receive batch in the bounded retained-history queue,
