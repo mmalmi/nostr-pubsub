@@ -395,6 +395,17 @@ async fn advert_endpoint<const N: usize>(
     peers: [(String, &str); N],
     external_addr: &str,
 ) -> Arc<FipsEndpoint> {
+    advert_endpoint_with_discovery(network_id, address, secret, peers, external_addr, true).await
+}
+
+async fn advert_endpoint_with_discovery<const N: usize>(
+    network_id: &str,
+    address: &str,
+    secret: [u8; 32],
+    peers: [(String, &str); N],
+    external_addr: &str,
+    discovery_enabled: bool,
+) -> Arc<FipsEndpoint> {
     let mut config = Config::new();
     config.node.identity = IdentityConfig {
         nsec: Some(hex::encode(secret)),
@@ -404,8 +415,8 @@ async fn advert_endpoint<const N: usize>(
     config.node.rate_limit.handshake_rate = 1_000.0;
     config.node.retry.base_interval_secs = 1;
     config.node.retry.max_backoff_secs = 1;
-    config.node.discovery.nostr.enabled = true;
-    config.node.discovery.nostr.advertise = true;
+    config.node.discovery.nostr.enabled = discovery_enabled;
+    config.node.discovery.nostr.advertise = discovery_enabled;
     config.node.discovery.nostr.peerfinding_source = NostrPeerfindingSource::External;
     config.node.discovery.nostr.advert_relays.clear();
     config.transports.sim = TransportInstances::Single(SimTransportConfig {
@@ -417,7 +428,7 @@ async fn advert_endpoint<const N: usize>(
     });
     config.transports.tcp = TransportInstances::Single(TcpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
-        advertise_on_nostr: Some(true),
+        advertise_on_nostr: Some(discovery_enabled),
         external_addr: Some(external_addr.to_string()),
         ..Default::default()
     });
@@ -498,6 +509,57 @@ async fn wait_for_peer_subscriptions(client: &FipsPubsubClient, expected: usize)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reopened_announcements_answer_peer_req_without_relays_or_original_author() {
+    assert_reopened_announcements_replay(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovery_disabled_store_replays_signed_events_without_synthetic_announcement() {
+    assert_reopened_announcements_replay(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn announcement_store_reports_endpoint_control_errors() {
+    use nostr_pubsub::{EventRetentionPolicy, FileEventBus, QueryOptions};
+    let directory = tempfile::tempdir().expect("cache directory");
+    let store = Arc::new(
+        FileEventBus::open(
+            directory.path().join("announcements.json"),
+            EventRetentionPolicy::new(256, vec![default_peerfinding_filter()]),
+        )
+        .await
+        .expect("empty store"),
+    );
+    let network_id = format!("pubsub-advert-closed-endpoint-{}", std::process::id());
+    register_sim_network(&network_id, SimNetwork::new(7_390));
+    let endpoint = advert_endpoint(&network_id, "closed-a", [73; 32], [], "8.8.4.73:2121").await;
+    let client = start_client(&endpoint).await;
+    endpoint.shutdown().await.expect("close endpoint control");
+    let error = client
+        .set_peer_announcement_store(Some(store.clone()))
+        .await
+        .expect_err("endpoint control failure must remain visible");
+    assert!(
+        error
+            .to_string()
+            .contains("snapshot local advertised endpoints")
+    );
+    assert!(
+        store
+            .query(
+                vec![default_peerfinding_filter()],
+                QueryOptions { limit: Some(8) }
+            )
+            .await
+            .expect("retained store remains readable")
+            .events
+            .is_empty()
+    );
+    client.shutdown().await;
+    store.close().await;
+    unregister_sim_network(&network_id);
+}
+
+async fn assert_reopened_announcements_replay(discovery_enabled: bool) {
     use nostr_pubsub::{EventRetentionPolicy, FileEventBus, QueryOptions};
     let directory = tempfile::tempdir().expect("cache directory");
     let path = directory.path().join("announcements.json");
@@ -521,16 +583,20 @@ async fn reopened_announcements_answer_peer_req_without_relays_or_original_autho
             .await
             .expect("reopen store"),
     );
-    let network_id = format!("pubsub-durable-adverts-{}", std::process::id());
+    let network_id = format!(
+        "pubsub-durable-adverts-{discovery_enabled}-{}",
+        std::process::id()
+    );
     register_sim_network(&network_id, SimNetwork::new(7_389));
     let identity_a = Identity::from_secret_bytes(&[71; 32]).expect("A");
     let identity_b = Identity::from_secret_bytes(&[72; 32]).expect("B");
-    let endpoint_a = advert_endpoint(
+    let endpoint_a = advert_endpoint_with_discovery(
         &network_id,
         "durable-a",
         [71; 32],
         [(identity_b.npub(), "durable-b")],
         "8.8.4.71:2121",
+        discovery_enabled,
     )
     .await;
     let endpoint_b = advert_endpoint(
@@ -548,6 +614,49 @@ async fn reopened_announcements_answer_peer_req_without_relays_or_original_autho
         .set_peer_announcement_store(Some(restored.clone()))
         .await
         .expect("restore discovery");
+    let local_adverts = restored
+        .query(
+            vec![default_peerfinding_filter().author(PublicKey::parse(endpoint_a.npub()).unwrap())],
+            QueryOptions { limit: Some(8) },
+        )
+        .await
+        .expect("retained local announcements");
+    assert_eq!(local_adverts.events.is_empty(), !discovery_enabled);
+    if !discovery_enabled {
+        assert!(
+            endpoint_a
+                .local_advertised_endpoints()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // A failed replacement must report the storage error and preserve the
+    // already attached store, including when discovery is disabled.
+    let closed_store = Arc::new(
+        FileEventBus::open(
+            directory.path().join("closed.json"),
+            EventRetentionPolicy::new(256, vec![default_peerfinding_filter()]),
+        )
+        .await
+        .expect("closed-store fixture"),
+    );
+    closed_store.close().await;
+    assert!(
+        provider
+            .set_peer_announcement_store(Some(closed_store))
+            .await
+            .is_err()
+    );
+    let attached = provider
+        .inner
+        .peer_announcement_store
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap();
+    let expected_store: Arc<dyn EventBus> = restored.clone();
+    assert!(Arc::ptr_eq(&attached, &expected_store));
     provider
         .set_replay_source(Some(restored.clone()))
         .expect("serve local announcements");
@@ -574,6 +683,13 @@ async fn reopened_announcements_answer_peer_req_without_relays_or_original_autho
         );
     }
     requester.shutdown().await;
+    provider.shutdown_shared().await;
+    assert!(
+        provider
+            .set_peer_announcement_store(Some(restored.clone()))
+            .await
+            .is_err()
+    );
     provider.shutdown().await;
     endpoint_a.shutdown().await.expect("shutdown A");
     endpoint_b.shutdown().await.expect("shutdown B");

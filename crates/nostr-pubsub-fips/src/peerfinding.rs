@@ -234,7 +234,16 @@ impl super::FipsPubsubClient {
         drop(_admission);
         // The periodic advertiser may have run before the app attached storage.
         // Persist this device's current event immediately as well.
+        // Discovery-disabled endpoints have no advertised addresses, but their
+        // application-owned store must still retain and replay signed events.
         if retain_local
+            && !self
+                .inner
+                .endpoint
+                .local_advertised_endpoints()
+                .await
+                .map_err(|error| storage_error("snapshot local advertised endpoints", error))?
+                .is_empty()
             && let Some(event) = self
                 .inner
                 .endpoint

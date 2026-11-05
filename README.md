@@ -284,6 +284,11 @@ filtered composition of existing local indexes, to answer ordinary Nostr REQ
 messages. Keep anonymous per-author discovery caches separate from identified
 replay services. Never attach a network router as a replay source.
 
+`FipsPubsubClient::set_peer_announcement_store` also supports endpoints with
+Nostr discovery disabled. The attached store still retains and replays signed
+peer events; an immediate local announcement is saved only when the endpoint
+has advertised addresses and can produce its ordinary signed event.
+
 Announcements are discovery candidates: FIPS still checks namespace, schema and
 freshness, and authenticates a connection. Retain successful address memory
 separately for outages longer than an announcement's signed lifetime.
