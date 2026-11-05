@@ -359,3 +359,53 @@ async fn history_completion_respects_closed_subscriptions_and_detached_sources()
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
+
+// A single transport turn can deliver several valid REQs before the replay
+// workers get scheduled, including the reserved peerfinding subscription.
+#[tokio::test]
+async fn history_requests_in_one_receive_batch_are_all_queried() {
+    let endpoint = udp_endpoint([229; 32], Vec::new()).await;
+    let provider = FipsPubsubClient::start(
+        endpoint.clone(),
+        FipsPubsubClientOptions {
+            max_connected_peers: 1,
+            fanout: 1,
+            receive_batch_size: 3,
+            max_active_subscriptions: 2,
+            query_timeout: Duration::from_secs(5),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (started, mut observed) = mpsc::unbounded_channel();
+    let store = Arc::new(PausedStore {
+        event: signed_note("batched history"),
+        started,
+        gate: tokio::sync::Semaphore::new(0),
+        active: AtomicUsize::new(0),
+    });
+    provider.set_replay_source(Some(store)).unwrap();
+    let npub = Keys::generate().public_key().to_bech32().unwrap();
+    let peer = PeerIdentity::from_npub(&npub).unwrap();
+    // No await: model three decoded frames in the same receive turn.
+    for index in 0..3 {
+        provider.inner.handle_req(
+            peer,
+            SourceId::new(npub.clone()),
+            &SubscriptionId::new(format!("batched-{index}")),
+            &[Filter::new().kind(Kind::TextNote)],
+        );
+    }
+    let mut queried = 0;
+    let result = timeout(Duration::from_secs(1), async {
+        for _ in 0..3 {
+            observed.recv().await.unwrap();
+            queried += 1;
+        }
+    })
+    .await;
+    provider.shutdown().await;
+    endpoint.shutdown().await.unwrap();
+    assert!(result.is_ok(), "only {queried}/3 admitted history requests reached the store");
+}
