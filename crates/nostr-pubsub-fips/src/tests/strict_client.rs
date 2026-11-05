@@ -6,6 +6,7 @@ async fn local_provider_endpoint(
     secret: [u8; 32],
 ) -> Arc<FipsEndpoint> {
     let mut config = Config::new();
+    config.node.routing.mode = fips_core::config::RoutingMode::ReplyLearned;
     config.node.identity = IdentityConfig {
         nsec: Some(hex::encode(secret)),
         persistent: false,
@@ -161,10 +162,34 @@ async fn strict_reader_uses_accepting_provider_hint_and_revokes_its_only_path() 
         ])
         .await
         .unwrap();
-    let delivered = timeout(Duration::from_secs(15), subscription.recv())
-        .await
-        .expect("anonymous reader receives the first stored event")
-        .unwrap();
+    let received = timeout(Duration::from_secs(15), subscription.recv()).await;
+    if received.is_err() {
+        let reader_connections = endpoint
+            .peers()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|peer| peer.connected)
+            .count();
+        let provider_connections = provider_endpoint
+            .peers()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|peer| peer.connected)
+            .count();
+        panic!(
+            "first stored event timed out; connected reader={reader_connections}, provider={provider_connections}; reader={:?}, provider={:?}; errors reader={}, provider={}; subscriptions={:?}",
+            reader.delivery_snapshot(),
+            provider.delivery_snapshot(),
+            reader.transport_error_count(),
+            provider.transport_error_count(),
+            provider.peer_subscription_count(),
+        );
+    }
+    let delivered = received
+        .unwrap()
+        .expect("anonymous discovery subscription stays open");
     assert_eq!(delivered.event, event);
     assert!(endpoint.routing_status().await.unwrap().client_only);
     assert!(endpoint.bound_udp_listen_addrs().await.unwrap().is_empty());

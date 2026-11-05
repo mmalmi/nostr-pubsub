@@ -154,8 +154,10 @@ existing private provider APIs.
 For a same-host provider, query
 `authenticated_local_udp_listen_addrs(provider)` on the authenticated discovery
 endpoint and configure the anonymous endpoint with the returned accepting
-listeners. An empty result leaves that provider unavailable. Keep the anonymous
-endpoint separate from the identified discovery endpoint.
+listeners. An empty result leaves that provider unavailable. Providers serving
+strict readers need `RoutingMode::ReplyLearned`, as used by the Hashtree endpoint
+wrapper. Keep the anonymous endpoint separate from the identified discovery
+endpoint.
 
 Use `FipsAnonymousPublisher::start` with a fresh random endpoint and explicit
 public provider identities, then consume it with `publish_once(event, timeout)`.
