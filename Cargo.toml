@@ -25,8 +25,8 @@ nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
 nostr-pubsub = { version = "0.1.20", path = "crates/nostr-pubsub" }
 nostr-pubsub-social-graph = { version = "0.3.0", path = "crates/nostr-pubsub-social-graph" }
-nostr-social-graph = "0.2.0"
-nostr-social-memory = "0.2.0"
+nostr-social-graph = "0.2.1"
+nostr-social-memory = "0.2.1"
 nostr-social-graph-hashtree = "0.2.0"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
