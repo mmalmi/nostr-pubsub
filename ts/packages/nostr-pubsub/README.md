@@ -372,3 +372,42 @@ SCTP/DTLS/IP headers are excluded from application traffic. Connection establish
 and fixture signing precede timing. The loopback link has no injected WAN latency
 or loss. Use the same public feed for comparison across peers. Browsing history
 and arbitrary local caches are ineligible for peer reconciliation.
+
+
+## Private publication receipts
+
+`createPrivateRelayPublisher` coalesces concurrent sends only when the event and
+publication options match. A peer-only attempt and a relay attempt for the same
+encrypted envelope keep independent delivery results. Completing one operation
+retires only that operation; later relay retries retain fresh connections and
+AUTH identities.
+
+## Building the TypeScript package
+
+Use a clean full-commit checkout, Node 24.14.1 and the workspace-pinned pnpm
+11.7.0. The Linux package-build environment is
+`mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645`.
+The pnpm archive is `https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz`, with
+SHA-256 `deafa7ec98a1218b6a047289b92fbe2395c1e22d3495bb711653013218ee15ee`.
+Verify downloaded inputs before execution and retain the source commit,
+lockfile hash, tool versions, package member hashes and archive integrity.
+
+From the repository root, set `PUBSUB_ARTIFACT_DIR` to an existing absolute
+output directory outside the checkout, then run:
+
+```sh
+cd ts
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm check
+pnpm build
+pnpm --filter nostr-pubsub pack --pack-destination "$PUBSUB_ARTIFACT_DIR"
+```
+
+Run `pnpm test` for the full package suite. Its mandatory Rust process-boundary
+case needs Cargo/Rust 1.99.0 on `PATH` and the repository's locked native
+workspace. GNU/Linux also needs `pkg-config`, D-Bus development files, libclang
+and its builtin headers. `NOSTR_PUBSUB_LEGACY_MODULE` selects a separately
+verified older provider for the dedicated legacy case; without it, only that
+conditional case is skipped. Packaging does not replace these qualification
+gates. Previously accepted test results apply only to unchanged source,
+tests, configuration and locked dependencies.
