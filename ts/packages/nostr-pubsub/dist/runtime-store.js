@@ -1,6 +1,9 @@
 import { matchFilter } from 'nostr-tools/filter';
 export function selectStoredEvents(events, filters, options = {}) {
-    const ordered = [...events].filter((event) => !expired(event)).sort(eventOrder);
+    return selectOrderedEvents([...events].filter((event) => !expired(event)).sort(eventOrder), filters, options);
+}
+/** `ordered` holds unexpired events already sorted by `eventOrder`. */
+function selectOrderedEvents(ordered, filters, options) {
     const result = new Map();
     for (const filter of filters) {
         let count = 0;
@@ -87,11 +90,27 @@ export async function admitRuntimeEvent(store, event) {
     await store.put(event);
     return 'admitted';
 }
+/** First index whose event sorts at or after `event`, or strictly after it when `after` is set. */
+function orderedIndex(ordered, event, after) {
+    let low = 0;
+    let high = ordered.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        const order = eventOrder(ordered[middle], event);
+        if (order < 0 || (after && order === 0))
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    return low;
+}
 /** Bounded default cache. Supply a persistent store for offline operation across reloads. */
 export class MemoryEventStore {
     maxEvents;
     maxPending;
     events = new Map();
+    /** The stored events in `eventOrder`, kept current so a query need not sort the store; rebuilt when unset. */
+    ordered;
     pending = new Map();
     constructor(maxEvents = 20000, maxPending = 1000) {
         this.maxEvents = maxEvents;
@@ -100,19 +119,56 @@ export class MemoryEventStore {
             throw new RangeError('Invalid event store bounds');
     }
     async query(filters, options = {}) {
-        return selectStoredEvents(this.events.values(), filters, options);
+        return selectOrderedEvents(this.sorted().filter((event) => !expired(event)), filters, options);
     }
     async put(event) {
-        if (!this.events.has(event.id) && this.events.size >= this.maxEvents) {
-            const removable = [...this.events.values()].filter((e) => e.kind !== 5 && !this.pending.has(e.id)).sort(eventOrder).pop();
-            if (!removable)
+        const previous = this.events.get(event.id);
+        if (!previous && this.events.size >= this.maxEvents) {
+            const ordered = this.sorted();
+            let last = ordered.length - 1;
+            while (last >= 0 && (ordered[last].kind === 5 || this.pending.has(ordered[last].id)))
+                last--;
+            if (last < 0)
                 throw new Error('Event store retention capacity exhausted');
-            this.events.delete(removable.id);
+            this.remove(ordered[last]);
         }
-        this.events.set(event.id, structuredClone(event));
+        const stored = structuredClone(event);
+        this.events.set(stored.id, stored);
+        if (!this.ordered)
+            return;
+        if (!previous)
+            this.ordered.splice(orderedIndex(this.ordered, stored, true), 0, stored);
+        // A rewritten ID keeps its place among equals; anything else is re-sorted on the next read.
+        else if (eventOrder(previous, stored) !== 0 || !this.replaceOrdered(previous, stored))
+            this.ordered = undefined;
     }
-    async delete(ids) { for (const id of ids)
-        this.events.delete(id); }
+    async delete(ids) {
+        for (const id of ids) {
+            const event = this.events.get(id);
+            if (event)
+                this.remove(event);
+        }
+    }
+    sorted() { return this.ordered ??= [...this.events.values()].sort(eventOrder); }
+    remove(event) {
+        this.events.delete(event.id);
+        if (this.ordered && !this.replaceOrdered(event))
+            this.ordered = undefined;
+    }
+    /** Swap or drop one stored object in place; false when the order no longer holds it where expected. */
+    replaceOrdered(event, replacement) {
+        const ordered = this.ordered;
+        for (let index = orderedIndex(ordered, event, false); index < ordered.length && eventOrder(ordered[index], event) === 0; index++) {
+            if (ordered[index] !== event)
+                continue;
+            if (replacement)
+                ordered[index] = replacement;
+            else
+                ordered.splice(index, 1);
+            return true;
+        }
+        return false;
+    }
     async listPending() { return [...this.pending.values()].map((entry) => structuredClone(entry)); }
     async putPending(entry) {
         if (!this.pending.has(entry.event.id) && this.pending.size >= this.maxPending)

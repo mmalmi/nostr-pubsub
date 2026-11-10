@@ -43,8 +43,11 @@ export function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
-export function retainMap<K, V>(map: Map<K, V>, predicate: (value: V, key: K) => boolean): void {
+/** Returns whether any entry was removed. */
+export function retainMap<K, V>(map: Map<K, V>, predicate: (value: V, key: K) => boolean): boolean {
+  const before = map.size;
   for (const [key, value] of map) if (!predicate(value, key)) map.delete(key);
+  return map.size !== before;
 }
 
 export function retainOrder<V>(order: string[], map: Map<string, V>): void {

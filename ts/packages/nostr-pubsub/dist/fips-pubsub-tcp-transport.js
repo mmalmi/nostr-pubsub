@@ -211,13 +211,15 @@ export class FipsPubsubTcpTransport {
         const next = new Map();
         const extras = [];
         for (const peer of [...candidates.keys()].sort()) {
-            const preferOutbound = this.localPeerOrderKey < fipsInvWantTcpPeerOrderKey(peer);
             const streams = candidates.get(peer);
-            streams.sort(([leftId, left], [rightId, right]) => {
-                const leftPreferred = (left === 'outbound') === preferOutbound;
-                const rightPreferred = (right === 'outbound') === preferOutbound;
-                return Number(rightPreferred) - Number(leftPreferred) || leftId - rightId;
-            });
+            if (streams.length > 1) {
+                const preferOutbound = this.localPeerOrderKey < fipsInvWantTcpPeerOrderKey(peer);
+                streams.sort(([leftId, left], [rightId, right]) => {
+                    const leftPreferred = (left === 'outbound') === preferOutbound;
+                    const rightPreferred = (right === 'outbound') === preferOutbound;
+                    return Number(rightPreferred) - Number(leftPreferred) || leftId - rightId;
+                });
+            }
             next.set(peer, streams[0][0]);
             extras.push(...streams.slice(1).map(([id]) => id));
         }

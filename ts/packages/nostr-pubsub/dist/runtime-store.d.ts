@@ -14,11 +14,17 @@ export declare class MemoryEventStore implements RuntimeEventStore {
     readonly maxEvents: number;
     readonly maxPending: number;
     private readonly events;
+    /** The stored events in `eventOrder`, kept current so a query need not sort the store; rebuilt when unset. */
+    private ordered?;
     private readonly pending;
     constructor(maxEvents?: number, maxPending?: number);
     query(filters: NostrFilter[], options?: QueryOptions): Promise<NostrEvent[]>;
     put(event: NostrEvent): Promise<void>;
     delete(ids: string[]): Promise<void>;
+    private sorted;
+    private remove;
+    /** Swap or drop one stored object in place; false when the order no longer holds it where expected. */
+    private replaceOrdered;
     listPending(): Promise<RuntimeOutboxEntry[]>;
     putPending(entry: RuntimeOutboxEntry): Promise<void>;
     deletePending(id: string): Promise<void>;

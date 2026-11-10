@@ -1,5 +1,6 @@
 import type { NostrEvent, NostrFilter, NostrVerifiedEvent, SourceId } from './types.js';
 import { PubsubError, verifyNostrEvent } from './types.js';
+import { compareUtf8 } from './utf8-order.js';
 import {
   PubsubPeerSubscriptionStore,
   type PubsubPeerSubscription,
@@ -28,6 +29,7 @@ export type FipsPubsubWireMessage =
   | { type: 'ok'; eventId: string; accepted: boolean; message: string };
 
 const frameEncoder = new TextEncoder();
+const knownKeys = new Set(['ids', 'authors', 'kinds', 'search', 'since', 'until', 'limit']);
 const frameDecoder = new TextDecoder('utf-8', { fatal: true });
 
 export class FipsPubsubWireCodec {
@@ -276,7 +278,6 @@ function validateUnsigned(value: unknown, maximum: number, field: string): asser
 function normalizeFilter(value: unknown): NostrFilter {
   if (!isRecord(value)) throw invalidFrame('REQ filters must be JSON objects');
   const filter: NostrFilter = {};
-  const knownKeys = new Set(['ids', 'authors', 'kinds', 'search', 'since', 'until', 'limit']);
 
   const tagKeys = Object.keys(value)
     .filter((key) => key.startsWith('#'))
@@ -344,17 +345,6 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < sharedLength; index += 1) {
-    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 function invalidFrame(message: string): PubsubError {

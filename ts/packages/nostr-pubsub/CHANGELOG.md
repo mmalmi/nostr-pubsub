@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.26 - 2026-11-10
+
+- Keep `MemoryEventStore` in query order as it changes, so admitting or querying an event no longer sorts the whole store. Admission at 15,000 stored events measured about five times faster; results and eviction are unchanged.
+- Compute each relay filter key once per connection instead of for every delivered event.
+- Skip peer-order encoding and sorting for peers with a single TCP stream, and skip repeated mesh expiry passes within one timestamp.
+- Measure each mesh event's encoded size once, and reuse text codecs and a shared allocation-free UTF-8 ordering for filter normalization and peer selection. Wire bytes are unchanged.
+
 ## 0.5.23 - 2026-11-04
 
 - Reuse the immutable event size and UTF-8 codecs for repeated peer inventory and event records.

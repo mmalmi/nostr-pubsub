@@ -1,4 +1,4 @@
-import { copyVerifiedNostrEvent, validateQueryOptions, verifyNostrEvent, } from './types.js';
+import { validateQueryOptions, verifyNostrEvent, } from './types.js';
 import { decisionPriority, } from './policy.js';
 import { fipsEndpointSource, localIndexSource, peerSource, relaySource, sourceKindDefaultPriority, } from './source.js';
 export const DEFAULT_ROUTE_DATASET_ID = 'default';
@@ -158,7 +158,7 @@ async function queryDataset(datasetId, replicas, filters, queryOptions, globalLi
 function routeEvents(report, candidate, datasetId) {
     return report.events.map((queryEvent) => ({
         ...queryEvent,
-        event: verifiedReaderEvent(queryEvent.event),
+        event: verifyNostrEvent(queryEvent.event),
         provenance: [{
                 routeId: candidate.routeSource.route.id,
                 datasetId,
@@ -240,14 +240,6 @@ function errorParts(error) {
     if (error instanceof Error)
         return { name: error.name, message: error.message };
     return { name: 'Error', message: String(error) };
-}
-function verifiedReaderEvent(event) {
-    try {
-        return copyVerifiedNostrEvent(event);
-    }
-    catch {
-        return verifyNostrEvent(event);
-    }
 }
 function readerErrorResult(error) {
     const name = typeof error === 'object' && error !== null && 'name' in error

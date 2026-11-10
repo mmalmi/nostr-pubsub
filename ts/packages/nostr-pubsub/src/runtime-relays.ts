@@ -1,6 +1,6 @@
 import { AbstractSimplePool, type SubCloser } from 'nostr-tools/abstract-pool';
 import { verifyEvent } from 'nostr-tools/pure';
-import { matchFilters } from 'nostr-tools/filter';
+import { matchFilter, matchFilters } from 'nostr-tools/filter';
 import { createSimplePoolNostrRelayVerificationBoundary } from './simple-pool-relay-transport.js';
 import { verifyNostrEvent, type NostrEvent, type NostrFilter, type NostrVerifiedEvent } from './types.js';
 import type { NostrRuntimeOptions, RuntimeRelayStats } from './runtime-types.js';
@@ -138,8 +138,9 @@ export class RuntimeRelays {
       const relay = await this.pool.ensureRelay(url);
       if (!current()) return;
       const original = uniqueFilters(batch.entries);
-      const filters = original.map((filter) => {
-        const latest = link.latest.get(filterKey(filter));
+      const keys = original.map(filterKey);
+      const filters = original.map((filter, index) => {
+        const latest = link.latest.get(keys[index]!);
         return link.eosed && latest !== undefined
           ? { ...filter, since: Math.max(filter.since ?? 0, latest - 1) }
           : structuredClone(filter);
@@ -149,8 +150,8 @@ export class RuntimeRelays {
       const deliver = (raw: NostrEvent): void => {
         if (!current()) return;
         const event = this.boundary.admitEvent(raw);
-        for (const filter of original) if (matchFilters([filter], event)) {
-          const key = filterKey(filter);
+        for (const [index, filter] of original.entries()) if (matchFilter(filter, event)) {
+          const key = keys[index]!;
           link.latest.set(key, Math.max(link.latest.get(key) ?? 0, event.created_at));
         }
         for (const entry of batch.entries) if (!entry.closed && matchFilters(entry.filters, event)) entry.event(event, url);
