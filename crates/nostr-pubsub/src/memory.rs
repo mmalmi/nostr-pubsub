@@ -10,6 +10,7 @@ use crate::{
     EventBus, EventPolicyContext, EventSource, NostrEventHandler, NostrEventSubscriber,
     NostrEventSubscription, PolicyDecision, PublishReport, PubsubError, PubsubPolicy, QueryEvent,
     QueryOptions, QueryReport, Result, VerifiedEvent, filters_match, report_parts,
+    retained::newest_first,
 };
 
 #[derive(Clone)]
@@ -67,32 +68,34 @@ impl EventBus for InMemoryEventBus {
 
         let (accepted, priority, reason) = report_parts(&decision);
         if accepted {
-            let incoming = QueryEvent {
-                event: event.clone(),
-                source: source.clone(),
-                priority,
-            };
-            let handlers = {
+            let (incoming, handlers) = {
                 let mut state = self
                     .state
                     .write()
                     .map_err(|_| PubsubError::Storage("event bus lock poisoned".to_string()))?;
+                let handlers = state
+                    .subscriptions
+                    .values()
+                    .filter(|subscription| filters_match(&subscription.filters, event.as_event()))
+                    .map(|subscription| Arc::clone(&subscription.handler))
+                    .collect::<Vec<_>>();
+                let incoming = (!handlers.is_empty()).then(|| QueryEvent {
+                    event: event.clone(),
+                    source: source.clone(),
+                    priority,
+                });
                 state.events.push(StoredEvent {
                     event,
                     source,
                     priority,
                 });
-                state
-                    .subscriptions
-                    .values()
-                    .filter(|subscription| {
-                        filters_match(&subscription.filters, incoming.event.as_event())
-                    })
-                    .map(|subscription| Arc::clone(&subscription.handler))
-                    .collect::<Vec<_>>()
+                (incoming, handlers)
             };
-            for handler in handlers {
-                handler(incoming.clone());
+            if let (Some(incoming), Some((last, rest))) = (incoming, handlers.split_last()) {
+                for handler in rest {
+                    handler(incoming.clone());
+                }
+                last(incoming);
             }
         }
 
@@ -104,20 +107,13 @@ impl EventBus for InMemoryEventBus {
     }
 
     async fn query(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport> {
-        let mut stored = self
+        // Sort references under the read lock; only matches are copied out.
+        let state = self
             .state
             .read()
-            .map_err(|_| PubsubError::Storage("event bus lock poisoned".to_string()))?
-            .events
-            .clone();
-        stored.sort_by(|left, right| {
-            right
-                .event
-                .as_event()
-                .created_at
-                .cmp(&left.event.as_event().created_at)
-                .then_with(|| left.event.as_event().id.cmp(&right.event.as_event().id))
-        });
+            .map_err(|_| PubsubError::Storage("event bus lock poisoned".to_string()))?;
+        let mut stored = state.events.iter().collect::<Vec<_>>();
+        stored.sort_by(|left, right| newest_first(left.event.as_event(), right.event.as_event()));
         let filters = if filters.is_empty() {
             vec![Filter::new()]
         } else {
@@ -144,14 +140,7 @@ impl EventBus for InMemoryEventBus {
                 }
             }
         }
-        events.sort_by(|left, right| {
-            right
-                .event
-                .as_event()
-                .created_at
-                .cmp(&left.event.as_event().created_at)
-                .then_with(|| left.event.as_event().id.cmp(&right.event.as_event().id))
-        });
+        events.sort_by(|left, right| newest_first(left.event.as_event(), right.event.as_event()));
         events.truncate(options.limit.unwrap_or(usize::MAX));
 
         Ok(QueryReport { events })

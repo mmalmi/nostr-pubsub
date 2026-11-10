@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use nostr::JsonUtil;
 use serde_json::{Value, json};
@@ -134,23 +134,36 @@ impl FipsPubsubWireCodec {
             FipsPubsubWireMessage::Req {
                 subscription_id,
                 filters,
-            } => ClientMessage::req(subscription_id.clone(), filters.clone()).as_json(),
+            } => ClientMessage::Req {
+                subscription_id: Cow::Borrowed(subscription_id),
+                filters: filters.iter().map(Cow::Borrowed).collect(),
+            }
+            .as_json(),
             FipsPubsubWireMessage::Close { subscription_id } => {
-                ClientMessage::close(subscription_id.clone()).as_json()
+                ClientMessage::Close(Cow::Borrowed(subscription_id)).as_json()
             }
             FipsPubsubWireMessage::Event {
                 subscription_id: None,
                 event,
-            } => ClientMessage::event(event.as_event().clone()).as_json(),
+            } => ClientMessage::Event(Cow::Borrowed(event.as_event())).as_json(),
             FipsPubsubWireMessage::Event {
                 subscription_id: Some(subscription_id),
                 event,
-            } => RelayMessage::event(subscription_id.clone(), event.as_event().clone()).as_json(),
+            } => RelayMessage::Event {
+                subscription_id: Cow::Borrowed(subscription_id),
+                event: Cow::Borrowed(event.as_event()),
+            }
+            .as_json(),
             FipsPubsubWireMessage::Ok {
                 event_id,
                 accepted,
                 message,
-            } => RelayMessage::ok(*event_id, *accepted, message.clone()).as_json(),
+            } => RelayMessage::Ok {
+                event_id: *event_id,
+                status: *accepted,
+                message: Cow::Borrowed(message),
+            }
+            .as_json(),
             FipsPubsubWireMessage::Inv {
                 subscription_ids,
                 event_id,

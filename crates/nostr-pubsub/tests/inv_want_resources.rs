@@ -124,6 +124,70 @@ fn delivered_dedup_state_preserves_the_hard_count_bound() {
     assert_eq!(consumer.retained_state().delivered_events, 2);
 }
 
+#[test]
+fn inventory_expiring_out_of_arrival_order_keeps_the_oldest_live_one_first_to_evict() {
+    let ttl = InvWantMeshOptions::default().route_ttl_ms;
+    let mut provider = mesh();
+    let mut consumer = mesh_with_seen_limit(2);
+    let mut announce = |content: &str, now_ms: u64| {
+        let event = signed_event(content);
+        let inventory = only_message(
+            provider
+                .publish(event.clone(), &[MeshPeer::new("consumer")], now_ms)
+                .unwrap(),
+        );
+        (event, inventory)
+    };
+
+    let (extended, extended_inventory) = announce("extended", 1);
+    let (_, expiring_inventory) = announce("expiring", 2);
+    for (peer, inventory, now_ms) in [
+        ("provider", extended_inventory.clone(), 1),
+        ("provider", expiring_inventory, 2),
+        // A second provider extends the older route past the newer one.
+        ("other", extended_inventory, 3),
+    ] {
+        consumer.receive(peer, inventory, &[], now_ms).unwrap();
+    }
+
+    consumer.maintain(2 + ttl);
+    let state = consumer.retained_state();
+    assert_eq!(
+        (
+            state.seen_inventories,
+            state.upstream_routes,
+            state.forwarded_wants
+        ),
+        (1, 1, 1)
+    );
+
+    let (later, later_inventory) = announce("later", 2 + ttl);
+    let (_, newest_inventory) = announce("newest", 2 + ttl);
+    for inventory in [later_inventory, newest_inventory] {
+        consumer
+            .receive("provider", inventory, &[], 2 + ttl)
+            .unwrap();
+    }
+    let state = consumer.retained_state();
+    assert_eq!((state.seen_inventories, state.upstream_routes), (2, 2));
+
+    // The bound evicted the extended route, the oldest; the later one remains.
+    let frame = |event: Event| InvWantWireMessage::Frame {
+        event_id: event.id.to_hex(),
+        event: Box::new(event),
+    };
+    assert!(
+        consumer
+            .receive("provider", frame(extended), &[], 3 + ttl)
+            .is_err()
+    );
+    let later_id = later.id.to_hex();
+    let actions = consumer
+        .receive("provider", frame(later), &[], 3 + ttl)
+        .unwrap();
+    assert_eq!(delivered_ids(&actions), vec![later_id]);
+}
+
 fn deliver(
     provider: &mut InvWantMesh,
     consumer: &mut InvWantMesh,
