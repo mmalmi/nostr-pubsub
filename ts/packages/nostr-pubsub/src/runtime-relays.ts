@@ -6,7 +6,7 @@ import { verifyNostrEvent, type NostrEvent, type NostrFilter, type NostrVerified
 import type { NostrRuntimeOptions, RuntimeRelayStats } from './runtime-types.js';
 import { RuntimeReconciliation } from './runtime-reconciliation.js';
 
-type Entry = { relays?: readonly string[]; filters: NostrFilter[]; event: (event: NostrEvent, relay: string) => void; state: (relay: string, complete: boolean, error?: string) => void; closed: boolean; batch?: Batch };
+type Entry = { isolated: boolean; relays?: readonly string[]; filters: NostrFilter[]; event: (event: NostrEvent, relay: string) => void; state: (relay: string, complete: boolean, error?: string) => void; closed: boolean; batch?: Batch };
 type Link = { generation: number; close?: () => void; timer?: ReturnType<typeof setTimeout>; attempts: number; eosed: boolean; authenticating?: boolean; latest: Map<string, number> };
 type Batch = { entries: Entry[]; links: Map<string, Link>; closed: boolean; reopenTimer?: ReturnType<typeof setTimeout> };
 
@@ -45,10 +45,10 @@ export class RuntimeRelays {
     return this.relays.map((url) => ({ url, connected: statuses.get(url) ?? false }));
   }
   count(): number { return [...this.batches].reduce((total, batch) => total + batch.links.size, 0); }
-  subscribe(filters: NostrFilter[], event: Entry['event'], state: Entry['state'], relays?: readonly string[]): SubCloser {
+  subscribe(filters: NostrFilter[], event: Entry['event'], state: Entry['state'], relays?: readonly string[], isolated = false): SubCloser {
     if (this.stopped) throw new Error('Nostr runtime is closed');
     if (filters.length > this.maxFilters || bytes(filters) > this.maxBytes) throw new RangeError('Nostr subscription exceeds filter batch bounds');
-    const entry: Entry = { relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
+    const entry: Entry = { isolated, relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
     this.pending.push(entry);
     if (!this.timer) this.timer = setTimeout(() => this.flush(), this.options.batchWindowMs ?? 10);
     return { close: () => {
@@ -105,7 +105,7 @@ export class RuntimeRelays {
     let group: Entry[] = [];
     for (const entry of entries) {
       const candidate = uniqueFilters([...group, entry]);
-      if (group.length && (JSON.stringify(group[0]!.relays) !== JSON.stringify(entry.relays) || candidate.length > this.maxFilters || bytes(candidate) > this.maxBytes)) {
+      if (group.length && (entry.isolated || group[0].isolated || JSON.stringify(group[0]!.relays) !== JSON.stringify(entry.relays) || candidate.length > this.maxFilters || bytes(candidate) > this.maxBytes)) {
         this.startBatch(group); group = [];
       }
       group.push(entry);

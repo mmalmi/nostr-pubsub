@@ -290,8 +290,24 @@ describe('Nostr runtime over real relay sockets', () => {
     const client = runtime({ relays: [await server.url()], sources: [{ id: 'mesh', publishAcceptance: 'queued', publish: async () => ({ accepted: true, priority: 0 }) }] });
     const query = client.query([{ kinds: [1] }]);
     await until(() => server.requests.length === 1);
-    expect(await client.publish(event('mesh only'), { relays: [], sources: ['mesh'] })).toMatchObject({ accepted: false, queued: true, sources: [{ id: 'mesh', accepted: false, queued: true }] });
+    expect(await client.publish(event('mesh only'), { relays: [], sources: ['mesh'] })).toMatchObject({ accepted: false, queued: true, sources: [{ id: 'mesh', accepted: false, pending: true }] });
     await client.close(); expect(await query).toMatchObject({ complete: false, reason: 'closed' });
+  });
+  it('reports each relay to an isolated subscription and keeps its request out of shared batches', async () => {
+    const first = await relay(); const second = await relay();
+    const shared = event('held by both relays'); first.events.push(shared); second.events.push(shared);
+    const urls = [await first.url(), await second.url()];
+    const client = runtime({ relays: urls });
+    const deliveries = async (isolated: boolean): Promise<string[]> => {
+      const sources: string[] = [];
+      await new Promise<void>((resolve) => client.subscribe([{ kinds: [1] }], { onEvent: (_event, info) => sources.push(info.source), onEose: () => resolve() }, { cache: 'network-only', isolated }));
+      return sources.sort();
+    };
+    // Both subscriptions open in one batch window; only the ordinary one may share a request.
+    const [ordinary, isolated] = await Promise.all([deliveries(false), deliveries(true)]);
+    expect(ordinary).toHaveLength(1);
+    expect(isolated).toEqual(urls.map((url) => new URL(url).toString()).sort());
+    expect(first.requests).toHaveLength(2);
   });
   it('coalesces 500 subscription removals arriving as separate worker tasks', async () => {
     const server = await relay(); const client = runtime({ relays: [await server.url()] });

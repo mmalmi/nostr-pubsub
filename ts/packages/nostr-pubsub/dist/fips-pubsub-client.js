@@ -41,6 +41,7 @@ export class FipsNostrPubsubClient {
         if (this.localPeerId === '')
             throw clientError('localPeerId must be a compressed FIPS key');
         this.peers = options.peers;
+        options.observeConnections?.(() => this.transport?.connectedPeerIds() ?? []);
         this.onError = options.onError ?? (() => { });
         this.limits = validateClientLimits(options.limits);
         this.invWant = new FipsPubsubInvWantState(this.limits.maxActiveSubscriptions * this.limits.maxReplayEvents, this.limits.maxPeers);

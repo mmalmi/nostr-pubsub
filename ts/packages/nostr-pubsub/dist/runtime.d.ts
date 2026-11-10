@@ -19,7 +19,9 @@ export declare class NostrRuntime {
     subscribe(filters: NostrFilter[], handlers: RuntimeSubscriptionHandlers, options?: RuntimeSubscribeOptions): RuntimeSubscription;
     query(filters: NostrFilter[], options?: RuntimeQueryOptions): Promise<RuntimeQueryResult>;
     ingest(raw: NostrEvent, source?: string): Promise<boolean>;
+    private admit;
     publish(event: NostrEvent, options?: RuntimePublishOptions): Promise<RuntimePublishResult>;
+    private startPublish;
     retryPending(): Promise<void>;
     setRelays(urls: readonly string[]): void;
     getRelayStats(): import("./runtime-types.js").RuntimeRelayStats[];

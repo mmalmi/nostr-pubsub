@@ -242,6 +242,21 @@ describe('FipsNostrPubsubClient', () => {
     } finally { await alice.stop(); await bob.stop(); }
   });
 
+  it('lets the host observe which peers hold an established service stream', async () => {
+    const network = new MemoryFipsNetwork();
+    let connected: () => readonly string[] = () => { throw new Error('observer was not installed'); };
+    const alice = new FipsNostrPubsubClient({ localPeerId: ALICE, node: network.node(ALICE), peers: () => [BOB],
+      observeConnections: (read) => { connected = read; } }).start();
+    const bob = new FipsNostrPubsubClient({ localPeerId: BOB, node: network.node(BOB), peers: () => [ALICE] }).start();
+    try {
+      const subscription = await new FipsNostrPubsubEventSource(bob, 30).subscribe([{ kinds: [1060] }], () => {});
+      await settle(alice, bob);
+      expect(connected()).toEqual([BOB]);
+      subscription.close();
+    } finally { await alice.stop(); await bob.stop(); }
+    expect(connected()).toEqual([]);
+  });
+
   it('batches 512 exact peer interests below the carrier cap and cancels without leaking recipients', async () => {
     const network = new MemoryFipsNetwork();
     const limits = { maxActiveSubscriptions: 128, maxSubscriptionsPerPeer: 128, maxFiltersPerSubscription: 32, maxCachedEvents: 1024, maxReplayEvents: 512 };

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.27 - 2026-11-10
+
+- Restore runtime behavior that the published 0.5.24 package contained but this repository's source did not, and that 0.5.25 and 0.5.26 therefore dropped. `publish` again answers once an event is durably queued while delivery, retries and shutdown continue behind it; pass `queue: false` or `requireAck` to wait for the remote receipt itself. `isolated` subscriptions again deliver per source through their own relay requests, and `observeConnections` again reports peers with an established FIPS service stream.
+- Move from 0.5.24 directly to this version; 0.5.25 and 0.5.26 lack the behavior above. It keeps the 0.5.25 private receipt fix and the 0.5.26 performance work.
+
 ## 0.5.26 - 2026-11-10
 
 - Keep `MemoryEventStore` in query order as it changes, so admitting or querying an event no longer sorts the whole store. Admission at 15,000 stored events measured about five times faster; results and eviction are unchanged.

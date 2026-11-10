@@ -25,7 +25,7 @@ export class NostrRuntime {
   private readonly listeners = new Set<Listener>();
   private readonly interests = new RuntimeInterests<Listener>();
   private readonly incoming = new Map<string, { operation: Promise<Awaited<ReturnType<typeof admitRuntimeEvent>>>; sources: Set<string> }>();
-  private readonly publishing = new Map<string, Promise<RuntimePublishResult>>();
+  private readonly publishing = new Map<string, { result: Promise<RuntimePublishResult>; delivery: Promise<RuntimePublishResult> }>();
   private writes: Promise<unknown> = Promise.resolve();
   private stopped = false;
   private retryTimer?: ReturnType<typeof setTimeout>;
@@ -80,6 +80,9 @@ export class NostrRuntime {
     });
   }
   async ingest(raw: NostrEvent, source = 'external'): Promise<boolean> {
+    return this.admit(raw, source);
+  }
+  private async admit(raw: NostrEvent, source: string, target?: Listener): Promise<boolean> {
     this.ensureOpen();
     let event: NostrEvent;
     try { event = verifyNostrEvent(raw, this.options.verifyEvent); }
@@ -102,7 +105,8 @@ export class NostrRuntime {
     pending.sources.add(source);
     try {
       const admission = await pending.operation;
-      if (newSource && admission !== 'rejected' && !this.stopped) for (const listener of this.interests.candidates(event)) {
+      if (admission !== 'rejected' && !this.stopped) for (const listener of this.interests.candidates(event)) {
+        if (listener.options.isolated ? listener !== target && source !== 'local-publish' : !newSource) continue;
         if (admission === 'admitted' || listener.options.includeSuperseded) this.deliver(listener, event, { source, cached: false });
       }
       return admission === 'admitted';
@@ -110,13 +114,25 @@ export class NostrRuntime {
   }
 
   publish(event: NostrEvent, options: RuntimePublishOptions = {}): Promise<RuntimePublishResult> {
+    return this.startPublish(event, options).result;
+  }
+  private startPublish(event: NostrEvent, options: RuntimePublishOptions) {
     this.ensureOpen();
     const key = JSON.stringify([event.id, options]);
     const existing = this.publishing.get(key);
     if (existing) return existing;
-    const promise = this.publishOnce(event, options).finally(() => this.publishing.delete(key));
-    this.publishing.set(key, promise);
-    return promise;
+    let resolve!: (result: RuntimePublishResult) => void;
+    let reject!: (error: unknown) => void;
+    const result = new Promise<RuntimePublishResult>((res, rej) => { resolve = res; reject = rej; });
+    let queued = false;
+    const delivery = this.publishOnce(event, options, (report) => { queued = true; resolve(report); });
+    void delivery.then(resolve, (error) => {
+      reject(error);
+      if (queued) { try { this.options.onError?.(asError(error)); } catch { /* preserve delivery cleanup */ } }
+    }).finally(() => this.publishing.delete(key));
+    const publication = { result, delivery };
+    this.publishing.set(key, publication);
+    return publication;
   }
   async retryPending(): Promise<void> {
     if (this.stopped || this.retrying) return;
@@ -124,7 +140,10 @@ export class NostrRuntime {
     try {
       const pending = await this.store.listPending();
       for (let offset = 0; offset < pending.length && !this.stopped; offset += 4) {
-        await Promise.all(pending.slice(offset, offset + 4).map(({ event, relays, sources }) => this.publish(event, { relays, sources }).catch((error) => this.options.onError?.(asError(error)))));
+        await Promise.all(pending.slice(offset, offset + 4).map(({ event, relays, sources }) => {
+          const { result, delivery } = this.startPublish(event, { relays, sources });
+          return Promise.all([result, delivery]).catch((error) => this.options.onError?.(asError(error)));
+        }));
       }
     } finally { this.retrying = false; }
   }
@@ -157,7 +176,7 @@ export class NostrRuntime {
     for (const listener of [...this.listeners]) { this.complete(listener, 'closed'); this.stopListener(listener); }
     this.relays.close();
     await this.writes;
-    await Promise.allSettled([...this.publishing.values()]);
+    await Promise.allSettled([...this.publishing.values()].map(({ delivery }) => delivery));
     await this.store.close?.();
   }
   private async startListener(listener: Listener): Promise<void> {
@@ -167,7 +186,7 @@ export class NostrRuntime {
     if (listener.options.cache !== 'cache-only') {
       for (const url of listener.options.relays?.map((url) => new URL(url).toString()) ?? this.relays.urls()) listener.pending.add(url);
       const subscription = this.relays.subscribe(listener.filters, (event, source) => this.receive(listener, event, source),
-        (source, complete, error) => this.sourceState(listener, source, complete, error), listener.options.relays);
+        (source, complete, error) => this.sourceState(listener, source, complete, error), listener.options.relays, listener.options.isolated);
       listener.closers.set('relay-transport', () => subscription.close());
       for (const source of this.sources.values()) if (this.wantsSource(listener, source.id)) { listener.pending.add(source.id); void this.attachSource(listener, source); }
     }
@@ -199,7 +218,7 @@ export class NostrRuntime {
           deadline: listener.options.deadline ?? Date.now() + (this.options.historyTimeoutMs ?? 10000), signal: listener.controller.signal,
         });
         if (listener.stopped || this.sources.get(source.id) !== source) return;
-        for (const { event } of report.events) await this.ingest(event, source.id);
+        for (const { event } of report.events) await this.admit(event, source.id, listener);
         this.sourceState(listener, source.id, report.complete !== false);
       } else this.sourceState(listener, source.id, false, 'Source has no historical completion');
     } catch (error) {
@@ -211,13 +230,15 @@ export class NostrRuntime {
   private receive(listener: Listener, event: NostrEvent, source: string): void {
     if (listener.stopped) return;
     this.counters.receivedEvents++;
-    if (listener.seen.has(event.id) || this.incoming.get(event.id)?.sources.has(source)) { this.counters.duplicateEvents++; return; }
-    void this.ingest(event, source).catch((error) => this.report(listener, error));
+    const key = listener.options.isolated ? `${source}:${event.id}` : event.id;
+    if (listener.seen.has(key) || (!listener.options.isolated && this.incoming.get(event.id)?.sources.has(source))) { this.counters.duplicateEvents++; return; }
+    void this.admit(event, source, listener).catch((error) => this.report(listener, error));
   }
   private deliver(listener: Listener, event: NostrEvent, info: RuntimeEventInfo): void {
     if (listener.stopped || !matchFilters(listener.filters, event) || !this.acceptsOrigin(listener, info)) return;
-    if (listener.seen.has(event.id)) { this.counters.duplicateEvents++; return; }
-    listener.seen.add(event.id);
+    const key = listener.options.isolated ? `${info.source}:${event.id}` : event.id;
+    if (listener.seen.has(key)) { this.counters.duplicateEvents++; return; }
+    listener.seen.add(key);
     if (listener.seen.size > (this.options.maxSeenEventsPerSubscription ?? 4096)) listener.seen.delete(listener.seen.values().next().value!);
     this.counters.deliveredEvents++;
     try { listener.handlers.onEvent(event, info); } catch (error) { this.report(listener, error); }
@@ -272,7 +293,7 @@ export class NostrRuntime {
     for (const close of listener.closers.values()) close();
     listener.closers.clear(); this.listeners.delete(listener); this.interests.remove(listener);
   }
-  private async publishOnce(raw: NostrEvent, options: RuntimePublishOptions): Promise<RuntimePublishResult> {
+  private async publishOnce(raw: NostrEvent, options: RuntimePublishOptions, onQueued: (result: RuntimePublishResult) => void): Promise<RuntimePublishResult> {
     const event = verifyNostrEvent(raw, this.options.verifyEvent);
     const queue = !options.requireAck && options.queue !== false;
     const echo = !options.requireAck && options.localEcho !== false;
@@ -297,6 +318,8 @@ export class NostrRuntime {
       attempts.push(attempt);
     }
     const outcomes: RuntimePublishResult['sources'] = attempts.map(({ id }) => ({ id, accepted: false, pending: true }));
+    // Resolve the caller after local persistence, while retaining delivery for retries and shutdown.
+    if (queue) onQueued({ accepted: false, remoteAccepted: false, queued: true, sources: outcomes.map((outcome) => ({ ...outcome })) });
     const accepted = await new Promise<boolean>((resolve) => {
       let remaining = attempts.length;
       if (!remaining) resolve(false);

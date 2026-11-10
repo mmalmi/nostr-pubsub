@@ -110,6 +110,7 @@ export class FipsPubsubTcpTransport {
         this.inputs.delete(peer);
         this.queues.restart(peer);
     }
+    connectedPeerIds() { return [...this.active.keys()]; }
     connectedPeerCount() {
         return this.active.size;
     }

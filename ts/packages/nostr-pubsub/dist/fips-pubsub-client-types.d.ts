@@ -29,6 +29,8 @@ export interface FipsNostrPubsubClientOptions {
     acceptAnonymousPublications?: boolean;
     /** Local compressed FIPS public key used for deterministic TCP stream ownership. */
     localPeerId: string;
+    /** Optional diagnostics for established Nostr service streams on this endpoint. */
+    observeConnections?(read: () => readonly string[]): void;
     /** Explicit application-admitted FIPS identities. Connected peers are not inferred. */
     peers: () => readonly string[];
     /** Local retained event index only. Never pass a reader which fetches from remote peers. */

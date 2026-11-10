@@ -273,7 +273,7 @@ describe('anonymous public-key discovery boundary', () => {
     cleanup.push(() => receiver.close(), () => discovery.close());
     receiver.subscribe([{ kinds: [1059], '#p': [ownerKey] }], { onEvent() {} }, { cache: 'network-only' });
     const advert = finalizeEvent({ kind: 37195, tags: [['d', 'fips-overlay-v1']], content: '', created_at: Math.floor(Date.now() / 1000) }, owner);
-    expect((await receiver.publish(advert)).accepted).toBe(true);
+    expect((await receiver.publish(advert, { queue: false })).accepted).toBe(true);
     expect((await discovery.query([{ kinds: [37195], authors: [recipient], '#d': ['fips-overlay-v1'] }], { cache: 'network-only' })).complete).toBe(true);
     const own = frames(server).find(connection => auth(connection)?.pubkey === ownerKey)!;
     const lookup = frames(server).find(connection => connection.some(frame => frame[0] === 'REQ' && JSON.stringify(frame.slice(2)).includes(recipient)))!;

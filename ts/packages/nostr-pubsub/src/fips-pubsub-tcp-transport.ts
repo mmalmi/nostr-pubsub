@@ -153,6 +153,8 @@ export class FipsPubsubTcpTransport {
     this.queues.restart(peer);
   }
 
+  connectedPeerIds(): string[] { return [...this.active.keys()]; }
+
   connectedPeerCount(): number {
     return this.active.size;
   }

@@ -2,6 +2,7 @@ import { type SubCloser } from 'nostr-tools/abstract-pool';
 import { type NostrEvent, type NostrFilter } from './types.js';
 import type { NostrRuntimeOptions, RuntimeRelayStats } from './runtime-types.js';
 type Entry = {
+    isolated: boolean;
     relays?: readonly string[];
     filters: NostrFilter[];
     event: (event: NostrEvent, relay: string) => void;
@@ -42,7 +43,7 @@ export declare class RuntimeRelays {
     urls(): string[];
     stats(): RuntimeRelayStats[];
     count(): number;
-    subscribe(filters: NostrFilter[], event: Entry['event'], state: Entry['state'], relays?: readonly string[]): SubCloser;
+    subscribe(filters: NostrFilter[], event: Entry['event'], state: Entry['state'], relays?: readonly string[], isolated?: boolean): SubCloser;
     setRelays(urls: readonly string[]): void;
     publishAttempts(event: NostrEvent, urls?: readonly string[]): Array<{
         id: string;

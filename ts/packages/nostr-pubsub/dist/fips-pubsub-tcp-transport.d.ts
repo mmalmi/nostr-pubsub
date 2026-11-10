@@ -37,6 +37,7 @@ export declare class FipsPubsubTcpTransport {
     queueFrame(peerId: string, frame: Uint8Array): void;
     abortPeer(peer: string): Promise<void>;
     private abortPeerOnce;
+    connectedPeerIds(): string[];
     connectedPeerCount(): number;
     isConnected(peerId: string): boolean;
     idle(): Promise<void>;

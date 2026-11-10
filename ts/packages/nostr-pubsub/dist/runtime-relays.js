@@ -42,12 +42,12 @@ export class RuntimeRelays {
         return this.relays.map((url) => ({ url, connected: statuses.get(url) ?? false }));
     }
     count() { return [...this.batches].reduce((total, batch) => total + batch.links.size, 0); }
-    subscribe(filters, event, state, relays) {
+    subscribe(filters, event, state, relays, isolated = false) {
         if (this.stopped)
             throw new Error('Nostr runtime is closed');
         if (filters.length > this.maxFilters || bytes(filters) > this.maxBytes)
             throw new RangeError('Nostr subscription exceeds filter batch bounds');
-        const entry = { relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
+        const entry = { isolated, relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
         this.pending.push(entry);
         if (!this.timer)
             this.timer = setTimeout(() => this.flush(), this.options.batchWindowMs ?? 10);
@@ -119,7 +119,7 @@ export class RuntimeRelays {
         let group = [];
         for (const entry of entries) {
             const candidate = uniqueFilters([...group, entry]);
-            if (group.length && (JSON.stringify(group[0].relays) !== JSON.stringify(entry.relays) || candidate.length > this.maxFilters || bytes(candidate) > this.maxBytes)) {
+            if (group.length && (entry.isolated || group[0].isolated || JSON.stringify(group[0].relays) !== JSON.stringify(entry.relays) || candidate.length > this.maxFilters || bytes(candidate) > this.maxBytes)) {
                 this.startBatch(group);
                 group = [];
             }
