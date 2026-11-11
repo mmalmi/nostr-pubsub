@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.4 - 2026-11-11
 
 - Accept kind 1060 message envelopes that name no recipient.
   `FipsAnonymousPublisher` used to require exactly one `p` tag on kind 1060; it

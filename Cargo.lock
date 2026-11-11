@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "hex",
