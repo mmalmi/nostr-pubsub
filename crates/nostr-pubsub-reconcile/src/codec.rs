@@ -4,7 +4,7 @@
 
 use core::convert::TryInto;
 
-use negentropy::Error;
+use super::types::Error;
 
 #[inline]
 pub fn get_byte_array<const N: usize>(encoded: &mut &[u8]) -> Result<[u8; N], Error> {

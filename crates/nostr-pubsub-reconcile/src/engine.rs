@@ -1,13 +1,11 @@
 // Copyright (c) 2023 Doug Hoyte; 2023 Yuki Kishimoto. MIT licensed.
-// Adapted from negentropy 0.5.0. Keep the upstream storage and public wire types,
-// but fix frame truncation: a discarded range must remain in the next fingerprint.
+// Adapted from negentropy 0.5.0, with local storage and wire types. Fixes
+// frame truncation: a discarded range must remain in the next fingerprint.
 // Preserve the reference algorithm layout for protocol audits.
 #![allow(clippy::too_many_lines, clippy::if_not_else, clippy::unused_self)]
 use super::codec::{decode_var_int, encode_var_int, get_byte_array, get_bytes};
-use negentropy::{
-    Bound, Error, FINGERPRINT_SIZE, ID_SIZE, Id, Item, NegentropyStorageBase, PROTOCOL_VERSION,
-    Storage,
-};
+use super::storage::SummedStorage;
+use super::types::{Bound, Error, FINGERPRINT_SIZE, ID_SIZE, Id, Item, PROTOCOL_VERSION};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
@@ -37,22 +35,19 @@ const BUCKETS: usize = 16;
 const DOUBLE_BUCKETS: usize = BUCKETS * 2;
 
 /// Negentropy
-pub struct Negentropy<'a, T> {
-    storage: Storage<'a, T>,
+pub struct Negentropy {
+    storage: SummedStorage,
     frame_size_limit: usize,
     is_initiator: bool,
     last_timestamp_in: u64,
     last_timestamp_out: u64,
 }
 
-impl<'a> Negentropy<'a, crate::storage::SummedStorage> {
-    /// Create new [`Negentropy`] instance
+impl Negentropy {
+    /// Create new [`Negentropy`] instance from owned storage
     ///
     /// Frame size limit must be `equal to 0` or `greater than 4096`
-    pub fn new(
-        storage: Storage<'a, crate::storage::SummedStorage>,
-        frame_size_limit: usize,
-    ) -> Result<Self, Error> {
+    pub fn owned(storage: SummedStorage, frame_size_limit: usize) -> Result<Self, Error> {
         if frame_size_limit != 0 && frame_size_limit < 4096 {
             return Err(Error::FrameSizeLimitTooSmall);
         }
@@ -66,16 +61,6 @@ impl<'a> Negentropy<'a, crate::storage::SummedStorage> {
         })
     }
 
-    /// Create new [`Negentropy`] instance from owned storage
-    ///
-    /// Frame size limit must be `equal to 0` or `greater than 4096`
-    pub fn owned(
-        storage: crate::storage::SummedStorage,
-        frame_size_limit: usize,
-    ) -> Result<Self, Error> {
-        Self::new(Storage::Owned(storage), frame_size_limit)
-    }
-
     /// Initiate reconciliation set
     pub fn initiate(&mut self) -> Result<Vec<u8>, Error> {
         if self.is_initiator {
@@ -86,7 +71,7 @@ impl<'a> Negentropy<'a, crate::storage::SummedStorage> {
         let mut output: Vec<u8> = Vec::new();
         output.push(u8::try_from(PROTOCOL_VERSION).expect("protocol version fits u8"));
 
-        output.extend(self.split_range(0, self.storage.size()?, Bound::with_timestamp(MAX_U64))?);
+        output.extend(self.split_range(0, self.storage.size(), Bound::with_timestamp(MAX_U64))?);
 
         Ok(output)
     }
@@ -148,7 +133,7 @@ impl<'a> Negentropy<'a, crate::storage::SummedStorage> {
             return Ok(full_output);
         }
 
-        let storage_size = self.storage.size()?;
+        let storage_size = self.storage.size();
         let mut prev_bound: Bound = Bound::new();
         let mut prev_index: usize = 0;
         let mut skip: bool = false;

@@ -7,6 +7,7 @@ mod codec;
 mod storage;
 use storage::SummedStorage;
 mod engine;
+mod types;
 
 mod validation;
 
@@ -67,7 +68,7 @@ pub struct Step {
 /// An immutable snapshot and bounded Negentropy v1 conversation. No filesystem,
 /// network, clock, runtime or OS APIs: the browser peer uses a wire-compatible TypeScript implementation.
 pub struct Session {
-    engine: Negentropy<'static, SummedStorage>,
+    engine: Negentropy,
     limits: Limits,
     rounds: usize,
     finished: bool,

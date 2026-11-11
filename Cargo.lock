@@ -2560,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-reconcile"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "negentropy",
  "serde_json",

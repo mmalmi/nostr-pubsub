@@ -1,4 +1,4 @@
-use negentropy::{Bound, Error, Id, Item, NegentropyStorageBase};
+use crate::types::{Bound, Error, Id, Item};
 use sha2::{Digest, Sha256};
 
 /// Sorted snapshot with running 256-bit ID sums: any range fingerprint is one
@@ -34,14 +34,12 @@ impl SummedStorage {
     }
 }
 
-impl NegentropyStorageBase for SummedStorage {
-    fn size(&self) -> Result<usize, Error> {
-        Ok(self.items.len())
+impl SummedStorage {
+    pub fn size(&self) -> usize {
+        self.items.len()
     }
-    fn get_item(&self, i: usize) -> Result<Option<Item>, Error> {
-        Ok(self.items.get(i).copied())
-    }
-    fn iterate(
+
+    pub fn iterate(
         &self,
         begin: usize,
         end: usize,
@@ -57,12 +55,10 @@ impl NegentropyStorageBase for SummedStorage {
         }
         Ok(())
     }
-    fn find_lower_bound(&self, first: usize, last: usize, value: &Bound) -> usize {
+    pub fn find_lower_bound(&self, first: usize, last: usize, value: &Bound) -> usize {
         first + self.items[first..last].partition_point(|item| *item < value.item)
     }
-}
 
-impl SummedStorage {
     pub fn range_fingerprint(&self, begin: usize, end: usize) -> Result<[u8; 16], Error> {
         if begin > end || end > self.items.len() {
             return Err(Error::BadRange);
@@ -86,7 +82,7 @@ impl SummedStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use negentropy::NegentropyStorageVector;
+    use negentropy::{NegentropyStorageBase, NegentropyStorageVector};
     use sha2::{Digest, Sha256};
 
     #[test]
@@ -97,7 +93,7 @@ mod tests {
         let mut reference = NegentropyStorageVector::new();
         for (id, timestamp) in &records {
             reference
-                .insert(*timestamp, Id::from_byte_array(*id))
+                .insert(*timestamp, negentropy::Id::from_byte_array(*id))
                 .unwrap();
         }
         reference.seal().unwrap();

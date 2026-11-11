@@ -1,6 +1,4 @@
-use negentropy::Error;
-
-use crate::{Filter, Limits, Session, codec::encode_var_int, engine};
+use crate::{Filter, Limits, Session, codec::encode_var_int, engine, types::Error};
 
 fn id_list(count: u64, payload: &[u8]) -> Vec<u8> {
     let mut frame = vec![0x61, 0, 0, 2];
@@ -11,6 +9,12 @@ fn id_list(count: u64, payload: &[u8]) -> Vec<u8> {
 
 fn empty_storage() -> crate::storage::SummedStorage {
     crate::storage::SummedStorage::new(Vec::new())
+}
+
+fn upstream_storage() -> negentropy::NegentropyStorageVector {
+    let mut storage = negentropy::NegentropyStorageVector::new();
+    storage.seal().unwrap();
+    storage
 }
 
 // Unlike the advisory's large but representable allocation, u64::MAX cannot be
@@ -41,17 +45,17 @@ fn copied_engine_rejects_impossible_id_lists_before_allocation() {
 #[test]
 fn upstream_engine_rejects_impossible_id_lists_before_allocation() {
     for frame in malformed_lists() {
-        let mut responder = negentropy::Negentropy::owned(empty_storage(), 4096).unwrap();
+        let mut responder = negentropy::Negentropy::owned(upstream_storage(), 4096).unwrap();
         assert!(matches!(
             responder.reconcile(&frame),
-            Err(Error::ParseEndsPrematurely)
+            Err(negentropy::Error::ParseEndsPrematurely)
         ));
 
-        let mut initiator = negentropy::Negentropy::owned(empty_storage(), 4096).unwrap();
+        let mut initiator = negentropy::Negentropy::owned(upstream_storage(), 4096).unwrap();
         initiator.initiate().unwrap();
         assert!(matches!(
             initiator.reconcile_with_ids(&frame, &mut Vec::new(), &mut Vec::new()),
-            Err(Error::ParseEndsPrematurely)
+            Err(negentropy::Error::ParseEndsPrematurely)
         ));
     }
 }
