@@ -179,19 +179,26 @@ to the account connection. Move valid old pending private rows to the private
 store before removing their original pending entries. Invalid shared-group and
 roster entries remain quarantined locally.
 
-Use `createAnonymousRelayDiscovery` for targeted profile (0), relay-list
-(10002/10050), public device-list (37368) and invite (30078) lookups.
-`splitRelayDiscoveryFilters` partitions mixed kinds and author batches into
-ordinary receiver interests and anonymous single-key scopes. Broad unscoped
-public profile/relay-list scans remain ordinary. Each discovery operation
-accepts exactly one author, or one reverse
-device `#p` selector for kind 37368. Split different keys into separate operations;
-unscoped, mixed-author and combined author/device selectors are rejected. Active
-requests for the same key may share a scope; idle scopes close, and later scopes
-use fresh authentication. Discovery never retries pending publications and never
-closes a supplied local cache. `isRelayDiscoveryFilter` also classifies malformed
-or unscoped protocol filters so hosts can fail closed. These boundaries isolate
-protocol identities; servers can still observe network addresses and timing.
+Targeted profile (0), relay-list (10002/10050), public device-list (37368) and
+invite (30078) lookups use the ordinary runtime, so author batches share one
+connection per relay. A separate connection per author is not offered: a server
+can relate connections by network address and timing regardless.
+`splitRelayDiscoveryFilters` and `isRelayDiscoveryFilter` remain for the
+single-subject FIPS endpoint scopes: the first partitions mixed kinds and author
+batches into ordinary receiver interests and single-key scopes, the second
+classifies malformed or unscoped protocol filters so hosts can fail closed.
+
+`rankRelays` turns stored NIP-65 relay lists (kind 10002) into a suggested relay
+set. Pass the events, the authors to count (typically the account's follows) and
+a `minAuthors` threshold (default 3). It counts each author's newest list once,
+reads `write` or `read` markers, ignores lists longer than `maxRelaysPerAuthor`,
+and accepts only public `wss:` hosts. `order: 'coverage'` returns the fewest
+relays that reach the counted authors instead of plain popularity. The helper is
+pure: it never connects, stores or changes configured relays. Keep the signed
+events in the runtime store so they can be re-served to peers, recompute the
+ranking from them, and apply it only where the user opted in, through
+`setRelays` or a per-request `relays` option. `relayListEntries` and
+`normalizeRelayUrl` expose the same parsing for per-author routing.
 
 Interop vectors live in `crates/nostr-pubsub/tests/data/interop-vectors.json`
 and are read by both Vitest and Rust integration tests. Update the shared vector

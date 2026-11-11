@@ -3,10 +3,11 @@ export {
   createPrivateRelayPublisher, isPrivateRelayEvent, publicationLaneStore,
   type PrivatePublicationSource, type PrivateRelayPublisher, type PrivateRelayPublisherOptions,
 } from './private-relay-publisher.js';
+export { isRelayDiscoveryFilter, splitRelayDiscoveryFilters } from './discovery-scope.js';
 export {
-  createAnonymousRelayDiscovery, isRelayDiscoveryFilter, splitRelayDiscoveryFilters,
-  type AnonymousRelayDiscovery, type AnonymousRelayDiscoveryOptions,
-} from './anonymous-relay-discovery.js';
+  normalizeRelayUrl, rankRelays, relayListEntries, MAX_RELAY_URL_LENGTH, RELAY_LIST_KIND,
+  type RankedRelay, type RelayListEntry, type RelayListUse, type RelayRankOptions,
+} from './relay-lists.js';
 export { createNostrRuntime, NostrRuntime } from './runtime.js';
 export { MemoryEventStore } from './runtime-store.js';
 export type { NostrEvent, NostrFilter } from './types.js';

@@ -1,4 +1,4 @@
-import { splitRelayDiscoveryFilters } from '../src/anonymous-relay-discovery.js';
+import { splitRelayDiscoveryFilters } from '../src/discovery-scope.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { createAnonymousFipsPublisher, createAnonymousFipsDiscovery } from '../src/anonymous-fips.js';

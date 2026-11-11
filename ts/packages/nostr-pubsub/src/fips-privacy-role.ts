@@ -1,4 +1,4 @@
-import { discoveryScope, isRelayDiscoveryFilter } from './anonymous-relay-discovery.js';
+import { discoveryScope, isRelayDiscoveryFilter } from './discovery-scope.js';
 import { isPrivateRelayEvent, privateEnvelopeAllowed } from './private-relay-publisher.js';
 import type { NostrEvent, NostrFilter } from './types.js';
 import type { FipsPubsubWireMessage } from './wire.js';

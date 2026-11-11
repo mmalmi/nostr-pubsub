@@ -3,7 +3,7 @@ import { WebSocket } from 'ws';
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import * as nip44 from 'nostr-tools/nip44';
 import {
-  createAnonymousRelayDiscovery, createPrivateRelayPublisher, isPrivateRelayEvent,
+  createPrivateRelayPublisher, isPrivateRelayEvent,
   isRelayDiscoveryFilter, splitRelayDiscoveryFilters, MemoryEventStore, NostrRuntime, publicationLaneStore,
   type NostrEvent,
 } from '../src/index.js';
@@ -264,30 +264,8 @@ describe('private publication connection boundary', () => {
   });
 });
 
-describe('anonymous public-key discovery boundary', () => {
-  it('isolates public peer endpoint lookups from own endpoint advert publication and inbox AUTH', async () => {
-    const server = await relay();
-    const receiver = new NostrRuntime({ relays: [await server.url()], websocketImplementation: ws,
-      signAuthEvent: async (_relay, template) => finalizeEvent(template, owner) });
-    const discovery = createAnonymousRelayDiscovery({ relays: [await server.url()], websocketImplementation: ws });
-    cleanup.push(() => receiver.close(), () => discovery.close());
-    receiver.subscribe([{ kinds: [1059], '#p': [ownerKey] }], { onEvent() {} }, { cache: 'network-only' });
-    const advert = finalizeEvent({ kind: 37195, tags: [['d', 'fips-overlay-v1']], content: '', created_at: Math.floor(Date.now() / 1000) }, owner);
-    expect((await receiver.publish(advert, { queue: false })).accepted).toBe(true);
-    expect((await discovery.query([{ kinds: [37195], authors: [recipient], '#d': ['fips-overlay-v1'] }], { cache: 'network-only' })).complete).toBe(true);
-    const own = frames(server).find(connection => auth(connection)?.pubkey === ownerKey)!;
-    const lookup = frames(server).find(connection => connection.some(frame => frame[0] === 'REQ' && JSON.stringify(frame.slice(2)).includes(recipient)))!;
-    expect(lookup).not.toBe(own);
-    expect(auth(lookup).pubkey).not.toBe(ownerKey);
-    expect(lookup.some(frame => frame[0] === 'EVENT')).toBe(false);
-    expect(own.some(frame => frame[0] === 'EVENT' && (frame[1] as NostrEvent).id === advert.id)).toBe(true);
-    expect(JSON.stringify(own.filter(frame => frame[0] === 'REQ'))).not.toContain(recipient);
-  });
-
-  it('splits profile/relay-list author batches and mixed own settings without joining lookup identities', async () => {
-    const server = await relay();
-    const discovery = createAnonymousRelayDiscovery({ relays: [await server.url()], websocketImplementation: ws });
-    cleanup.push(() => discovery.close());
+describe('public lookup filter scopes', () => {
+  it('splits profile/relay-list author batches and mixed own settings into single-key scopes', () => {
     const split = splitRelayDiscoveryFilters([
       { kinds: [0, 10013], authors: [ownerKey] },
       { kinds: [0, 1059, 10002, 10050, 37195], authors: [recipient, 'a'.repeat(64)] },
@@ -298,71 +276,14 @@ describe('anonymous public-key discovery boundary', () => {
       { kinds: [10013], authors: [ownerKey] }, { kinds: [1060], '#p': [ownerKey] }, { kinds: [0], limit: 20 },
     ]);
     expect(split.discovery).toHaveLength(3);
-    const results = await Promise.all(split.discovery.map(filters => discovery.query(filters, { cache: 'network-only' })));
-    expect(results.every(result => result.complete)).toBe(true);
-    expect(server.authEvents).toHaveLength(3);
-    expect(new Set(server.authEvents.map(value => value.pubkey)).size).toBe(3);
-    for (const connection of frames(server)) {
-      expect(connection.some(frame => frame[0] === 'EVENT')).toBe(false);
-      const filters = connection.filter(frame => frame[0] === 'REQ').flatMap(frame => frame.slice(2)) as Array<{ authors: string[] }>;
-      const keys = new Set(filters.flatMap(filter => filter.authors));
-      expect(keys.size).toBe(1); expect(keys.has(auth(connection).pubkey)).toBe(false);
-    }
+    for (const scope of split.discovery) expect(new Set(scope.flatMap(filter => filter.authors)).size).toBe(1);
+  });
+
+  it('rejects unscoped, private-roster and combined identity lookups', () => {
     expect(() => splitRelayDiscoveryFilters([{ kinds: [37368] }])).toThrow();
     expect(() => splitRelayDiscoveryFilters([{ kinds: [37368], authors: [ownerKey], '#type': ['group_roster'] }])).toThrow();
     expect(() => splitRelayDiscoveryFilters([{ kinds: [0], authors: [ownerKey], '#p': [recipient] }])).toThrow();
-  });
-
-  it('uses separate fresh AUTH connections per author and reverse-device lookup with no pending sends', async () => {
-    const server = await relay(); const store = new MemoryEventStore();
-    await store.putPending({ event: event(), attempts: 0, updatedAt: 0 });
-    const closeStore = vi.fn(); Object.assign(store, { close: closeStore });
-    const discovery = createAnonymousRelayDiscovery({ store, relays: [await server.url()], websocketImplementation: ws, historyTimeoutMs: 1000 });
-    cleanup.push(() => discovery.close());
-    const filters = [{ kinds: [30078], authors: [ownerKey], '#l': ['double-ratchet/invites'] },
-      { kinds: [37368], authors: [recipient] }, { kinds: [37368], '#p': [recipient] }];
-    const results = await Promise.all(filters.map(filter => discovery.query([filter], { cache: 'network-only' })));
-    expect(results.every(result => result.complete)).toBe(true);
-    expect(server.authEvents).toHaveLength(3);
-    expect(new Set(server.authEvents.map(value => value.pubkey)).size).toBe(3);
-    expect(server.authEvents.every(value => verifyEvent(value) && ![ownerKey, recipient].includes(value.pubkey))).toBe(true);
-    expect(frames(server)).toHaveLength(3);
-    for (const connection of frames(server)) {
-      expect(connection.some(frame => frame[0] === 'EVENT')).toBe(false);
-      const requested = connection.filter(frame => frame[0] === 'REQ').flatMap(frame => frame.slice(2));
-      expect(new Set(requested.map(filter => JSON.stringify(filter))).size).toBe(1);
-    }
-    await until(() => server.clients.size === 0);
-    expect(await store.listPending()).toHaveLength(1);
-    await discovery.close(); expect(closeStore).not.toHaveBeenCalled();
-    expect('publish' in discovery).toBe(false); expect('addSource' in discovery).toBe(false);
-  });
-
-  it('rejects unscoped, cross-author, cross-kind and combined identity lookups without opening a socket', async () => {
-    const server = await relay();
-    const discovery = createAnonymousRelayDiscovery({ relays: [await server.url()], websocketImplementation: ws });
-    cleanup.push(() => discovery.close());
-    const invalid = [[], [{ kinds: [37368] }], [{ kinds: [37368], authors: [ownerKey, recipient] }],
-      [{ kinds: [37368], authors: [ownerKey], '#p': [recipient] }], [{ kinds: [30078], '#p': [recipient] }],
-      [{ kinds: [1060], authors: [recipient] }], [{ kinds: [37368, 1], authors: [ownerKey] }],
-      [{ kinds: [37368], authors: [ownerKey] }, { kinds: [37368], authors: [recipient] }]];
-    for (const filters of invalid) await expect(discovery.query(filters)).rejects.toThrow();
-    expect(server.frames.size).toBe(0);
     expect(isRelayDiscoveryFilter({ kinds: [37368] })).toBe(true);
     expect(isRelayDiscoveryFilter({ kinds: [1060] })).toBe(false);
-  });
-
-  it('releases bounded scope capacity on abort and gives the next lookup a new authentication key', async () => {
-    const server = await relay();
-    const discovery = createAnonymousRelayDiscovery({ relays: [await server.url()], websocketImplementation: ws, maxScopes: 1 });
-    cleanup.push(() => discovery.close());
-    const signal = new AbortController();
-    const first = discovery.subscribe([{ kinds: [37368], authors: [ownerKey] }], { onEvent() {} }, { signal: signal.signal, cache: 'network-only' });
-    await until(() => server.authEvents.length === 1);
-    expect(() => discovery.subscribe([{ kinds: [37368], authors: [recipient] }], { onEvent() {} })).toThrow('capacity');
-    signal.abort(); first.close();
-    const result = await discovery.query([{ kinds: [37368], authors: [recipient] }], { cache: 'network-only' });
-    expect(result.complete).toBe(true);
-    expect(server.authEvents).toHaveLength(2); expect(server.authEvents[0]!.pubkey).not.toBe(server.authEvents[1]!.pubkey);
   });
 });

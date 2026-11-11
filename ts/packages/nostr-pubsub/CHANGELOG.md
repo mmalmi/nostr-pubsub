@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Remove `createAnonymousRelayDiscovery` and its `AnonymousRelayDiscovery` types. Profile, relay-list, device and invite lookups go through the ordinary runtime, so an author batch uses one connection per relay instead of one per author. Replace `discovery.query`/`discovery.subscribe` with the account runtime's `query`/`subscribe`. `splitRelayDiscoveryFilters` and `isRelayDiscoveryFilter` are unchanged and still scope FIPS endpoints.
+- Add `rankRelays`, `relayListEntries` and `normalizeRelayUrl` for ranking the relays that followed authors announce in NIP-65 lists, by popularity or by coverage, above a minimum number of announcing authors. The helpers are pure and add no dependency; nothing connects to a suggested relay unless the application passes it on.
+
 ## 0.5.28 - 2026-11-11
 
 - Use `nostr-pubsub-reconcile` 0.1.2, which hashes Negentropy range fingerprints synchronously and deduplicates records without a string key per record. Catch-up over a 100,000-record window builds its snapshot about five times faster and completes five to ten times faster. Frames and the exported API are unchanged.

@@ -1,4 +1,4 @@
-import { splitRelayDiscoveryFilters } from './anonymous-relay-discovery.js';
+import { splitRelayDiscoveryFilters } from './discovery-scope.js';
 import { isPrivateRelayEvent } from './private-relay-publisher.js';
 import type { NostrEventPublisher, NostrEventReader, NostrEventSubscriber, NostrEventSubscription } from './event-bus.js';
 import type { RuntimeSource } from './runtime-types.js';

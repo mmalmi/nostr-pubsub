@@ -1,4 +1,4 @@
-import { discoveryScope } from './anonymous-relay-discovery.js';
+import { discoveryScope } from './discovery-scope.js';
 import { FipsNostrPubsubClient } from './fips-pubsub-client.js';
 import { FipsNostrPubsubEventSource } from './fips-pubsub-event-source.js';
 import type { FipsPubsubClientNode } from './fips-pubsub-client-types.js';
