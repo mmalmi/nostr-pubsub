@@ -21,9 +21,10 @@ from urllib.parse import urlsplit
 import urllib.error
 import urllib.request
 
-HELPER_SHA256 = "d60f75bc324e128b20b0bd1a1ba76b87c3161cbbb45cb656c79712bd9ee22ec4"
-# Preinstalled git-remote-htree 0.2.150, aarch64-apple-darwin. Archive pin:
-HELPER_ARCHIVE_SHA256 = "ea575ecfb06d5dc461010fd577a6d3a7397f0bd82dc64fdddf0261d0a11706ad"
+HELPER_SHA256 = "128ceb2b29e87c44186d26183bccaaba606a42ab314712a0144f3e69dced8615"
+# Preinstalled git-remote-htree 0.4.0, aarch64-apple-darwin, installed from the
+# crates.io archive pinned below. 0.2.150 cannot read trees written by 0.4.
+HELPER_ARCHIVE_SHA256 = "6c4f5a0feac5a320ea383af86849063d2ca890d0c318aa5dd9d38046c5b2ccf8"
 TOOLCHAIN = "1.99.0"
 
 
