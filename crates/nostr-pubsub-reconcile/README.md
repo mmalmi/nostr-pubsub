@@ -36,7 +36,7 @@ that records were transferred or saved. A receiver may decline history or pause
 when storage is full. Intentional local deletions need durable suppression records
 or an excluded history range so they do not become repair requests forever.
 
-The engine retains the MIT reference layout and upstream Rust storage types, with
+The engine retains the MIT reference layout and upstream Rust wire types, with
 correct tail fingerprints at frame boundaries. `tests/wire.rs` independently checks
 every emitted range; `tests/reconcile.rs` checks actual differences. The TypeScript
 suite exchanges real frames with the Rust `reconcile-stdio` fixture in both roles.
@@ -44,3 +44,11 @@ suite exchanges real frames with the Rust `reconcile-stdio` fixture in both role
 Version 0.1.1 uses patched `negentropy` 0.5.2 and also validates ID-list lengths
 before allocating in the adapted engine (RUSTSEC-2026-0365). The public session's
 existing whole-frame validation remains in place; the wire format is unchanged.
+
+Version 0.1.2 keeps running ID sums for the snapshot, so a range fingerprint is
+one subtraction and one hash instead of a pass over the range, and builds the
+snapshot by sorting rather than through an ordered map. A million-record
+snapshot measured about 3.5 times faster to build and a 100-difference sync
+about five times faster. Frames are byte-identical to 0.1.1. While reading
+records the session may briefly hold up to twice `max_records` before
+collapsing duplicates; the limit on the resulting snapshot is unchanged.

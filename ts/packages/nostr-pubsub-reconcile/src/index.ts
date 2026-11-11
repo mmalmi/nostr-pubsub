@@ -48,9 +48,9 @@ export class Reconciliation {
       const out = new Writer(); out.append([0x61]);
       const count = this.storage.items.length;
       if (options.fingerprintFirst && count > 0) {
-        out.bound(infinity); out.varint(1n); out.append(await this.storage.fingerprint(0, count));
+        out.bound(infinity); out.varint(1n); out.append(this.storage.fingerprint(0, count));
       } else {
-        await this.split(0, count, infinity, out);
+        this.split(0, count, infinity, out);
       }
       return out.finish();
     } finally { this.busy = false; }
@@ -92,8 +92,8 @@ export class Reconciliation {
         if (mode === 0n) skip = true;
         else if (mode === 1n) {
           const theirs = input.take(16);
-          const ours = await this.storage.fingerprint(lower, upper);
-          if (compareIds(theirs, ours)) { flushSkip(); await this.split(lower, upper, current, out); }
+          const ours = this.storage.fingerprint(lower, upper);
+          if (compareIds(theirs, ours)) { flushSkip(); this.split(lower, upper, current, out); }
           else skip = true;
         } else if (mode === 2n) {
           const count = input.varint();
@@ -124,7 +124,7 @@ export class Reconciliation {
         if (truncated || output.length + out.length > this.frameBytes - 200) {
           if (!truncated) { output.bound(out.length ? previous : current); output.varint(0n); }
           output.bound(infinity); output.varint(1n);
-          output.append(await this.storage.fingerprint(out.length ? lower : upper, this.storage.items.length));
+          output.append(this.storage.fingerprint(out.length ? lower : upper, this.storage.items.length));
           break;
         }
         output.append(out.bytes); output.timestamp = out.timestamp;
@@ -136,7 +136,7 @@ export class Reconciliation {
     } finally { this.busy = false; }
   }
 
-  private async split(lower: number, upper: number, bound: Bound, out: Writer): Promise<void> {
+  private split(lower: number, upper: number, bound: Bound, out: Writer): void {
     const count = upper - lower;
     if (count < 32) {
       out.bound(bound); out.varint(2n); out.varint(BigInt(count));
@@ -146,7 +146,7 @@ export class Reconciliation {
     let cursor = lower;
     for (let i = 0; i < 16; i++) {
       const size = Math.floor(count / 16) + (i < count % 16 ? 1 : 0);
-      const fingerprint = await this.storage.fingerprint(cursor, cursor + size);
+      const fingerprint = this.storage.fingerprint(cursor, cursor + size);
       cursor += size;
       let next = bound;
       if (cursor !== upper) {

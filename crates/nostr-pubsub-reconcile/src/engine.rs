@@ -37,7 +37,6 @@ const BUCKETS: usize = 16;
 const DOUBLE_BUCKETS: usize = BUCKETS * 2;
 
 /// Negentropy
-#[derive(Debug)]
 pub struct Negentropy<'a, T> {
     storage: Storage<'a, T>,
     frame_size_limit: usize,
@@ -46,14 +45,14 @@ pub struct Negentropy<'a, T> {
     last_timestamp_out: u64,
 }
 
-impl<'a, T> Negentropy<'a, T>
-where
-    T: NegentropyStorageBase,
-{
+impl<'a> Negentropy<'a, crate::storage::SummedStorage> {
     /// Create new [`Negentropy`] instance
     ///
     /// Frame size limit must be `equal to 0` or `greater than 4096`
-    pub fn new(storage: Storage<'a, T>, frame_size_limit: usize) -> Result<Self, Error> {
+    pub fn new(
+        storage: Storage<'a, crate::storage::SummedStorage>,
+        frame_size_limit: usize,
+    ) -> Result<Self, Error> {
         if frame_size_limit != 0 && frame_size_limit < 4096 {
             return Err(Error::FrameSizeLimitTooSmall);
         }
@@ -70,7 +69,10 @@ where
     /// Create new [`Negentropy`] instance from owned storage
     ///
     /// Frame size limit must be `equal to 0` or `greater than 4096`
-    pub fn owned(storage: T, frame_size_limit: usize) -> Result<Self, Error> {
+    pub fn owned(
+        storage: crate::storage::SummedStorage,
+        frame_size_limit: usize,
+    ) -> Result<Self, Error> {
         Self::new(Storage::Owned(storage), frame_size_limit)
     }
 
@@ -171,7 +173,7 @@ where
                 Mode::Fingerprint => {
                     let their_fingerprint: [u8; FINGERPRINT_SIZE] = get_byte_array(&mut query)?;
                     let our_fingerprint: [u8; FINGERPRINT_SIZE] =
-                        self.storage.fingerprint(lower, upper)?.to_bytes();
+                        self.storage.range_fingerprint(lower, upper)?;
 
                     if their_fingerprint != our_fingerprint {
                         // do_skip
@@ -278,7 +280,8 @@ where
                     full_output.extend(self.encode_bound(&boundary));
                     full_output.extend(self.encode_mode(Mode::Skip));
                 }
-                let remaining_fingerprint = self.storage.fingerprint(remaining, storage_size)?;
+                let remaining_fingerprint =
+                    self.storage.range_fingerprint(remaining, storage_size)?;
 
                 full_output.extend(self.encode_bound(&Bound::with_timestamp(MAX_U64)));
                 full_output.extend(self.encode_mode(Mode::Fingerprint));
@@ -319,7 +322,7 @@ where
 
             for i in 0..BUCKETS {
                 let bucket_size: usize = items_per_bucket + usize::from(i < buckets_with_extra);
-                let our_fingerprint = self.storage.fingerprint(curr, curr + bucket_size)?;
+                let our_fingerprint = self.storage.range_fingerprint(curr, curr + bucket_size)?;
                 curr += bucket_size;
 
                 let next_bound = if curr == upper {

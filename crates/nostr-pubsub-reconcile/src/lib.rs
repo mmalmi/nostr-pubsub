@@ -2,11 +2,10 @@
 //! storage, retention policy and record transfer. A completed round compares only
 //! its immutable filtered snapshot; it does not acknowledge durable delivery.
 
-use std::collections::BTreeMap;
-
 use engine::Negentropy;
-use negentropy::{Id, NegentropyStorageVector};
 mod codec;
+mod storage;
+use storage::SummedStorage;
 mod engine;
 
 mod validation;
@@ -68,7 +67,7 @@ pub struct Step {
 /// An immutable snapshot and bounded Negentropy v1 conversation. No filesystem,
 /// network, clock, runtime or OS APIs: the browser peer uses a wire-compatible TypeScript implementation.
 pub struct Session {
-    engine: Negentropy<'static, NegentropyStorageVector>,
+    engine: Negentropy<'static, SummedStorage>,
     limits: Limits,
     rounds: usize,
     finished: bool,
@@ -90,27 +89,31 @@ impl Session {
         {
             return Err("invalid reconciliation limits".into());
         }
-        let mut unique = BTreeMap::new();
-        for record in records {
-            if !filter.contains(record.timestamp) {
-                continue;
-            }
-            if let Some(previous) = unique.insert(record.id, record.timestamp)
-                && previous != record.timestamp
-            {
+        // Sort by ID so duplicates and conflicting timestamps become adjacent.
+        // Compact at twice the limit to keep memory bounded on untrusted input.
+        let mut unique: Vec<([u8; 32], u64)> = Vec::new();
+        let compact = |unique: &mut Vec<([u8; 32], u64)>| -> Result<()> {
+            unique.sort_unstable();
+            unique.dedup();
+            if unique.windows(2).any(|pair| pair[0].0 == pair[1].0) {
                 return Err("one record ID has conflicting timestamps".into());
             }
             if unique.len() > limits.max_records {
                 return Err("reconciliation window exceeds record limit".into());
             }
+            Ok(())
+        };
+        for record in records {
+            if !filter.contains(record.timestamp) {
+                continue;
+            }
+            unique.push((record.id, record.timestamp));
+            if unique.len() >= limits.max_records.saturating_mul(2).max(1024) {
+                compact(&mut unique)?;
+            }
         }
-        let mut storage = NegentropyStorageVector::with_capacity(unique.len());
-        for (id, timestamp) in unique {
-            storage
-                .insert(timestamp, Id::from_byte_array(id))
-                .map_err(|e| e.to_string())?;
-        }
-        storage.seal().map_err(|e| e.to_string())?;
+        compact(&mut unique)?;
+        let storage = SummedStorage::new(unique);
         let engine =
             Negentropy::owned(storage, limits.max_frame_bytes).map_err(|e| e.to_string())?;
         Ok(Self {
