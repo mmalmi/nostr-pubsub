@@ -3,6 +3,13 @@ import { type NostrEvent } from './types.js';
 import type { NostrRuntimeOptions, RuntimeEventStore, RuntimeSource } from './runtime-types.js';
 /** Classify before validation so malformed private traffic cannot fall back to public publication. */
 export declare function isPrivateRelayEvent(event: Pick<NostrEvent, 'kind'>): boolean;
+/**
+ * Shape check for private sends, including queued retries. Invite responses
+ * (1059) and wakes (21111) carry exactly one `p`. A kind 1060 message may carry
+ * one `p` or none: without it, the envelope needs its `header` tag, and the
+ * recipient finds it through the sender key it already follows. Whether a
+ * message should name its recipient is decided by the protocol library, not here.
+ */
 export declare function privateEnvelopeAllowed(event: NostrEvent): boolean;
 /**
  * Keep retry queues in their intended connection lane, retaining quarantined

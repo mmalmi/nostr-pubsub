@@ -1,4 +1,4 @@
-import { discoveryScope, isRelayDiscoveryFilter } from './anonymous-relay-discovery.js';
+import { discoveryScope, isRelayDiscoveryFilter } from './discovery-scope.js';
 import { isPrivateRelayEvent, privateEnvelopeAllowed } from './private-relay-publisher.js';
 /** Guards every final serialized send, including retained cache and WANT replay. */
 export class FipsPrivacyRolePolicy {

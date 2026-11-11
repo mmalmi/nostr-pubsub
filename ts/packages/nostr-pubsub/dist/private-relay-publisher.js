@@ -6,13 +6,24 @@ import { verifyNostrEvent } from './types.js';
 export function isPrivateRelayEvent(event) {
     return event.kind === 1059 || event.kind === 1060 || event.kind === 21111;
 }
+/**
+ * Shape check for private sends, including queued retries. Invite responses
+ * (1059) and wakes (21111) carry exactly one `p`. A kind 1060 message may carry
+ * one `p` or none: without it, the envelope needs its `header` tag, and the
+ * recipient finds it through the sender key it already follows. Whether a
+ * message should name its recipient is decided by the protocol library, not here.
+ */
 export function privateEnvelopeAllowed(event) {
     if (!isPrivateRelayEvent(event) || !Array.isArray(event.tags)
         || !event.tags.every(tag => Array.isArray(tag) && tag.every(part => typeof part === 'string')))
         return false;
     const recipients = event.tags.filter(tag => tag[0] === 'p');
+    const headers = event.tags.filter(tag => tag[0] === 'header');
     const proofs = event.tags.filter(tag => tag[0] === 'owner-proof');
-    return recipients.length === 1 && recipients[0]?.length === 2 && /^[0-9a-f]{64}$/.test(recipients[0]?.[1] ?? '')
+    const addressed = recipients.length === 1 && recipients[0]?.length === 2 && /^[0-9a-f]{64}$/.test(recipients[0]?.[1] ?? '');
+    const unaddressedMessage = event.kind === 1060 && recipients.length === 0
+        && headers.length === 1 && headers[0]?.length === 2 && !!headers[0]?.[1];
+    return (addressed || unaddressedMessage)
         && proofs.length <= 1
         && (event.kind !== 1060 || event.tags.filter(tag => tag[0] === 'v').length === 1
             && event.tags.some(tag => tag[0] === 'v' && tag[1] === '2'))
@@ -82,7 +93,7 @@ export function createPrivateRelayPublisher(options = {}) {
         if (stopped)
             return Promise.reject(new Error('Private publisher is closed'));
         if (!privateEnvelopeAllowed(event))
-            return Promise.reject(new Error('Private publisher requires a recipient-specific encrypted event'));
+            return Promise.reject(new Error('Private publisher requires a private encrypted envelope'));
         try {
             event = verifyNostrEvent(event);
         }

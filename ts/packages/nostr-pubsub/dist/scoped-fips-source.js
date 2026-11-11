@@ -1,4 +1,4 @@
-import { splitRelayDiscoveryFilters } from './anonymous-relay-discovery.js';
+import { splitRelayDiscoveryFilters } from './discovery-scope.js';
 import { isPrivateRelayEvent } from './private-relay-publisher.js';
 /** Keep the live receiver, anonymous private sending and public lookups separate.
  * Public gossip remains queued; the publisher's event-specific remote receipt
