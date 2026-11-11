@@ -186,6 +186,7 @@ export {
   type NostrRelayTransportHandlers,
   type NostrRelayTransportSubscribeOptions,
 } from './relay-event-source.js';
+export { RateLimitAwarePool, RelayRateLimitError, parseRelayRateLimit } from './relay-rate-limit.js';
 export {
   createSimplePoolNostrRelayVerificationBoundary,
   SimplePoolNostrRelayTransport,
