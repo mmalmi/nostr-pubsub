@@ -1,4 +1,4 @@
-import { AbstractSimplePool } from 'nostr-tools/abstract-pool';
+import { RateLimitAwarePool, withPublishRateLimit } from './relay-rate-limit.js';
 import { verifyEvent } from 'nostr-tools/pure';
 import { matchFilter, matchFilters } from 'nostr-tools/filter';
 import { createSimplePoolNostrRelayVerificationBoundary } from './simple-pool-relay-transport.js';
@@ -26,7 +26,7 @@ export class RuntimeRelays {
         this.relays = normalizeRelays(options.relays ?? []);
         this.maxFilters = positive(options.maxFiltersPerBatch, 20);
         this.maxBytes = positive(options.maxFilterBytesPerBatch, 32768);
-        this.pool = new AbstractSimplePool({
+        this.pool = new RateLimitAwarePool({
             maxWaitForConnection: options.historyTimeoutMs ?? 3000,
             websocketImplementation: options.websocketImplementation,
             verifyEvent: (event) => this.boundary.verifyEvent(event),
@@ -92,14 +92,15 @@ export class RuntimeRelays {
         const timeout = this.options.publishTimeoutMs ?? 5000;
         const relay = await this.pool.ensureRelay(url, { connectionTimeout: timeout });
         relay.publishTimeout = timeout;
+        const publish = () => withPublishRateLimit(this.pool, url, event.id, () => relay.publish(event));
         try {
-            await relay.publish(event);
+            await publish();
         }
         catch (error) {
             if (!errorText(error).startsWith('auth-required:') || !this.options.signAuthEvent)
                 throw error;
             await relay.auth(async (template) => verifyNostrEvent(await this.options.signAuthEvent(url, template)));
-            await relay.publish(event);
+            await publish();
         }
     }
     close() {

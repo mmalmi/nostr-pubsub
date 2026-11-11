@@ -1,4 +1,4 @@
-import { type SubCloser } from 'nostr-tools/abstract-pool';
+import type { SubCloser } from 'nostr-tools/abstract-pool';
 import { type NostrEvent, type NostrFilter } from './types.js';
 import type { NostrRuntimeOptions, RuntimeRelayStats } from './runtime-types.js';
 type Entry = {

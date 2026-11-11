@@ -85,6 +85,8 @@ export interface RuntimePublishResult {
         pending?: boolean;
         queued?: boolean;
         error?: string;
+        rateLimited?: true;
+        retryAfterMs?: number;
     }>;
 }
 export interface RuntimeRelayStats {
