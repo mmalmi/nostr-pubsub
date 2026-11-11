@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.28 - 2026-11-11
+
+- Use `nostr-pubsub-reconcile` 0.1.2, which hashes Negentropy range fingerprints synchronously and deduplicates records without a string key per record. Catch-up over a 100,000-record window builds its snapshot about five times faster and completes five to ten times faster. Frames and the exported API are unchanged.
+
 ## 0.5.27 - 2026-11-10
 
 - Restore runtime behavior that the published 0.5.24 package contained but this repository's source did not, and that 0.5.25 and 0.5.26 therefore dropped. `publish` again answers once an event is durably queued while delivery, retries and shutdown continue behind it; pass `queue: false` or `requireAck` to wait for the remote receipt itself. `isolated` subscriptions again deliver per source through their own relay requests, and `observeConnections` again reports peers with an established FIPS service stream.
