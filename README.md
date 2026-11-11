@@ -167,8 +167,12 @@ Iris browser apps can later consume it with a local dependency such as:
 For relay-only browser bundles, import these APIs from
 `nostr-pubsub/private-relays` to avoid loading optional FIPS adapters.
 
-For private messaging, use `createPrivateRelayPublisher` for recipient-specific
-encrypted kinds 1059, 1060 (v2), and 21111. Each event and retry opens independent
+For private messaging, use `createPrivateRelayPublisher` for encrypted kinds
+1059, 1060 (v2), and 21111. Invite responses (1059) and wakes (21111) carry
+exactly one `p`. A kind 1060 message may carry one `p` or none; without it the
+message needs its `header` tag, and its recipient finds it by subscribing to the
+sender key. Whether a message names its recipient is the protocol library's
+choice, not this transport's. Each event and retry opens independent
 relay connections with a fresh anonymous NIP-42 key. The publisher exposes no
 query or subscription API, and additional sources retain only their publication
 capability. Supply a separate durable pending store; the caller owns its lifetime.

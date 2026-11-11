@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Accept kind 1060 message envelopes that name no recipient.
+  `FipsAnonymousPublisher` used to require exactly one `p` tag on kind 1060; it
+  now also sends a message with no `p` tag when it has exactly one `["v","2"]`
+  and one non-empty `header` tag, the shape `nostr-double-ratchet` 0.0.177
+  produces. Messages with one `p` are sent exactly as before. Kinds 1059 and
+  21111 still need exactly one `p`.
+- The refusal text is now "anonymous publisher requires a private encrypted
+  envelope" instead of "…one recipient-bound private envelope".
+- Matching, subscriptions, forwarding and serving are unchanged, as are wire
+  frames. A receiver finds a message without a `p` through an `authors` filter
+  on the sender key.
+
 ## 0.5.51
 
 - Use FIPS core 0.4.119 and TCP endpoint 0.2.54 so receiver reports from

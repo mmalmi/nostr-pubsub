@@ -374,6 +374,23 @@ or loss. Use the same public feed for comparison across peers. Browsing history
 and arbitrary local caches are ineligible for peer reconciliation.
 
 
+## Private envelopes
+
+`createPrivateRelayPublisher`, its pending store lane and the anonymous FIPS
+publisher send three kinds. Invite responses (1059) and wakes (21111) carry
+exactly one `p`. A kind 1060 message carries one `["v","2"]` and either one `p`
+or none. Without a `p` it needs exactly one non-empty `header` tag, and its
+recipient finds it with an `authors` filter on the sender key instead of a `#p`
+filter. Whether a message names its recipient is decided by the protocol
+library; this package sends both forms and matches, forwards and serves events
+by whatever filters receivers subscribe with.
+
+A kind 1060 with neither a `p` nor a `header` stays quarantined in the private
+pending lane, as before. A message without a `p` has the same shape as shared
+group ciphertext, so this package cannot tell the two apart by tags; hosts that
+must keep shared group ciphertext off relays have to do so where it is created,
+as `nostr-double-ratchet` does by event id.
+
 ## Private publication receipts
 
 `createPrivateRelayPublisher` coalesces concurrent sends only when the event and

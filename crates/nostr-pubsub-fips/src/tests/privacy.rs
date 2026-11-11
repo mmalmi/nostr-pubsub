@@ -2,17 +2,99 @@ use super::routed::{udp_endpoint, udp_endpoint_with_role};
 use super::*;
 use crate::privacy_roles::ClientRole;
 
-fn envelope(recipient: &Keys, content: &str) -> VerifiedEvent {
+fn tagged_envelope(kind: u16, sender: &Keys, tags: &[&[&str]], content: &str) -> VerifiedEvent {
     VerifiedEvent::try_from(
-        EventBuilder::new(Kind::Custom(1060), content)
-            .tags([
-                Tag::public_key(recipient.public_key()),
-                Tag::parse(["v", "2"]).unwrap(),
-            ])
-            .sign_with_keys(&Keys::generate())
+        EventBuilder::new(Kind::Custom(kind), content)
+            .tags(
+                tags.iter()
+                    .map(|tag| Tag::parse(tag.iter().copied()).unwrap()),
+            )
+            .sign_with_keys(sender)
             .unwrap(),
     )
     .unwrap()
+}
+
+/// The current message shape: signed by a ratchet key and naming no recipient.
+fn envelope(sender: &Keys, content: &str) -> VerifiedEvent {
+    tagged_envelope(
+        1060,
+        sender,
+        &[&["v", "2"], &["header", "encrypted header"]],
+        content,
+    )
+}
+
+/// The same message naming its recipient device in a `p` tag.
+fn legacy_envelope(recipient: &Keys, content: &str) -> VerifiedEvent {
+    let recipient = recipient.public_key().to_hex();
+    tagged_envelope(
+        1060,
+        &Keys::generate(),
+        &[
+            &["p", &recipient],
+            &["v", "2"],
+            &["header", "encrypted header"],
+        ],
+        content,
+    )
+}
+
+#[test]
+fn anonymous_publisher_sends_message_envelopes_with_or_without_a_recipient() {
+    use crate::anonymous_publication::validate_envelope;
+    let sender = Keys::generate();
+    let device = Keys::generate().public_key().to_hex();
+    let other = Keys::generate().public_key().to_hex();
+    let version: &[&str] = &["v", "2"];
+    let header: &[&str] = &["header", "encrypted header"];
+    let recipient: &[&str] = &["p", &device];
+
+    assert!(validate_envelope(&envelope(&sender, "names no recipient")).is_ok());
+    assert!(validate_envelope(&legacy_envelope(&Keys::generate(), "names one")).is_ok());
+    // Unchanged: a recipient-tagged message never needed a header here.
+    let tagged_without_header = tagged_envelope(1060, &sender, &[recipient, version], "tagged");
+    assert!(validate_envelope(&tagged_without_header).is_ok());
+    for (name, tags) in [
+        ("no tags", vec![]),
+        ("bare shared ciphertext", vec![version]),
+        ("empty header", vec![version, &["header", ""]]),
+        ("repeated header", vec![version, header, header]),
+        ("missing version", vec![header]),
+        ("old version", vec![&["v", "1"] as &[&str], header]),
+        ("repeated version", vec![version, version, header]),
+        ("tagged, missing version", vec![recipient, header]),
+        (
+            "two recipients",
+            vec![recipient, &["p", &other], version, header],
+        ),
+        (
+            "malformed recipient",
+            vec![&["p", "device"], version, header],
+        ),
+    ] {
+        assert!(
+            validate_envelope(&tagged_envelope(1060, &sender, &tags, "malformed")).is_err(),
+            "{name}"
+        );
+    }
+
+    // Invite responses and wakes keep their single public addressing key.
+    for kind in [1059, 21111] {
+        assert!(validate_envelope(&tagged_envelope(kind, &sender, &[recipient], "one")).is_ok());
+        for (name, tags) in [
+            ("unaddressed", vec![]),
+            ("unaddressed with header", vec![version, header]),
+            ("two recipients", vec![recipient, &["p", &other] as &[&str]]),
+            ("malformed recipient", vec![&["p", "device"] as &[&str]]),
+        ] {
+            assert!(
+                validate_envelope(&tagged_envelope(kind, &sender, &tags, "bad")).is_err(),
+                "{kind} {name}"
+            );
+        }
+    }
+    assert!(validate_envelope(&super::routed::signed_note("public")).is_err());
 }
 
 #[test]
@@ -70,11 +152,13 @@ fn privacy_roles_reject_cross_subject_filters_and_private_export() {
             .validate_filters(&[Filter::new().kind(Kind::TextNote).author(a)])
             .is_ok()
     );
-    assert!(
-        receiver
-            .validate_publication(&envelope(&Keys::generate(), "private"))
-            .is_err()
-    );
+    for private in [
+        envelope(&Keys::generate(), "private"),
+        legacy_envelope(&Keys::generate(), "private"),
+    ] {
+        assert!(receiver.validate_publication(&private).is_err());
+        assert!(ClientRole::Full.validate_publication(&private).is_ok());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -113,12 +197,12 @@ async fn anonymous_private_copies_and_retry_use_distinct_sources_with_real_provi
     )
     .await
     .unwrap();
-    let recipient = Keys::generate();
+    let sender = Keys::generate();
     let mut incoming = reader
         .subscribe(vec![
             Filter::new()
                 .kind(Kind::Custom(1060))
-                .pubkey(recipient.public_key()),
+                .author(sender.public_key()),
         ])
         .await
         .unwrap();
@@ -130,7 +214,8 @@ async fn anonymous_private_copies_and_retry_use_distinct_sources_with_real_provi
     .await
     .unwrap();
     let mut sources = HashSet::new();
-    let event = envelope(&recipient, "peer copy and retry");
+    let event = envelope(&sender, "peer copy and retry");
+    assert!(event.as_event().tags.public_keys().next().is_none());
     for (secret, event) in [
         ([134; 32], envelope(&Keys::generate(), "own sibling copy")),
         ([135; 32], event.clone()),
@@ -212,6 +297,146 @@ async fn anonymous_private_copies_and_retry_use_distinct_sources_with_real_provi
     reader.shutdown().await;
     provider.shutdown().await;
     for endpoint in [reader_endpoint, provider_endpoint, transit] {
+        endpoint.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+async fn provider_forwards_and_serves_message_envelopes_with_or_without_a_recipient() {
+    let provider_endpoint = udp_endpoint([151; 32], Vec::new()).await;
+    let address = provider_endpoint.bound_udp_listen_addrs().await.unwrap()[0].to_string();
+    let provider_peer = || vec![PeerConfig::new(provider_endpoint.npub(), "udp", &address)];
+    let provider = FipsPubsubClient::start(
+        provider_endpoint.clone(),
+        FipsPubsubClientOptions {
+            accept_anonymous_publications: true,
+            max_inbound_routed_peers: 8,
+            max_connected_peers: 10,
+            fanout: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let reader_endpoint = udp_endpoint([152; 32], provider_peer()).await;
+    let reader = FipsPubsubClient::start_receive_only(
+        reader_endpoint.clone(),
+        FipsPubsubClientOptions {
+            routed_peers: vec![provider_endpoint.npub().into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let recipient = Keys::generate();
+    let sender = Keys::generate();
+    let mut incoming = reader
+        .subscribe(vec![
+            Filter::new()
+                .kind(Kind::Custom(1060))
+                .pubkey(recipient.public_key()),
+            Filter::new()
+                .kind(Kind::Custom(1060))
+                .author(sender.public_key()),
+        ])
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(15), async {
+        while provider.peer_subscription_count().unwrap() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let legacy = legacy_envelope(&recipient, "names its recipient");
+    let current = envelope(&sender, "names no recipient");
+    for (secret, event) in [([153; 32], &legacy), ([154; 32], &current)] {
+        let endpoint = udp_endpoint(secret, provider_peer()).await;
+        let publisher = FipsAnonymousPublisher::start(
+            endpoint.clone(),
+            FipsPubsubClientOptions {
+                routed_peers: vec![provider_endpoint.npub().into()],
+                max_connected_peers: 1,
+                fanout: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let receipt = publisher
+            .publish_once(event.clone(), Duration::from_secs(15))
+            .await
+            .unwrap();
+        assert_eq!(receipt.event_id, event.as_event().id);
+        endpoint.shutdown().await.unwrap();
+    }
+    let mut delivered = HashSet::new();
+    for _ in 0..2 {
+        delivered.insert(
+            timeout(Duration::from_secs(5), incoming.recv())
+                .await
+                .expect("provider must forward both envelope shapes")
+                .unwrap()
+                .event
+                .as_event()
+                .id,
+        );
+    }
+    assert_eq!(
+        delivered,
+        HashSet::from([legacy.as_event().id, current.as_event().id])
+    );
+
+    // A receiver that connects afterwards is served from the provider's store
+    // by the same filters: the sender key finds the message without a
+    // recipient, the recipient key finds the tagged one.
+    let late_endpoint = udp_endpoint([155; 32], provider_peer()).await;
+    let late = FipsPubsubClient::start_receive_only(
+        late_endpoint.clone(),
+        FipsPubsubClientOptions {
+            routed_peers: vec![provider_endpoint.npub().into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    for (filter, expected) in [
+        (
+            Filter::new()
+                .kind(Kind::Custom(1060))
+                .author(sender.public_key()),
+            &current,
+        ),
+        (
+            Filter::new()
+                .kind(Kind::Custom(1060))
+                .pubkey(recipient.public_key()),
+            &legacy,
+        ),
+    ] {
+        let mut stored = late.subscribe(vec![filter]).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(10), stored.recv())
+                .await
+                .expect("provider must serve stored envelopes to a late subscriber")
+                .unwrap()
+                .event
+                .as_event()
+                .id,
+            expected.as_event().id
+        );
+        assert!(
+            timeout(Duration::from_millis(200), stored.recv())
+                .await
+                .is_err(),
+            "each filter selects only its own envelope"
+        );
+    }
+    late.shutdown().await;
+    reader.shutdown().await;
+    provider.shutdown().await;
+    for endpoint in [late_endpoint, reader_endpoint, provider_endpoint] {
         endpoint.shutdown().await.unwrap();
     }
 }

@@ -15,7 +15,10 @@ const owner = generateSecretKey();
 const ownerKey = getPublicKey(owner);
 const recipient = getPublicKey(generateSecretKey());
 const ws = WebSocket as unknown as typeof globalThis.WebSocket;
-function event(kind = 1060, tags = [['p', recipient], ['v', '2']]): NostrEvent {
+const header = ['header', 'encrypted header'];
+const refused = 'requires a private encrypted envelope';
+/** Default: a ratchet message that names no recipient. */
+function event(kind = 1060, tags = [['v', '2'], header]): NostrEvent {
   return finalizeEvent({ kind, tags, created_at: Math.floor(Date.now() / 1000), content: 'ciphertext' }, generateSecretKey());
 }
 async function relay(): Promise<RuntimeRelayFixture> {
@@ -145,10 +148,35 @@ describe('private publication connection boundary', () => {
     expect(server.events[0]?.tags).toContainEqual(['owner-proof', encrypted]);
     expect(JSON.stringify(frames(server))).not.toContain(ownerKey);
     for (const [kind, tags] of [
+      [1060, [['v', '2'], header, ['owner-proof', encrypted]]],
       [1060, [['p', recipient], ['v', '2'], ['owner-proof', encrypted]]],
       [1059, [['p', recipient], ['owner-proof', JSON.stringify(proof)]]],
       [1059, [['p', recipient], ['owner-proof', encrypted], ['owner-proof', encrypted]]],
-    ] as Array<[number, string[][]]>) await expect(sender.publish(event(kind, tags))).rejects.toThrow('recipient-specific');
+    ] as Array<[number, string[][]]>) await expect(sender.publish(event(kind, tags))).rejects.toThrow(refused);
+  });
+
+  it('publishes ratchet messages with or without a recipient tag', async () => {
+    const server = await relay(); const store = new MemoryEventStore(); const sender = await publisher(server, store);
+    const sent = [event(), event(1060, [['p', recipient], ['v', '2'], header]), event(1060, [['p', recipient], ['v', '2']])];
+    expect(sent[0]!.tags).toEqual([['v', '2'], header]);
+    for (const message of sent) expect((await sender.publish(message, { requireAck: true })).accepted).toBe(true);
+    for (const tags of [[], [['v', '2']], [header], [['v', '1'], header], [['v', '2'], ['v', '2'], header],
+      [['v', '2'], ['header', '']], [['v', '2'], header, header], [['v', '2'], ['header', 'a', 'b']], [['v', '2'], header, ['e', ownerKey]],
+      [['p', recipient], header], [['p', recipient], ['p', ownerKey], ['v', '2'], header], [['v', '2'], header, ['p', 'device']],
+    ]) await expect(sender.publish(event(1060, tags))).rejects.toThrow(refused);
+    expect(await store.listPending()).toEqual([]);
+    expect(server.events.map(value => value.id).sort()).toEqual(sent.map(value => value.id).sort());
+  });
+
+  it('keeps invite responses and wakes addressed to exactly one public key', async () => {
+    const server = await relay(); const sender = await publisher(server);
+    for (const kind of [1059, 21111]) {
+      expect((await sender.publish(event(kind, [['p', recipient]]), { requireAck: true })).accepted).toBe(true);
+      for (const tags of [[], [['v', '2'], header], [['p', recipient], ['p', ownerKey]], [['p', 'device']], [['p', recipient, ownerKey]]]) {
+        await expect(sender.publish(event(kind, tags))).rejects.toThrow(refused);
+      }
+    }
+    expect(server.events.map(value => value.kind)).toEqual([1059, 21111]);
   });
 
   it('keeps invite responses, ratchet messages and wakes off account receive/AUTH sockets', async () => {
@@ -219,10 +247,11 @@ describe('private publication connection boundary', () => {
     const source = { id: 'fips', query, subscribe, publish };
     const sender = createPrivateRelayPublisher({ store, sources: [source], signAuthEvent: identitySigner } as Parameters<typeof createPrivateRelayPublisher>[0]);
     cleanup.push(() => sender.close());
-    for (const invalid of [event(1), event(30078), event(37368), event(1060, []),
+    for (const invalid of [event(1), event(30078), event(37368), event(1060, []), event(1060, [['v', '2']]),
       event(1060, [['p', recipient], ['p', ownerKey]]), event(1060, [['p', recipient], ['e', ownerKey]]),
+      event(1060, [['v', '2'], header, ['e', ownerKey]]),
       event(1060, [['p', recipient]]), event(1060, [['p', recipient, ownerKey], ['v', '2']])]) {
-      await expect(sender.publish(invalid)).rejects.toThrow('recipient-specific');
+      await expect(sender.publish(invalid)).rejects.toThrow(refused);
     }
     expect(await store.listPending()).toEqual([]); expect(await store.query([{}])).toEqual([]);
     expect(publish).not.toHaveBeenCalled();
@@ -240,7 +269,7 @@ describe('private publication connection boundary', () => {
     const invalid = { ...event(), content: 'modified ciphertext' };
     await expect(sender.publish(invalid)).rejects.toThrow();
     expect(await store.listPending()).toEqual([]);
-    const expired = event(1060, [['p', recipient], ['v', '2'], ['expiration', '1']]);
+    const expired = event(1060, [['v', '2'], header, ['expiration', '1']]);
     expect((await sender.publish(expired)).queued).toBe(false);
     expect(await store.listPending()).toEqual([]);
   });
@@ -248,18 +277,21 @@ describe('private publication connection boundary', () => {
   it('quarantines old private and group records before receiver retries without deleting them', async () => {
     const server = await relay(); const store = new MemoryEventStore();
     const privateEvent = event(); const bareGroup = event(1060, [['v', '2']]);
+    // Queued by an older version with a recipient tag: still sent from the private lane.
+    const recipientTagged = event(1060, [['p', recipient], ['v', '2'], header]);
     const roster = event(37368, [['type', 'group_roster'], ['member', recipient]]);
     const publicEvent = event(1, []);
-    for (const value of [privateEvent, bareGroup, roster, publicEvent]) await store.putPending({ event: value, attempts: 0, updatedAt: 0 });
+    const queued = [privateEvent, bareGroup, recipientTagged, roster, publicEvent];
+    for (const value of queued) await store.putPending({ event: value, attempts: 0, updatedAt: 0 });
     const receiver = new NostrRuntime({ store: publicationLaneStore(store, 'public'), relays: [await server.url()], websocketImplementation: ws,
       signAuthEvent: async (_relay, template) => finalizeEvent(template, owner) });
     cleanup.push(() => receiver.close()); await receiver.retryPending();
     expect(server.events.map(value => value.id)).toEqual([publicEvent.id]);
-    expect((await store.listPending()).map(row => row.event.id).sort()).toEqual([privateEvent.id, bareGroup.id, roster.id].sort());
+    expect((await store.listPending()).map(row => row.event.id).sort()).toEqual([privateEvent.id, bareGroup.id, recipientTagged.id, roster.id].sort());
     const privateStore = new MemoryEventStore();
-    for (const value of [privateEvent, bareGroup, roster, publicEvent]) await privateStore.putPending({ event: value, attempts: 0, updatedAt: 0 });
+    for (const value of queued) await privateStore.putPending({ event: value, attempts: 0, updatedAt: 0 });
     const sender = await publisher(server, privateStore); await sender.retryPending();
-    expect(server.events.map(value => value.id)).toEqual([publicEvent.id, privateEvent.id]);
+    expect(server.events.map(value => value.id).sort()).toEqual([publicEvent.id, privateEvent.id, recipientTagged.id].sort());
     expect((await privateStore.listPending()).map(row => row.event.id).sort()).toEqual([bareGroup.id, roster.id, publicEvent.id].sort());
   });
 });

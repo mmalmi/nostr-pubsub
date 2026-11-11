@@ -166,7 +166,11 @@ endpoint.
 
 Use `FipsAnonymousPublisher::start` with a fresh random endpoint and explicit
 public provider identities, then consume it with `publish_once(event, timeout)`.
-Each event, recipient copy and retry needs a different endpoint. Success is an
+Each event, recipient copy and retry needs a different endpoint. Kinds 1059 and
+21111 carry exactly one `p`. A kind 1060 message carries one `["v","2"]` and
+either one `p` or, without a recipient, one non-empty `header` tag; its recipient
+then finds it with an `authors` filter on the sender key. Whether a message
+names its recipient is the protocol library's choice. Success is an
 exact-event `OK` from an explicitly selected provider, never a local cache report.
 An older or unavailable provider leaves application-owned durable queues pending.
 The caller owns endpoint shutdown. Network addresses and timing remain observable.

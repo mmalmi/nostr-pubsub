@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Accept kind 1060 message envelopes that name no recipient. `createPrivateRelayPublisher`, the private pending lane and the anonymous FIPS publisher used to require exactly one `p` tag on kind 1060; they now also send a message with no `p` tag when it has exactly one `["v","2"]` and one non-empty `header` tag, the shape `nostr-double-ratchet` 0.0.184 produces. Messages with one `p` are sent exactly as before, including ones already queued. Kinds 1059 and 21111 are unchanged: exactly one `p`.
+- The refusal text is now "Private publisher requires a private encrypted envelope" instead of "…a recipient-specific encrypted event".
+- Matching, subscriptions, forwarding and serving are unchanged. A receiver finds a message without a `p` through an `authors` filter on the sender key; `#p` filters keep working for messages that carry the tag.
+- A message without a `p` has the same shape as shared group ciphertext, so the private lane no longer quarantines shared group ciphertext that carries a `header`. Header-less kind 1060 records are still quarantined; hosts keep shared group ciphertext out of the queue themselves, as `nostr-double-ratchet` does by event id.
 - Remove `createAnonymousRelayDiscovery` and its `AnonymousRelayDiscovery` types. Profile, relay-list, device and invite lookups go through the ordinary runtime, so an author batch uses one connection per relay instead of one per author. Replace `discovery.query`/`discovery.subscribe` with the account runtime's `query`/`subscribe`. `splitRelayDiscoveryFilters` and `isRelayDiscoveryFilter` are unchanged and still scope FIPS endpoints.
 - Add `rankRelays`, `relayListEntries` and `normalizeRelayUrl` for ranking the relays that followed authors announce in NIP-65 lists, by popularity or by coverage, above a minimum number of announcing authors. The helpers are pure and add no dependency; nothing connects to a suggested relay unless the application passes it on.
 

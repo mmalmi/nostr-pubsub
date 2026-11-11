@@ -6,7 +6,7 @@ import { createScopedFipsSource } from '../src/scoped-fips-source.js';
 import type { PublishReport } from '../src/event-bus.js';
 
 const event = () => finalizeEvent({ kind: 1060, created_at: 1_700_000_000,
-  tags: [['p', 'a'.repeat(64)], ['v', '2']], content: 'encrypted fixture' }, generateSecretKey());
+  tags: [['v', '2'], ['header', 'encrypted header']], content: 'encrypted fixture' }, generateSecretKey());
 
 it('keeps an event pending until a queued source provides its actual remote receipt', async () => {
   const store = new MemoryEventStore();

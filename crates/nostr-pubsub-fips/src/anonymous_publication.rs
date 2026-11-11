@@ -101,31 +101,42 @@ impl FipsAnonymousPublisher {
     }
 }
 
-fn validate_envelope(event: &VerifiedEvent) -> Result<()> {
+/// Shape check for what this publisher sends. Invite responses (1059) and
+/// wakes (21111) carry exactly one `p`. A kind 1060 message may carry one `p`
+/// or none: without it, the envelope needs its `header` tag, and the recipient
+/// finds it through the sender key it already follows. Whether a message
+/// should name its recipient is decided by the protocol library, not here.
+pub(super) fn validate_envelope(event: &VerifiedEvent) -> Result<()> {
     let event = event.as_event();
+    let kind = event.kind.as_u16();
     let tags = event
         .tags
         .iter()
         .map(nostr::Tag::as_slice)
         .collect::<Vec<_>>();
-    let recipients = tags
-        .iter()
-        .filter(|tag| tag.first().is_some_and(|v| v == "p"))
-        .collect::<Vec<_>>();
+    let named = |name: &str| {
+        tags.iter()
+            .filter(|tag| tag.first().is_some_and(|v| v == name))
+            .collect::<Vec<_>>()
+    };
+    let recipients = named("p");
     let recipient_ok = recipients.len() == 1
         && recipients[0].len() == 2
         && recipients[0][1].len() == 64
         && recipients[0][1].bytes().all(|c| c.is_ascii_hexdigit());
-    let v2 = tags
-        .iter()
-        .filter(|tag| tag.first().is_some_and(|v| v == "v"))
-        .collect::<Vec<_>>();
-    if !is_private(event.kind.as_u16())
-        || !recipient_ok
-        || (event.kind.as_u16() == 1060 && (v2.len() != 1 || (v2[0].len() != 2 || v2[0][1] != "2")))
+    let headers = named("header");
+    let unaddressed_message = kind == 1060
+        && recipients.is_empty()
+        && headers.len() == 1
+        && headers[0].len() == 2
+        && !headers[0][1].is_empty();
+    let v2 = named("v");
+    if !is_private(kind)
+        || !(recipient_ok || unaddressed_message)
+        || (kind == 1060 && (v2.len() != 1 || (v2[0].len() != 2 || v2[0][1] != "2")))
     {
         return Err(invalid_option(
-            "anonymous publisher requires one recipient-bound private envelope",
+            "anonymous publisher requires a private encrypted envelope",
         ));
     }
     Ok(())
