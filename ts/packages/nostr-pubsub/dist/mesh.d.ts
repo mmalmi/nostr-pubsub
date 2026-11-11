@@ -18,6 +18,7 @@ export declare class InvWantMesh {
     private pendingPeerCount;
     private readonly wantForwarded;
     private readonly peerBehaviors;
+    private prunedAtMs;
     constructor(options?: Partial<InvWantMeshOptions>);
     retainedState(): InvWantMeshRetainedState;
     peerBehaviorScore(peerId: string): number | undefined;
@@ -46,7 +47,7 @@ export declare class InvWantMesh {
     private receiveInventory;
     private receiveWant;
     private receiveFrame;
-    private validateEvent;
+    /** Admit by signature (unless already verified), kind and size; the encoded size is measured once. */
     private acceptEvent;
     private validateKind;
     private validateEventLength;

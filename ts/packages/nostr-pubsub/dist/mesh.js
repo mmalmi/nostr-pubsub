@@ -19,6 +19,7 @@ export class InvWantMesh {
     pendingPeerCount = 0;
     wantForwarded = new Map();
     peerBehaviors = new PeerBehaviorTracker();
+    prunedAtMs = -1;
     constructor(options = {}) {
         this.options = normalizeInvWantMeshOptions(options);
         this.cachedEvents = new BoundedEventCache(this.options.maxCachedEvents, this.options.maxCachedEventBytes, this.options.eventTtlMs);
@@ -80,8 +81,8 @@ export class InvWantMesh {
     seedVerified(event, nowMs) {
         requireNow(nowMs);
         this.prune(nowMs);
-        const verified = this.acceptEvent(event, true);
-        this.storeEvent(verified, meshEventJsonBytes(verified), nowMs);
+        const { verified, payloadBytes } = this.acceptEvent(event, true);
+        this.storeEvent(verified, payloadBytes, nowMs);
     }
     /** Replay bounded cached inventories after a peer connects or reconnects. */
     replayCachedToPeer(peerId, nowMs) {
@@ -98,8 +99,7 @@ export class InvWantMesh {
     publishEvent(event, peers, nowMs, alreadyVerified) {
         requireNow(nowMs);
         this.prune(nowMs);
-        const verified = this.acceptEvent(event, alreadyVerified);
-        const payloadBytes = meshEventJsonBytes(verified);
+        const { verified, payloadBytes } = this.acceptEvent(event, alreadyVerified);
         this.storeEvent(verified, payloadBytes, nowMs);
         if (!this.rememberInventory(verified.id, nowMs))
             return [];
@@ -121,8 +121,7 @@ export class InvWantMesh {
     replayEventToPeer(event, peerId, nowMs, alreadyVerified) {
         requireNow(nowMs);
         this.prune(nowMs);
-        const verified = this.acceptEvent(event, alreadyVerified);
-        const payloadBytes = meshEventJsonBytes(verified);
+        const { verified, payloadBytes } = this.acceptEvent(event, alreadyVerified);
         this.storeEvent(verified, payloadBytes, nowMs);
         return [send(peerId, {
                 type: 'inventory',
@@ -245,8 +244,7 @@ export class InvWantMesh {
         if (!this.wantForwarded.has(eventId) || !routeHasProvider(route, sourcePeer)) {
             throw validation('inv/want frame was not requested from source');
         }
-        const verified = this.acceptEvent(event, alreadyVerified);
-        const payloadBytes = meshEventJsonBytes(verified);
+        const { verified, payloadBytes } = this.acceptEvent(event, alreadyVerified);
         if (verified.id !== eventId)
             throw validation('inv/want frame id does not match signed event id');
         if (route.eventKind !== verified.kind || route.payloadBytes !== payloadBytes) {
@@ -279,19 +277,13 @@ export class InvWantMesh {
         }
         return actions;
     }
-    validateEvent(event) {
-        const verified = verifyNostrEvent(event);
-        this.validateKind(verified.kind);
-        this.validateEventLength(meshEventJsonBytes(verified));
-        return verified;
-    }
+    /** Admit by signature (unless already verified), kind and size; the encoded size is measured once. */
     acceptEvent(event, alreadyVerified) {
-        if (!alreadyVerified)
-            return this.validateEvent(event);
-        const verified = copyVerifiedNostrEvent(event);
+        const verified = alreadyVerified ? copyVerifiedNostrEvent(event) : verifyNostrEvent(event);
         this.validateKind(verified.kind);
-        this.validateEventLength(meshEventJsonBytes(verified));
-        return verified;
+        const payloadBytes = meshEventJsonBytes(verified);
+        this.validateEventLength(payloadBytes);
+        return { verified, payloadBytes };
     }
     validateKind(kind) {
         requireKind(kind);
@@ -362,6 +354,10 @@ export class InvWantMesh {
         });
     }
     prune(nowMs) {
+        // Every expiry written since a prune at this time is later than it, so a repeat finds nothing.
+        if (nowMs === this.prunedAtMs && nowMs < Number.MAX_SAFE_INTEGER)
+            return;
+        this.prunedAtMs = nowMs;
         for (const route of this.upstreamRoutes.values()) {
             if (route.fulfilled || route.expiresAtMs > nowMs)
                 continue;
@@ -373,10 +369,10 @@ export class InvWantMesh {
             }
         }
         this.cachedEvents.prune(nowMs);
-        retainMap(this.seenInventories, (expiry) => expiry > nowMs);
-        retainOrder(this.seenOrder, this.seenInventories);
-        retainMap(this.deliveredEvents, (expiry) => expiry > nowMs);
-        retainOrder(this.deliveredOrder, this.deliveredEvents);
+        if (retainMap(this.seenInventories, (expiry) => expiry > nowMs))
+            retainOrder(this.seenOrder, this.seenInventories);
+        if (retainMap(this.deliveredEvents, (expiry) => expiry > nowMs))
+            retainOrder(this.deliveredOrder, this.deliveredEvents);
         retainMap(this.upstreamRoutes, (route) => route.expiresAtMs > nowMs);
         retainMap(this.pendingDownstream, (pending, eventId) => pending.expiresAtMs > nowMs && this.upstreamRoutes.has(eventId));
         this.pendingPeerCount = [...this.pendingDownstream.values()]

@@ -1,6 +1,6 @@
 import { AbstractSimplePool } from 'nostr-tools/abstract-pool';
 import { verifyEvent } from 'nostr-tools/pure';
-import { matchFilters } from 'nostr-tools/filter';
+import { matchFilter, matchFilters } from 'nostr-tools/filter';
 import { createSimplePoolNostrRelayVerificationBoundary } from './simple-pool-relay-transport.js';
 import { verifyNostrEvent } from './types.js';
 import { RuntimeReconciliation } from './runtime-reconciliation.js';
@@ -42,12 +42,12 @@ export class RuntimeRelays {
         return this.relays.map((url) => ({ url, connected: statuses.get(url) ?? false }));
     }
     count() { return [...this.batches].reduce((total, batch) => total + batch.links.size, 0); }
-    subscribe(filters, event, state, relays) {
+    subscribe(filters, event, state, relays, isolated = false) {
         if (this.stopped)
             throw new Error('Nostr runtime is closed');
         if (filters.length > this.maxFilters || bytes(filters) > this.maxBytes)
             throw new RangeError('Nostr subscription exceeds filter batch bounds');
-        const entry = { relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
+        const entry = { isolated, relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
         this.pending.push(entry);
         if (!this.timer)
             this.timer = setTimeout(() => this.flush(), this.options.batchWindowMs ?? 10);
@@ -119,7 +119,7 @@ export class RuntimeRelays {
         let group = [];
         for (const entry of entries) {
             const candidate = uniqueFilters([...group, entry]);
-            if (group.length && (JSON.stringify(group[0].relays) !== JSON.stringify(entry.relays) || candidate.length > this.maxFilters || bytes(candidate) > this.maxBytes)) {
+            if (group.length && (entry.isolated || group[0].isolated || JSON.stringify(group[0].relays) !== JSON.stringify(entry.relays) || candidate.length > this.maxFilters || bytes(candidate) > this.maxBytes)) {
                 this.startBatch(group);
                 group = [];
             }
@@ -161,8 +161,9 @@ export class RuntimeRelays {
             if (!current())
                 return;
             const original = uniqueFilters(batch.entries);
-            const filters = original.map((filter) => {
-                const latest = link.latest.get(filterKey(filter));
+            const keys = original.map(filterKey);
+            const filters = original.map((filter, index) => {
+                const latest = link.latest.get(keys[index]);
                 return link.eosed && latest !== undefined
                     ? { ...filter, since: Math.max(filter.since ?? 0, latest - 1) }
                     : structuredClone(filter);
@@ -173,9 +174,9 @@ export class RuntimeRelays {
                 if (!current())
                     return;
                 const event = this.boundary.admitEvent(raw);
-                for (const filter of original)
-                    if (matchFilters([filter], event)) {
-                        const key = filterKey(filter);
+                for (const [index, filter] of original.entries())
+                    if (matchFilter(filter, event)) {
+                        const key = keys[index];
                         link.latest.set(key, Math.max(link.latest.get(key) ?? 0, event.created_at));
                     }
                 for (const entry of batch.entries)

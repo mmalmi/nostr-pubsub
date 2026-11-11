@@ -58,13 +58,15 @@ export class BoundedEventCache {
         });
     }
     prune(nowMs) {
+        const before = this.events.size;
         for (const [eventId, cached] of this.events) {
             if (cached.expiresAtMs > nowMs)
                 continue;
             this.events.delete(eventId);
             this.retainedBytes -= cached.payloadBytes;
         }
-        retainOrder(this.order, this.events);
+        if (this.events.size !== before)
+            retainOrder(this.order, this.events);
     }
     evictOldest() {
         while (this.order.length > 0) {

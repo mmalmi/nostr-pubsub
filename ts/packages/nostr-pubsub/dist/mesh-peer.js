@@ -1,4 +1,5 @@
 import { PubsubError } from './types.js';
+import { compareUtf8 } from './utf8-order.js';
 export function meshPeer(id, qualityScore) {
     if (typeof id !== 'string')
         throw validation('mesh peer id must be a string');
@@ -45,17 +46,6 @@ function compareMeshPeers(left, right) {
     if (isUnknown(left) !== isUnknown(right))
         return isUnknown(left) ? 1 : -1;
     return compareUtf8(left.id, right.id);
-}
-function compareUtf8(left, right) {
-    const encoder = new TextEncoder();
-    const leftBytes = encoder.encode(left);
-    const rightBytes = encoder.encode(right);
-    const length = Math.min(leftBytes.length, rightBytes.length);
-    for (let index = 0; index < length; index += 1) {
-        if (leftBytes[index] !== rightBytes[index])
-            return leftBytes[index] - rightBytes[index];
-    }
-    return leftBytes.length - rightBytes.length;
 }
 function isUnknown(peer) {
     return peer.qualityScore === undefined;

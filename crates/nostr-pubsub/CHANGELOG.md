@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.21 - 2026-11-10
+
+- Make `InvWantMesh` expiry cheaper: a pass now touches only the tables that lost entries and removes route state directly, instead of rescanning every dedup table per message. Steady relaying of signed events measured about ten times less mesh time per event; limits, ordering and wire behavior are unchanged.
+- Stop copying events and filters that are only read: FIPS wire encoding, subscription size accounting, accepted mesh frames, retained-event insertion and file-store snapshots now borrow them. A file-store publish of a duplicate or unretained event no longer copies the retained set.
+- Deliver router live subscriptions without building a route description per event, and answer in-memory queries without copying the whole store. Routed query results sort by event ID bytes directly.
+
 ## 0.1.20 - 2026-10-30
 
 - Add a bounded, per-source history cursor with inclusive time bounds, dense-timestamp expansion, explicit partial completion, and cancellation tokens. Existing event buses and one-shot queries are unchanged.

@@ -8,8 +8,8 @@ use crate::{
     NostrEventSubscription, PolicyDecision, PublishReport, PubsubPolicy, PubsubProvider,
     PubsubProviderMode, QueryOptions, QueryReport, Result, RouteQuerySource, RoutedLiveOptions,
     RoutedLiveSubscription, RoutedQueryOptions, RoutedQueryReport, SourceCandidate, SourceHealth,
-    SourcePolicyContext, SourceRoute, VerifiedEvent, query_routes_with_policy,
-    subscribe_routes_with_policy,
+    SourcePolicyContext, SourceRoute, VerifiedEvent, live_routes::subscribe_deduplicated_routes,
+    query_routes_with_policy, subscribe_routes_with_policy,
 };
 
 #[derive(Clone)]
@@ -140,15 +140,18 @@ impl NostrPubsubRouter {
         handler: Arc<dyn Fn(crate::RoutedLiveEvent) + Send + Sync>,
         options: RoutedLiveOptions,
     ) -> Result<RoutedLiveSubscription> {
-        let sources = self
-            .live_sources
+        let sources = self.live_route_sources();
+        subscribe_routes_with_policy(&sources, filters, self.policy.as_ref(), handler, options)
+            .await
+    }
+
+    fn live_route_sources(&self) -> Vec<LiveRouteSource<'_>> {
+        self.live_sources
             .iter()
             .map(|source| {
                 LiveRouteSource::from_subscriber(source.route.clone(), source.subscriber.as_ref())
             })
-            .collect::<Vec<_>>();
-        subscribe_routes_with_policy(&sources, filters, self.policy.as_ref(), handler, options)
-            .await
+            .collect()
     }
 
     async fn publish_to_routes(
@@ -268,19 +271,15 @@ impl NostrEventSubscriber for NostrPubsubRouter {
         filters: Vec<Filter>,
         handler: NostrEventHandler,
     ) -> Result<Box<dyn NostrEventSubscription>> {
-        let subscription = self
-            .subscribe_with_options(
-                filters,
-                Arc::new(move |event| {
-                    handler(crate::QueryEvent {
-                        event: event.event,
-                        source: event.source,
-                        priority: event.priority,
-                    });
-                }),
-                RoutedLiveOptions::default(),
-            )
-            .await?;
+        let sources = self.live_route_sources();
+        let subscription = subscribe_deduplicated_routes(
+            &sources,
+            filters,
+            self.policy.as_ref(),
+            Arc::new(move |event, _route| handler(event)),
+            RoutedLiveOptions::default(),
+        )
+        .await?;
         Ok(Box::new(RouterEventSubscription {
             inner: Some(subscription),
         }))

@@ -32,6 +32,8 @@ export interface RuntimeSubscriptionHandlers {
 }
 export interface RuntimeSubscribeOptions {
   cache?: RuntimeCacheMode;
+  /** Keep historical cursors scoped to their own relay requests and sources. */
+  isolated?: boolean;
   /** Deliver older replaceable versions returned by the network without caching them.
    * Requires cache: 'network-only'; deletion and expiration checks still apply. */
   includeSuperseded?: boolean;

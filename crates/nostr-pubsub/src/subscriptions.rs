@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, VecDeque},
+};
 
 use nostr::{ClientMessage, Event, Filter, JsonUtil, SubscriptionId};
 
@@ -538,10 +541,10 @@ fn subscription_contribution(
                 .map(|encoded| total.saturating_add(encoded.len()))
                 .map_err(|error| encoded_state_error("filter", error))
         })?;
-    let encoded_req_bytes = ClientMessage::req(
-        SubscriptionId::new(subscription.subscription_id.clone()),
-        subscription.filters.clone(),
-    )
+    let encoded_req_bytes = ClientMessage::Req {
+        subscription_id: Cow::Owned(SubscriptionId::new(&subscription.subscription_id)),
+        filters: subscription.filters.iter().map(Cow::Borrowed).collect(),
+    }
     .try_as_json()
     .map_err(|error| encoded_state_error("REQ", error))?
     .len();

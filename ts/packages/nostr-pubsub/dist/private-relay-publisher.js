@@ -89,7 +89,10 @@ export function createPrivateRelayPublisher(options = {}) {
         catch (error) {
             return Promise.reject(error);
         }
-        const existing = active.get(event.id);
+        // A peer-only attempt cannot supply a relay receipt for the same envelope.
+        // Match NostrRuntime's per-event/options coalescing boundary.
+        const operationKey = JSON.stringify([event.id, publishOptions]);
+        const existing = active.get(operationKey);
         if (existing)
             return existing.result;
         const authenticationKey = generateSecretKey();
@@ -126,10 +129,15 @@ export function createPrivateRelayPublisher(options = {}) {
                 await store.deletePending(event.id);
             return { ...report, queued: queue && !report.accepted && !retired };
         })().finally(async () => {
-            await runtime.close();
-            active.delete(event.id);
+            try {
+                await runtime.close();
+            }
+            finally {
+                if (active.get(operationKey)?.runtime === runtime)
+                    active.delete(operationKey);
+            }
         });
-        active.set(event.id, { runtime, result });
+        active.set(operationKey, { runtime, result });
         return result;
     };
     const retryPending = async () => {

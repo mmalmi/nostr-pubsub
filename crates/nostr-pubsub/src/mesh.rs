@@ -471,7 +471,7 @@ impl InvWantMesh {
                 self.receive_want(source_peer, event_id, now_ms)
             }
             InvWantWireMessage::Frame { event_id, event } => {
-                self.receive_frame(source_peer, &event_id, &event, peers, now_ms, true)
+                self.receive_frame(source_peer, &event_id, *event, peers, now_ms, true)
             }
         };
         if result.is_err() {
@@ -577,10 +577,11 @@ impl InvWantMesh {
             }]);
         }
 
-        let Some(route) = self.upstream_routes.get(&event_id).cloned() else {
-            return Ok(Vec::new());
-        };
-        if route.fulfilled {
+        if self
+            .upstream_routes
+            .get(&event_id)
+            .is_none_or(|route| route.fulfilled)
+        {
             return Ok(Vec::new());
         }
 
@@ -604,15 +605,15 @@ impl InvWantMesh {
         if already_forwarded {
             return Ok(Vec::new());
         }
-        if let Some(route) = self.upstream_routes.get_mut(&event_id) {
-            route
-                .transport_disrupted_peers
-                .remove(&route.peer_id.clone());
-        }
+        let Some(route) = self.upstream_routes.get_mut(&event_id) else {
+            return Ok(Vec::new());
+        };
+        let peer_id = route.peer_id.clone();
+        route.transport_disrupted_peers.remove(&peer_id);
         self.want_forwarded
             .insert(event_id.clone(), route.expires_at_ms);
         Ok(vec![InvWantAction::Send {
-            peer_id: route.peer_id,
+            peer_id,
             message: InvWantWireMessage::Want { event_id },
         }])
     }
@@ -621,7 +622,7 @@ impl InvWantMesh {
         &mut self,
         source_peer: &str,
         event_id: &str,
-        event: &Event,
+        event: Event,
         peers: &[MeshPeer],
         now_ms: u64,
         verify_signature: bool,
@@ -630,29 +631,34 @@ impl InvWantMesh {
         let route = self
             .upstream_routes
             .get(event_id)
-            .cloned()
             .ok_or_else(|| validation("unsolicited inv/want frame"))?;
         if !self.want_forwarded.contains_key(event_id)
             || (route.peer_id != source_peer && !route.alternate_peers.contains(source_peer))
         {
             return Err(validation("inv/want frame was not requested from source"));
         }
+        let (route_kind, route_payload_bytes, route_fulfilled, route_hop_limit) = (
+            route.event_kind,
+            route.payload_bytes,
+            route.fulfilled,
+            route.hop_limit,
+        );
         let (verified_id, payload_bytes) = if verify_signature {
-            self.validate_event(event)?
+            self.validate_event(&event)?
         } else {
-            self.validate_verified_event(event)?
+            self.validate_verified_event(&event)?
         };
         if verified_id != event_id {
             return Err(validation(
                 "inv/want frame id does not match signed event id",
             ));
         }
-        if route.event_kind != u16::from(event.kind) || route.payload_bytes != payload_bytes {
+        if route_kind != u16::from(event.kind) || route_payload_bytes != payload_bytes {
             return Err(validation(
                 "inv/want frame does not match announced kind or payload size",
             ));
         }
-        if route.fulfilled {
+        if route_fulfilled {
             return Ok(Vec::new());
         }
         self.record_peer_behavior(
@@ -660,7 +666,6 @@ impl InvWantMesh {
             VALID_FRAME_REWARD,
             PeerBehaviorEvidence::ValidFrame,
         );
-        self.store_event(event.clone(), payload_bytes, now_ms);
         if let Some(route) = self.upstream_routes.get_mut(event_id) {
             route.fulfilled = true;
             route.transport_disrupted_peers.clear();
@@ -687,7 +692,7 @@ impl InvWantMesh {
                     }),
             );
         }
-        if route.hop_limit > 1 {
+        if route_hop_limit > 1 {
             actions.extend(self.send_to_selected_peers(
                 peers,
                 Some(source_peer),
@@ -695,10 +700,12 @@ impl InvWantMesh {
                     event_id: event_id.to_string(),
                     event_kind: u16::from(event.kind),
                     payload_bytes,
-                    hop_limit: route.hop_limit - 1,
+                    hop_limit: route_hop_limit - 1,
                 },
             ));
         }
+        // The cache takes the event last so the copies above are the only ones.
+        self.store_event(event, payload_bytes, now_ms);
         Ok(actions)
     }
 
@@ -844,67 +851,6 @@ impl InvWantMesh {
                 behavior.unserved_inventories = behavior.unserved_inventories.saturating_add(1);
             }
         }
-    }
-
-    fn prune(&mut self, now_ms: u64) {
-        let Some(next_prune_at_ms) = self.next_prune_at_ms else {
-            return;
-        };
-        if now_ms < next_prune_at_ms {
-            return;
-        }
-        let expired_routes = self
-            .upstream_routes
-            .values()
-            .filter(|route| !route.fulfilled && route.expires_at_ms <= now_ms)
-            .flat_map(|route| {
-                std::iter::once(route.peer_id.clone())
-                    .chain(route.alternate_peers.iter().cloned())
-                    .filter(|peer| !route.transport_disrupted_peers.contains(peer))
-            })
-            .collect::<Vec<_>>();
-        for peer_id in expired_routes {
-            self.record_peer_behavior(
-                &peer_id,
-                UNSERVED_INVENTORY_PENALTY,
-                PeerBehaviorEvidence::UnservedInventory,
-            );
-        }
-        self.prune_cached_events(now_ms);
-        self.seen_inventories
-            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
-        self.seen_order
-            .retain(|event_id| self.seen_inventories.contains_key(event_id));
-        self.delivered_events
-            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
-        self.delivered_order
-            .retain(|event_id| self.delivered_events.contains_key(event_id));
-        self.upstream_routes
-            .retain(|_, route| route.expires_at_ms > now_ms);
-        let upstream_routes = &self.upstream_routes;
-        self.pending_downstream.retain(|event_id, pending| {
-            pending.expires_at_ms > now_ms && upstream_routes.contains_key(event_id)
-        });
-        self.pending_peer_count = self
-            .pending_downstream
-            .values()
-            .map(|pending| pending.peers.len())
-            .sum();
-        self.want_forwarded.retain(|event_id, expires_at_ms| {
-            *expires_at_ms > now_ms && upstream_routes.contains_key(event_id)
-        });
-        self.next_prune_at_ms = self
-            .cached_events
-            .values()
-            .map(|cached| cached.expires_at_ms)
-            .chain(self.seen_inventories.values().copied())
-            .chain(self.delivered_events.values().copied())
-            .chain(
-                self.upstream_routes
-                    .values()
-                    .map(|route| route.expires_at_ms),
-            )
-            .min();
     }
 
     fn track_expiry(&mut self, expires_at_ms: u64) {

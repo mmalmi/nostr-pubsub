@@ -1,5 +1,4 @@
 import {
-  copyVerifiedNostrEvent,
   validateQueryOptions,
   verifyNostrEvent,
   type NostrFilter,
@@ -300,7 +299,7 @@ function routeEvents(
 ): RoutedQueryEvent[] {
   return report.events.map((queryEvent) => ({
     ...queryEvent,
-    event: verifiedReaderEvent(queryEvent.event),
+    event: verifyNostrEvent(queryEvent.event),
     provenance: [{
       routeId: candidate.routeSource.route.id,
       datasetId,
@@ -407,14 +406,6 @@ function failedAttempt(
 function errorParts(error: unknown): RouteFailure {
   if (error instanceof Error) return { name: error.name, message: error.message };
   return { name: 'Error', message: String(error) };
-}
-
-function verifiedReaderEvent(event: QueryEvent['event']): QueryEvent['event'] {
-  try {
-    return copyVerifiedNostrEvent(event);
-  } catch {
-    return verifyNostrEvent(event);
-  }
 }
 
 function readerErrorResult(error: unknown): ReaderResult {

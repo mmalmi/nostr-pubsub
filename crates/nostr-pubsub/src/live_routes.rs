@@ -142,6 +142,31 @@ pub async fn subscribe_routes_with_policy<P>(
 where
     P: PubsubPolicy + ?Sized,
 {
+    let handler: RouteEventHandler = Arc::new(move |incoming, route| {
+        handler(RoutedLiveEvent {
+            event: incoming.event,
+            source: incoming.source,
+            priority: incoming.priority,
+            route: route.clone(),
+        });
+    });
+    subscribe_deduplicated_routes(routes, filters, policy, handler, options).await
+}
+
+/// Receives each first-seen event with the route that delivered it.
+pub(crate) type RouteEventHandler = Arc<dyn Fn(QueryEvent, &SourceRoute) + Send + Sync>;
+
+/// Shared by callers that do not need an owned route for every event.
+pub(crate) async fn subscribe_deduplicated_routes<P>(
+    routes: &[LiveRouteSource<'_>],
+    filters: Vec<Filter>,
+    policy: &P,
+    handler: RouteEventHandler,
+    options: RoutedLiveOptions,
+) -> Result<RoutedLiveSubscription>
+where
+    P: PubsubPolicy + ?Sized,
+{
     if options.max_seen_events == 0 {
         return Err(PubsubError::Validation(
             "live route deduplication limit must be positive".to_string(),
@@ -179,10 +204,8 @@ where
     let mut active = Vec::new();
     let mut route_ids = Vec::new();
     for source in allowed {
-        let route = &source.route;
-        let route = route.clone();
+        let route = source.route.clone();
         let route_id = route.id.clone();
-        let route_for_handler = route.clone();
         let seen_for_handler = Arc::clone(&seen);
         let user_handler = Arc::clone(&handler);
         let incoming_handler: NostrEventHandler = Arc::new(move |incoming| {
@@ -191,12 +214,7 @@ where
                 .lock()
                 .is_ok_and(|mut seen| seen.insert(event_id));
             if should_deliver {
-                user_handler(RoutedLiveEvent {
-                    event: incoming.event,
-                    source: incoming.source,
-                    priority: incoming.priority,
-                    route: route_for_handler.clone(),
-                });
+                user_handler(incoming, &route);
             }
         });
         match source

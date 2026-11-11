@@ -35,10 +35,13 @@ export function saturatingAdd(left, right) {
 export function clamp(value, minimum, maximum) {
     return Math.max(minimum, Math.min(maximum, value));
 }
+/** Returns whether any entry was removed. */
 export function retainMap(map, predicate) {
+    const before = map.size;
     for (const [key, value] of map)
         if (!predicate(value, key))
             map.delete(key);
+    return map.size !== before;
 }
 export function retainOrder(order, map) {
     let write = 0;

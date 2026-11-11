@@ -3,7 +3,10 @@ import type { NostrEvent, NostrFilter, QueryOptions } from './types.js';
 import type { RuntimeEventStore, RuntimeOutboxEntry } from './runtime-types.js';
 
 export function selectStoredEvents(events: Iterable<NostrEvent>, filters: NostrFilter[], options: QueryOptions = {}): NostrEvent[] {
-  const ordered = [...events].filter((event) => !expired(event)).sort(eventOrder);
+  return selectOrderedEvents([...events].filter((event) => !expired(event)).sort(eventOrder), filters, options);
+}
+/** `ordered` holds unexpired events already sorted by `eventOrder`. */
+function selectOrderedEvents(ordered: NostrEvent[], filters: NostrFilter[], options: QueryOptions): NostrEvent[] {
   const result = new Map<string, NostrEvent>();
   for (const filter of filters) {
     let count = 0;
@@ -78,25 +81,63 @@ export async function admitRuntimeEvent(store: RuntimeEventStore, event: NostrEv
   return 'admitted';
 }
 
+/** First index whose event sorts at or after `event`, or strictly after it when `after` is set. */
+function orderedIndex(ordered: NostrEvent[], event: NostrEvent, after: boolean): number {
+  let low = 0;
+  let high = ordered.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    const order = eventOrder(ordered[middle]!, event);
+    if (order < 0 || (after && order === 0)) low = middle + 1; else high = middle;
+  }
+  return low;
+}
 /** Bounded default cache. Supply a persistent store for offline operation across reloads. */
 export class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, NostrEvent>();
+  /** The stored events in `eventOrder`, kept current so a query need not sort the store; rebuilt when unset. */
+  private ordered?: NostrEvent[];
   private readonly pending = new Map<string, RuntimeOutboxEntry>();
   constructor(readonly maxEvents = 20000, readonly maxPending = 1000) {
     if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || !Number.isSafeInteger(maxPending) || maxPending < 1) throw new RangeError('Invalid event store bounds');
   }
   async query(filters: NostrFilter[], options: QueryOptions = {}): Promise<NostrEvent[]> {
-    return selectStoredEvents(this.events.values(), filters, options);
+    return selectOrderedEvents(this.sorted().filter((event) => !expired(event)), filters, options);
   }
   async put(event: NostrEvent): Promise<void> {
-    if (!this.events.has(event.id) && this.events.size >= this.maxEvents) {
-      const removable = [...this.events.values()].filter((e) => e.kind !== 5 && !this.pending.has(e.id)).sort(eventOrder).pop();
-      if (!removable) throw new Error('Event store retention capacity exhausted');
-      this.events.delete(removable.id);
+    const previous = this.events.get(event.id);
+    if (!previous && this.events.size >= this.maxEvents) {
+      const ordered = this.sorted();
+      let last = ordered.length - 1;
+      while (last >= 0 && (ordered[last]!.kind === 5 || this.pending.has(ordered[last]!.id))) last--;
+      if (last < 0) throw new Error('Event store retention capacity exhausted');
+      this.remove(ordered[last]!);
     }
-    this.events.set(event.id, structuredClone(event));
+    const stored = structuredClone(event);
+    this.events.set(stored.id, stored);
+    if (!this.ordered) return;
+    if (!previous) this.ordered.splice(orderedIndex(this.ordered, stored, true), 0, stored);
+    // A rewritten ID keeps its place among equals; anything else is re-sorted on the next read.
+    else if (eventOrder(previous, stored) !== 0 || !this.replaceOrdered(previous, stored)) this.ordered = undefined;
   }
-  async delete(ids: string[]): Promise<void> { for (const id of ids) this.events.delete(id); }
+  async delete(ids: string[]): Promise<void> {
+    for (const id of ids) { const event = this.events.get(id); if (event) this.remove(event); }
+  }
+  private sorted(): NostrEvent[] { return this.ordered ??= [...this.events.values()].sort(eventOrder); }
+  private remove(event: NostrEvent): void {
+    this.events.delete(event.id);
+    if (this.ordered && !this.replaceOrdered(event)) this.ordered = undefined;
+  }
+  /** Swap or drop one stored object in place; false when the order no longer holds it where expected. */
+  private replaceOrdered(event: NostrEvent, replacement?: NostrEvent): boolean {
+    const ordered = this.ordered!;
+    for (let index = orderedIndex(ordered, event, false); index < ordered.length && eventOrder(ordered[index]!, event) === 0; index++) {
+      if (ordered[index] !== event) continue;
+      if (replacement) ordered[index] = replacement; else ordered.splice(index, 1);
+      return true;
+    }
+    return false;
+  }
   async listPending(): Promise<RuntimeOutboxEntry[]> { return [...this.pending.values()].map((entry) => structuredClone(entry)); }
   async putPending(entry: RuntimeOutboxEntry): Promise<void> {
     if (!this.pending.has(entry.event.id) && this.pending.size >= this.maxPending) throw new Error('Outbox capacity exhausted');

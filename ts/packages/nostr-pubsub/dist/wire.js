@@ -1,10 +1,12 @@
 import { PubsubError, verifyNostrEvent } from './types.js';
+import { compareUtf8 } from './utf8-order.js';
 import { PubsubPeerSubscriptionStore, } from './subscription.js';
 /** Maximum encoded Nostr frame carried in one reliable TCP record. */
 export const FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES = 65_525;
 export const DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES = FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES;
 export const FIPS_NOSTR_PUBSUB_SERVICE_PORT = 7368;
 const frameEncoder = new TextEncoder();
+const knownKeys = new Set(['ids', 'authors', 'kinds', 'search', 'since', 'until', 'limit']);
 const frameDecoder = new TextDecoder('utf-8', { fatal: true });
 export class FipsPubsubWireCodec {
     maxFrameBytes;
@@ -224,7 +226,6 @@ function normalizeFilter(value) {
     if (!isRecord(value))
         throw invalidFrame('REQ filters must be JSON objects');
     const filter = {};
-    const knownKeys = new Set(['ids', 'authors', 'kinds', 'search', 'since', 'until', 'limit']);
     const tagKeys = Object.keys(value)
         .filter((key) => key.startsWith('#'))
         .sort();
@@ -285,17 +286,6 @@ function isNonNegativeSafeInteger(value) {
 }
 function isRecord(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-function compareUtf8(left, right) {
-    const encoder = new TextEncoder();
-    const leftBytes = encoder.encode(left);
-    const rightBytes = encoder.encode(right);
-    const sharedLength = Math.min(leftBytes.length, rightBytes.length);
-    for (let index = 0; index < sharedLength; index += 1) {
-        if (leftBytes[index] !== rightBytes[index])
-            return leftBytes[index] - rightBytes[index];
-    }
-    return leftBytes.length - rightBytes.length;
 }
 function invalidFrame(message) {
     return PubsubError.validation(`invalid FIPS pubsub frame: ${message}`);

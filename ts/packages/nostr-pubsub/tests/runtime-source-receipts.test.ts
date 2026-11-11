@@ -18,12 +18,12 @@ it('keeps an event pending until a queued source provides its actual remote rece
   const runtime = createNostrRuntime({ relays: [], store, sources: [source] });
   try {
     const signed = event();
-    const publishing = runtime.publish(signed);
-    await vi.waitFor(async () => expect((await store.listPending()).map(row => row.event.id)).toEqual([signed.id]));
+    // The caller gets its answer once the event is durably queued; delivery continues behind it.
+    expect(await runtime.publish(signed)).toMatchObject({ accepted: false, remoteAccepted: false, queued: true,
+      sources: [{ id: 'fips', accepted: false, pending: true }] });
+    expect((await store.listPending()).map(row => row.event.id)).toEqual([signed.id]);
     acknowledge({ accepted: true, remoteAccepted: true, priority: 100 });
-    expect(await publishing).toMatchObject({ accepted: true, remoteAccepted: true, queued: false,
-      sources: [{ id: 'fips', accepted: true }] });
-    expect(await store.listPending()).toEqual([]);
+    await vi.waitFor(async () => expect(await store.listPending()).toEqual([]));
     expect(receiverPublish).not.toHaveBeenCalled();
   } finally { source.close(); await runtime.close(); }
 });
@@ -36,8 +36,24 @@ it.each([undefined, false])('does not retire local gossip with remoteAccepted=%s
   try {
     const signed = event();
     expect(await runtime.publish(signed)).toMatchObject({ accepted: false, remoteAccepted: false, queued: true,
-      sources: [{ id: 'fips', accepted: false, queued: true }] });
+      sources: [{ id: 'fips', accepted: false, pending: true }] });
+    // Closing waits for the delivery attempt, which must leave the entry for a later retry.
+    await runtime.close();
     expect((await store.listPending()).map(row => row.event.id)).toEqual([signed.id]);
+  } finally { await runtime.close(); }
+});
+
+it('still returns the remote receipt itself when the caller opts out of queueing', async () => {
+  const store = new MemoryEventStore();
+  let acknowledge!: (report: PublishReport) => void;
+  const receipt = new Promise<PublishReport>(resolve => { acknowledge = resolve; });
+  const runtime = createNostrRuntime({ relays: [], store, sources: [{ id: 'fips', publish: () => receipt }] });
+  try {
+    const publishing = runtime.publish(event(), { queue: false });
+    acknowledge({ accepted: true, remoteAccepted: true, priority: 100 });
+    expect(await publishing).toMatchObject({ accepted: true, remoteAccepted: true, queued: false,
+      sources: [{ id: 'fips', accepted: true }] });
+    expect(await store.listPending()).toEqual([]);
   } finally { await runtime.close(); }
 });
 

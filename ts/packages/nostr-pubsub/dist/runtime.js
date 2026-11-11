@@ -78,6 +78,9 @@ export class NostrRuntime {
         });
     }
     async ingest(raw, source = 'external') {
+        return this.admit(raw, source);
+    }
+    async admit(raw, source, target) {
         this.ensureOpen();
         let event;
         try {
@@ -106,8 +109,10 @@ export class NostrRuntime {
         pending.sources.add(source);
         try {
             const admission = await pending.operation;
-            if (newSource && admission !== 'rejected' && !this.stopped)
+            if (admission !== 'rejected' && !this.stopped)
                 for (const listener of this.interests.candidates(event)) {
+                    if (listener.options.isolated ? listener !== target && source !== 'local-publish' : !newSource)
+                        continue;
                     if (admission === 'admitted' || listener.options.includeSuperseded)
                         this.deliver(listener, event, { source, cached: false });
                 }
@@ -119,14 +124,31 @@ export class NostrRuntime {
         }
     }
     publish(event, options = {}) {
+        return this.startPublish(event, options).result;
+    }
+    startPublish(event, options) {
         this.ensureOpen();
         const key = JSON.stringify([event.id, options]);
         const existing = this.publishing.get(key);
         if (existing)
             return existing;
-        const promise = this.publishOnce(event, options).finally(() => this.publishing.delete(key));
-        this.publishing.set(key, promise);
-        return promise;
+        let resolve;
+        let reject;
+        const result = new Promise((res, rej) => { resolve = res; reject = rej; });
+        let queued = false;
+        const delivery = this.publishOnce(event, options, (report) => { queued = true; resolve(report); });
+        void delivery.then(resolve, (error) => {
+            reject(error);
+            if (queued) {
+                try {
+                    this.options.onError?.(asError(error));
+                }
+                catch { /* preserve delivery cleanup */ }
+            }
+        }).finally(() => this.publishing.delete(key));
+        const publication = { result, delivery };
+        this.publishing.set(key, publication);
+        return publication;
     }
     async retryPending() {
         if (this.stopped || this.retrying)
@@ -135,7 +157,10 @@ export class NostrRuntime {
         try {
             const pending = await this.store.listPending();
             for (let offset = 0; offset < pending.length && !this.stopped; offset += 4) {
-                await Promise.all(pending.slice(offset, offset + 4).map(({ event, relays, sources }) => this.publish(event, { relays, sources }).catch((error) => this.options.onError?.(asError(error)))));
+                await Promise.all(pending.slice(offset, offset + 4).map(({ event, relays, sources }) => {
+                    const { result, delivery } = this.startPublish(event, { relays, sources });
+                    return Promise.all([result, delivery]).catch((error) => this.options.onError?.(asError(error)));
+                }));
             }
         }
         finally {
@@ -190,7 +215,7 @@ export class NostrRuntime {
         }
         this.relays.close();
         await this.writes;
-        await Promise.allSettled([...this.publishing.values()]);
+        await Promise.allSettled([...this.publishing.values()].map(({ delivery }) => delivery));
         await this.store.close?.();
     }
     async startListener(listener) {
@@ -200,7 +225,7 @@ export class NostrRuntime {
         if (listener.options.cache !== 'cache-only') {
             for (const url of listener.options.relays?.map((url) => new URL(url).toString()) ?? this.relays.urls())
                 listener.pending.add(url);
-            const subscription = this.relays.subscribe(listener.filters, (event, source) => this.receive(listener, event, source), (source, complete, error) => this.sourceState(listener, source, complete, error), listener.options.relays);
+            const subscription = this.relays.subscribe(listener.filters, (event, source) => this.receive(listener, event, source), (source, complete, error) => this.sourceState(listener, source, complete, error), listener.options.relays, listener.options.isolated);
             listener.closers.set('relay-transport', () => subscription.close());
             for (const source of this.sources.values())
                 if (this.wantsSource(listener, source.id)) {
@@ -250,7 +275,7 @@ export class NostrRuntime {
                 if (listener.stopped || this.sources.get(source.id) !== source)
                     return;
                 for (const { event } of report.events)
-                    await this.ingest(event, source.id);
+                    await this.admit(event, source.id, listener);
                 this.sourceState(listener, source.id, report.complete !== false);
             }
             else
@@ -267,20 +292,22 @@ export class NostrRuntime {
         if (listener.stopped)
             return;
         this.counters.receivedEvents++;
-        if (listener.seen.has(event.id) || this.incoming.get(event.id)?.sources.has(source)) {
+        const key = listener.options.isolated ? `${source}:${event.id}` : event.id;
+        if (listener.seen.has(key) || (!listener.options.isolated && this.incoming.get(event.id)?.sources.has(source))) {
             this.counters.duplicateEvents++;
             return;
         }
-        void this.ingest(event, source).catch((error) => this.report(listener, error));
+        void this.admit(event, source, listener).catch((error) => this.report(listener, error));
     }
     deliver(listener, event, info) {
         if (listener.stopped || !matchFilters(listener.filters, event) || !this.acceptsOrigin(listener, info))
             return;
-        if (listener.seen.has(event.id)) {
+        const key = listener.options.isolated ? `${info.source}:${event.id}` : event.id;
+        if (listener.seen.has(key)) {
             this.counters.duplicateEvents++;
             return;
         }
-        listener.seen.add(event.id);
+        listener.seen.add(key);
         if (listener.seen.size > (this.options.maxSeenEventsPerSubscription ?? 4096))
             listener.seen.delete(listener.seen.values().next().value);
         this.counters.deliveredEvents++;
@@ -361,7 +388,7 @@ export class NostrRuntime {
         this.listeners.delete(listener);
         this.interests.remove(listener);
     }
-    async publishOnce(raw, options) {
+    async publishOnce(raw, options, onQueued) {
         const event = verifyNostrEvent(raw, this.options.verifyEvent);
         const queue = !options.requireAck && options.queue !== false;
         const echo = !options.requireAck && options.localEcho !== false;
@@ -388,6 +415,9 @@ export class NostrRuntime {
             attempts.push(attempt);
         }
         const outcomes = attempts.map(({ id }) => ({ id, accepted: false, pending: true }));
+        // Resolve the caller after local persistence, while retaining delivery for retries and shutdown.
+        if (queue)
+            onQueued({ accepted: false, remoteAccepted: false, queued: true, sources: outcomes.map((outcome) => ({ ...outcome })) });
         const accepted = await new Promise((resolve) => {
             let remaining = attempts.length;
             if (!remaining)

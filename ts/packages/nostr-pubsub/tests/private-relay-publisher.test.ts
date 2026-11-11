@@ -30,6 +30,109 @@ function frames(server: RuntimeRelayFixture) { return [...server.frames.values()
 function auth(connection: unknown[][]): NostrEvent { return connection.find(frame => frame[0] === 'AUTH')?.[1] as NostrEvent; }
 
 describe('private publication connection boundary', () => {
+  it.each(['peer-first', 'relay-first'] as const)('keeps peer and relay receipts independent for one envelope (%s)', async (order) => {
+    const server = await relay(); server.acknowledge = 'silent';
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const publish = vi.fn(async () => { await blocked; return { accepted: true, priority: 0 }; });
+    const sender = createPrivateRelayPublisher({ websocketImplementation: ws, publishTimeoutMs: 1000,
+      sources: [{ id: 'fips', publishAcceptance: 'queued', publish }] });
+    cleanup.push(() => sender.close());
+    const envelope = event(), url = await server.url();
+    const peerOptions = { relays: [], sources: ['fips'], queue: false };
+    const relayOptions = { relays: [url], requireAck: true };
+    let peer: ReturnType<typeof sender.publish> | undefined;
+    let direct: ReturnType<typeof sender.publish> | undefined;
+    const received = () => frames(server).some(connection => connection.filter(frame =>
+      frame[0] === 'EVENT' && (frame[1] as NostrEvent).id === envelope.id).length === 2);
+    const acknowledge = () => {
+      for (const [socket, connection] of server.frames) if (socket.readyState === WebSocket.OPEN && connection.some(frame =>
+        frame[0] === 'EVENT' && (frame[1] as NostrEvent).id === envelope.id)) {
+        socket.send(JSON.stringify(['OK', envelope.id, true, 'stored']));
+      }
+    };
+    try {
+      if (order === 'peer-first') {
+        peer = sender.publish(envelope, peerOptions); await until(() => publish.mock.calls.length === 1);
+        direct = sender.publish(envelope, relayOptions);
+      } else {
+        direct = sender.publish(envelope, relayOptions); await until(received);
+        peer = sender.publish(envelope, peerOptions);
+      }
+      expect(direct).not.toBe(peer);
+      expect(sender.publish(envelope, { ...peerOptions })).toBe(peer);
+      expect(sender.publish(envelope, { ...relayOptions })).toBe(direct);
+      await until(() => received() && publish.mock.calls.length === 1);
+      let peerSettled = false; void peer.then(() => { peerSettled = true; });
+      acknowledge();
+      expect(await direct).toMatchObject({ accepted: true, remoteAccepted: true, queued: false,
+        sources: [{ id: url, accepted: true }] });
+      expect(peerSettled).toBe(false);
+      expect(server.authEvents).toHaveLength(1);
+      expect(server.authEvents[0]!.pubkey).not.toBe(ownerKey);
+      expect(frames(server).every(connection => connection.every(frame => ['AUTH', 'EVENT'].includes(frame[0] as string)))).toBe(true);
+    } finally {
+      release(); acknowledge(); await Promise.allSettled([peer, direct]);
+    }
+    expect(await peer).toMatchObject({ accepted: false, remoteAccepted: false, queued: false,
+      sources: [{ id: 'fips', accepted: false, queued: true }] });
+  });
+
+  it.each([
+    { name: 'acknowledgment policy', change: { requireAck: true } },
+    { name: 'queue policy', change: { queue: true } },
+    { name: 'local echo policy', change: { localEcho: true } },
+    { name: 'source destination', change: { sources: ['provider'] } },
+  ])('does not coalesce different $name options and retires settled attempts', async ({ change }) => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const publish = vi.fn(async () => { await blocked; return { accepted: true, priority: 0 }; });
+    const sender = createPrivateRelayPublisher({ publishTimeoutMs: 1000, sources: [
+      { id: 'fips', publishAcceptance: 'queued', publish }, { id: 'provider', publishAcceptance: 'queued', publish },
+    ] });
+    cleanup.push(() => sender.close());
+    const envelope = event(), options = { relays: [], sources: ['fips'], queue: false, localEcho: false };
+    const first = sender.publish(envelope, options);
+    let second: ReturnType<typeof sender.publish> | undefined;
+    try {
+      await until(() => publish.mock.calls.length === 1);
+      second = sender.publish(envelope, { ...options, ...change });
+      expect(second).not.toBe(first);
+      expect(sender.publish(envelope, { ...options })).toBe(first);
+      await until(() => publish.mock.calls.length === 2);
+    } finally { release(); await Promise.allSettled([first, second]); }
+    expect(await first).toMatchObject({ accepted: false, remoteAccepted: false, queued: false });
+    expect(await second).toMatchObject({ accepted: false, remoteAccepted: false, queued: change.queue === true });
+    const retry = sender.publish(envelope, options);
+    expect(retry).not.toBe(first);
+    expect(await retry).toMatchObject({ accepted: false, remoteAccepted: false, queued: false });
+    expect(publish).toHaveBeenCalledTimes(3);
+  });
+
+  it('opens independent authenticated connections for different explicit relay scopes', async () => {
+    const a = await relay(), b = await relay(); a.acknowledge = b.acknowledge = 'silent';
+    const sender = createPrivateRelayPublisher({ websocketImplementation: ws, publishTimeoutMs: 1000 });
+    cleanup.push(() => sender.close());
+    const envelope = event(), urls = [await a.url(), await b.url()];
+    const received = (server: RuntimeRelayFixture) => frames(server).some(connection => connection.filter(frame =>
+      frame[0] === 'EVENT' && (frame[1] as NostrEvent).id === envelope.id).length === 2);
+    const acknowledge = () => { for (const server of [a, b]) for (const [socket, connection] of server.frames) {
+      if (socket.readyState === WebSocket.OPEN && connection.some(frame => frame[0] === 'EVENT' && (frame[1] as NostrEvent).id === envelope.id)) {
+        socket.send(JSON.stringify(['OK', envelope.id, true, 'stored']));
+      }
+    } };
+    const first = sender.publish(envelope, { relays: [urls[0]!], requireAck: true });
+    let second: ReturnType<typeof sender.publish> | undefined;
+    try {
+      await until(() => received(a)); second = sender.publish(envelope, { relays: [urls[1]!], requireAck: true });
+      expect(second).not.toBe(first); await until(() => received(b)); acknowledge();
+      expect(await first).toMatchObject({ remoteAccepted: true, sources: [{ id: urls[0], accepted: true }] });
+      expect(await second).toMatchObject({ remoteAccepted: true, sources: [{ id: urls[1], accepted: true }] });
+      expect(a.authEvents).toHaveLength(1); expect(b.authEvents).toHaveLength(1);
+      expect(a.authEvents[0]!.pubkey).not.toBe(b.authEvents[0]!.pubkey);
+    } finally { acknowledge(); await Promise.allSettled([first, second]); }
+  });
+
   it('preserves an encrypted invite owner proof without exposing its identity or accepting plaintext proof tags', async () => {
     const server = await relay(); const sender = await publisher(server);
     const envelopeSecret = generateSecretKey();
@@ -170,7 +273,7 @@ describe('anonymous public-key discovery boundary', () => {
     cleanup.push(() => receiver.close(), () => discovery.close());
     receiver.subscribe([{ kinds: [1059], '#p': [ownerKey] }], { onEvent() {} }, { cache: 'network-only' });
     const advert = finalizeEvent({ kind: 37195, tags: [['d', 'fips-overlay-v1']], content: '', created_at: Math.floor(Date.now() / 1000) }, owner);
-    expect((await receiver.publish(advert)).accepted).toBe(true);
+    expect((await receiver.publish(advert, { queue: false })).accepted).toBe(true);
     expect((await discovery.query([{ kinds: [37195], authors: [recipient], '#d': ['fips-overlay-v1'] }], { cache: 'network-only' })).complete).toBe(true);
     const own = frames(server).find(connection => auth(connection)?.pubkey === ownerKey)!;
     const lookup = frames(server).find(connection => connection.some(frame => frame[0] === 'REQ' && JSON.stringify(frame.slice(2)).includes(recipient)))!;

@@ -1,6 +1,9 @@
 import type { NostrEvent } from './types.js';
 import { PubsubError } from './types.js';
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder('utf-8', { fatal: true });
+
 export const DEFAULT_INV_WANT_FANOUT = 8;
 export const DEFAULT_INV_WANT_MAX_EVENT_BYTES = 1024 * 1024;
 export const DEFAULT_INV_WANT_MAX_WIRE_BYTES = DEFAULT_INV_WANT_MAX_EVENT_BYTES + 4096;
@@ -32,7 +35,7 @@ export class InvWantCodec {
   }
 
   encode(message: InvWantWireMessage): Uint8Array {
-    const encoded = new TextEncoder().encode(
+    const encoded = encoder.encode(
       JSON.stringify({
         protocol: this.protocol,
         version: this.version,
@@ -47,7 +50,7 @@ export class InvWantCodec {
     this.checkWireLength(payload.byteLength);
     let value: unknown;
     try {
-      value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload));
+      value = JSON.parse(decoder.decode(payload));
     } catch (error) {
       throw validation(`invalid inv/want JSON: ${errorMessage(error)}`);
     }
@@ -71,7 +74,7 @@ export class InvWantCodec {
 }
 
 export function meshEventJsonBytes(event: NostrEvent): number {
-  return new TextEncoder().encode(JSON.stringify(eventToWire(event))).byteLength;
+  return encoder.encode(JSON.stringify(eventToWire(event))).byteLength;
 }
 
 function messageToWire(message: InvWantWireMessage): Record<string, unknown> {

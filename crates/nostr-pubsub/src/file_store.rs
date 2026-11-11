@@ -107,12 +107,19 @@ impl EventBus for FileEventBus {
                 .as_mut()
                 .ok_or_else(|| storage("event store is closed"))?;
             let now = Timestamp::now().as_secs();
-            let mut candidate = state.events.clone();
-            let accepted = candidate.insert(event, now);
-            if accepted {
+            // Duplicates and events outside retention need no candidate copy.
+            let mut candidate = None;
+            if !state.events.rejects(&event, now) {
+                let mut events = state.events.clone();
+                if events.insert(event, now) {
+                    candidate = Some(events);
+                }
+            }
+            let accepted = candidate.is_some();
+            if let Some(candidate) = candidate {
                 let snapshot = Snapshot {
                     version: 1,
-                    events: candidate.snapshot(now),
+                    events: candidate.current(now).collect::<Vec<&Event>>(),
                 };
                 let bytes = serde_json::to_vec(&snapshot).map_err(storage)?;
                 if bytes.len() > MAX_RETAINED_SNAPSHOT_BYTES {

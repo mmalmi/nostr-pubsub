@@ -5,6 +5,7 @@ use nostr::Filter;
 use crate::{
     EventBus, EventSource, PolicyDecision, PubsubError, PubsubPolicy, QueryEvent, QueryOptions,
     Result, SourceCandidate, SourceHealth, SourcePolicyContext, VerifiedEvent,
+    retained::newest_first,
 };
 
 pub const DEFAULT_ROUTE_DATASET_ID: &str = "default";
@@ -398,20 +399,7 @@ fn merge_routed_events(events: Vec<RoutedQueryEvent>) -> Vec<RoutedQueryEvent> {
         });
         event.provenance.dedup();
     }
-    merged.sort_by(|left, right| {
-        right
-            .event
-            .as_event()
-            .created_at
-            .cmp(&left.event.as_event().created_at)
-            .then_with(|| {
-                left.event
-                    .as_event()
-                    .id
-                    .to_hex()
-                    .cmp(&right.event.as_event().id.to_hex())
-            })
-    });
+    merged.sort_by(|left, right| newest_first(left.event.as_event(), right.event.as_event()));
     merged
 }
 

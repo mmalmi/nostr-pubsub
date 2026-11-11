@@ -1,6 +1,21 @@
+use std::collections::{HashMap, VecDeque};
+
 use nostr::Event;
 
 use super::InvWantMesh;
+
+/// Drops ids whose entry left `live`, keeping the remaining order.
+///
+/// `order` holds every live id exactly once. Entries usually expire oldest
+/// first, so the stale ids are normally a prefix and no full scan is needed.
+fn prune_order<V>(order: &mut VecDeque<String>, live: &HashMap<String, V>) {
+    while order.front().is_some_and(|id| !live.contains_key(id)) {
+        order.pop_front();
+    }
+    if order.len() != live.len() {
+        order.retain(|id| live.contains_key(id));
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct CachedEvent {
@@ -86,11 +101,88 @@ impl InvWantMesh {
         self.track_expiry(expires_at_ms);
     }
 
+    pub(super) fn prune(&mut self, now_ms: u64) {
+        let Some(next_prune_at_ms) = self.next_prune_at_ms else {
+            return;
+        };
+        if now_ms < next_prune_at_ms {
+            return;
+        }
+        let unserved_peers = self
+            .upstream_routes
+            .values()
+            .filter(|route| !route.fulfilled && route.expires_at_ms <= now_ms)
+            .flat_map(|route| {
+                std::iter::once(route.peer_id.clone())
+                    .chain(route.alternate_peers.iter().cloned())
+                    .filter(|peer| !route.transport_disrupted_peers.contains(peer))
+            })
+            .collect::<Vec<_>>();
+        for peer_id in unserved_peers {
+            self.record_peer_behavior(
+                &peer_id,
+                super::UNSERVED_INVENTORY_PENALTY,
+                super::PeerBehaviorEvidence::UnservedInventory,
+            );
+        }
+        self.prune_cached_events(now_ms);
+        let seen_before = self.seen_inventories.len();
+        self.seen_inventories
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        if self.seen_inventories.len() != seen_before {
+            prune_order(&mut self.seen_order, &self.seen_inventories);
+        }
+        let delivered_before = self.delivered_events.len();
+        self.delivered_events
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        if self.delivered_events.len() != delivered_before {
+            prune_order(&mut self.delivered_order, &self.delivered_events);
+        }
+        // Pending and forwarded entries only exist for live routes, so they
+        // leave with the routes removed here instead of by a lookup per entry.
+        let mut expired_routes = Vec::new();
+        self.upstream_routes.retain(|event_id, route| {
+            let live = route.expires_at_ms > now_ms;
+            if !live {
+                expired_routes.push(event_id.clone());
+            }
+            live
+        });
+        for event_id in &expired_routes {
+            self.pending_downstream.remove(event_id);
+            self.want_forwarded.remove(event_id);
+        }
+        self.pending_downstream
+            .retain(|_, pending| pending.expires_at_ms > now_ms);
+        self.pending_peer_count = self
+            .pending_downstream
+            .values()
+            .map(|pending| pending.peers.len())
+            .sum();
+        self.want_forwarded
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.next_prune_at_ms = self
+            .cached_events
+            .values()
+            .map(|cached| cached.expires_at_ms)
+            .chain(self.seen_inventories.values().copied())
+            .chain(self.delivered_events.values().copied())
+            .chain(
+                self.upstream_routes
+                    .values()
+                    .map(|route| route.expires_at_ms),
+            )
+            .min();
+    }
+
     pub(super) fn prune_cached_events(&mut self, now_ms: u64) {
+        let before = self.cached_events.len();
         self.cached_events
             .retain(|_, cached| cached.expires_at_ms > now_ms);
-        self.cache_order
-            .retain(|event_id| self.cached_events.contains_key(event_id));
+        if self.cached_events.len() == before {
+            return;
+        }
+        prune_order(&mut self.cache_order, &self.cached_events);
         self.cached_event_bytes = self.cached_events.values().fold(0, |total, cached| {
             total.saturating_add(cached.payload_bytes)
         });
@@ -131,5 +223,31 @@ impl InvWantMesh {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_order_drops_stale_ids_anywhere_and_keeps_the_rest_in_order() {
+        let ids = |ids: &[&str]| ids.iter().map(ToString::to_string).collect::<VecDeque<_>>();
+        let live = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| ((*id).to_string(), 0_u64))
+                .collect::<HashMap<_, _>>()
+        };
+        for (before, kept) in [
+            (&["a", "b", "c", "d"][..], &["c", "d"][..]),
+            (&["a", "b", "c", "d"], &["a", "d"]),
+            (&["a", "b", "c", "d"], &["b"]),
+            (&["a", "b"], &["a", "b"]),
+            (&["a", "b"], &[]),
+        ] {
+            let mut order = ids(before);
+            prune_order(&mut order, &live(kept));
+            assert_eq!(order, ids(kept));
+        }
     }
 }

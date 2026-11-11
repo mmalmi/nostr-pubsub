@@ -99,7 +99,7 @@ impl InvWantMesh {
     ) -> Result<Vec<InvWantAction>> {
         self.prune(now_ms);
         let event = verified.into_event();
-        let result = self.receive_frame(source_peer, event_id, &event, peers, now_ms, false);
+        let result = self.receive_frame(source_peer, event_id, event, peers, now_ms, false);
         if result.is_err() {
             self.record_invalid_message(source_peer);
         }

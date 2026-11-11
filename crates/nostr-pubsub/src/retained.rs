@@ -2,6 +2,7 @@
 //! Storage adapters own durability; this model owns Nostr retention semantics.
 use crate::{EventRetentionPolicy, Filter, MatchEventOptions, QueryOptions, VerifiedEvent};
 use nostr::Event;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 pub const MAX_RETAINED_EVENT_BYTES: usize = 64 * 1024;
@@ -43,17 +44,23 @@ impl RetainedEvents {
         }
     }
 
-    pub fn insert(&mut self, event: VerifiedEvent, now: u64) -> bool {
+    /// Whether `insert` would refuse the event before changing anything.
+    pub(crate) fn rejects(&self, event: &VerifiedEvent, now: u64) -> bool {
         let raw = event.as_event();
-        if !self.policy.accepts(&event)
+        !self.policy.accepts(event)
             || !retained_event_is_current(raw, now)
             || self
                 .events
                 .iter()
                 .any(|(old, _)| old.as_event().id == raw.id)
-        {
+    }
+
+    pub fn insert(&mut self, event: VerifiedEvent, now: u64) -> bool {
+        if self.rejects(&event, now) {
             return false;
         }
+        let raw = event.as_event();
+        let id = raw.id;
         let Ok(encoded) = serde_json::to_vec(raw) else {
             return false;
         };
@@ -73,13 +80,9 @@ impl RetainedEvents {
             retained_event_is_current(old.as_event(), now)
                 && (coordinate.is_none() || event_coordinate(old.as_event()) != coordinate)
         });
-        self.events.push((event.clone(), encoded.len()));
-        self.events.sort_by(|(a, _), (b, _)| {
-            b.as_event()
-                .created_at
-                .cmp(&a.as_event().created_at)
-                .then_with(|| a.as_event().id.cmp(&b.as_event().id))
-        });
+        self.events.push((event, encoded.len()));
+        self.events
+            .sort_by(|(a, _), (b, _)| newest_first(a.as_event(), b.as_event()));
         self.bytes = self.events.iter().map(|(_, size)| *size + 1).sum();
         // Reserve space for the snapshot envelope as well as commas.
         while self.events.len() > self.policy.max_events
@@ -91,15 +94,19 @@ impl RetainedEvents {
         }
         self.events
             .iter()
-            .any(|(stored, _)| stored.as_event().id == event.as_event().id)
+            .any(|(stored, _)| stored.as_event().id == id)
     }
 
     pub fn snapshot(&self, now: u64) -> Vec<Event> {
+        self.current(now).cloned().collect()
+    }
+
+    /// The events a snapshot taken at `now` contains, without copying them.
+    pub(crate) fn current(&self, now: u64) -> impl Iterator<Item = &Event> {
         self.events
             .iter()
-            .filter(|(event, _)| retained_event_is_current(event.as_event(), now))
-            .map(|(event, _)| event.as_event().clone())
-            .collect()
+            .map(|(event, _)| event.as_event())
+            .filter(move |event| retained_event_is_current(event, now))
     }
 
     pub fn query(&self, filters: &[Filter], options: QueryOptions, now: u64) -> Vec<VerifiedEvent> {
@@ -153,15 +160,23 @@ pub fn event_supersedes(candidate: &Event, previous: &Event) -> bool {
         || (candidate.created_at == previous.created_at && candidate.id < previous.id)
 }
 
-fn event_coordinate(event: &Event) -> Option<(u16, nostr::PublicKey, String)> {
+/// Query order: newest first, lower event ID first on timestamp ties.
+pub(crate) fn newest_first(left: &Event, right: &Event) -> Ordering {
+    right
+        .created_at
+        .cmp(&left.created_at)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn event_coordinate(event: &Event) -> Option<(u16, nostr::PublicKey, &str)> {
     let kind = event.kind.as_u16();
     if matches!(kind, 0 | 3 | 10_000..=19_999) {
-        Some((kind, event.pubkey, String::new()))
+        Some((kind, event.pubkey, ""))
     } else if (30_000..40_000).contains(&kind) {
         Some((
             kind,
             event.pubkey,
-            event.tags.identifier().unwrap_or_default().to_owned(),
+            event.tags.identifier().unwrap_or_default(),
         ))
     } else {
         None

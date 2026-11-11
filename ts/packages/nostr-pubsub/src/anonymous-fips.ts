@@ -18,6 +18,8 @@ function rememberEndpoint(used: Set<string>, id: string): void {
 export interface AnonymousFipsEndpoint {
   node: FipsPubsubClientNode;
   localPeerId: string;
+  /** Optional diagnostics for established Nostr service streams on this endpoint. */
+  observeConnections?(read: () => readonly string[]): void;
   peers(): readonly string[];
   close(): Promise<void>;
 }
