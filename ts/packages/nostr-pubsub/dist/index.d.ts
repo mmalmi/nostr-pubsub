@@ -39,4 +39,5 @@ export { IndexedDbEventBus } from './indexed-db-event-bus.js';
 export { RetainedPeerDiscovery } from './retained-peer-discovery.js';
 export { HistoryCursor, type HistoryPage, type HistoryPageCompletion, type HistoryPageOutcome, type HistoryPageToken, type HistoryPageStatus, } from './pagination.js';
 export { publicPeerSource, openPublicPeerFeedSource, subscribePublicPeerFeed, type PublicPeerFeed, type PublicPeerFeedSource } from './public-peer-source.js';
+export { enqueueRelayPublication, drainRelayOutbox, retryRelayOutbox, relayRetryDeadline, type RelayDelivery, type RelayDeliveryProgress, type RelayDrainOptions, type RelayRetryStore, } from './relay-outbox.js';
 //# sourceMappingURL=index.d.ts.map

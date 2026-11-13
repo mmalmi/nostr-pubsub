@@ -269,3 +269,8 @@ export {
 } from './pagination.js';
 
 export { publicPeerSource, openPublicPeerFeedSource, subscribePublicPeerFeed, type PublicPeerFeed, type PublicPeerFeedSource } from './public-peer-source.js';
+
+export {
+  enqueueRelayPublication, drainRelayOutbox, retryRelayOutbox, relayRetryDeadline,
+  type RelayDelivery, type RelayDeliveryProgress, type RelayDrainOptions, type RelayRetryStore,
+} from './relay-outbox.js';

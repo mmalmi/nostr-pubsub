@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.30
+
+Add a durable per-relay outbox API with independent acknowledgements, missing-event comparison and persistent rate-limit deadlines. Expose structured rate-limit replies from the relay transport.
+
+
 ## 0.5.29 - 2026-11-11
 
 - Accept kind 1060 message envelopes that name no recipient. `createPrivateRelayPublisher`, the private pending lane and the anonymous FIPS publisher used to require exactly one `p` tag on kind 1060; they now also send a message with no `p` tag when it has exactly one `["v","2"]` and one non-empty `header` tag, the shape `nostr-double-ratchet` 0.0.184 produces. Messages with one `p` are sent exactly as before, including ones already queued. Kinds 1059 and 21111 are unchanged: exactly one `p`.

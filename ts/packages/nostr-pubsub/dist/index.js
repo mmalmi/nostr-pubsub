@@ -35,4 +35,5 @@ export { IndexedDbEventBus } from './indexed-db-event-bus.js';
 export { RetainedPeerDiscovery } from './retained-peer-discovery.js';
 export { HistoryCursor, } from './pagination.js';
 export { publicPeerSource, openPublicPeerFeedSource, subscribePublicPeerFeed } from './public-peer-source.js';
+export { enqueueRelayPublication, drainRelayOutbox, retryRelayOutbox, relayRetryDeadline, } from './relay-outbox.js';
 //# sourceMappingURL=index.js.map

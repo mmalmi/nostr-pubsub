@@ -437,3 +437,15 @@ verified older provider for the dedicated legacy case; without it, only that
 conditional case is skipped. Packaging does not replace these qualification
 gates. Previously accepted test results apply only to unchanged source,
 tests, configuration and locked dependencies.
+
+
+### Delivering to every selected relay
+
+Use `enqueueRelayPublication(event, relays, put)` in the event's local storage transaction.
+Store each delivery under `[event.id, relay]`. Once that transaction commits the caller can
+return, even offline. Use `{ broadcast: true }` for bulk publication and reconciliation.
+On connectivity changes, startup or a retry alarm, call `retryRelayOutbox` and
+`drainRelayOutbox` with the persistent storage and transport callbacks. Only acknowledge
+the specified destination. Receipts, or a successful inventory comparison, clear rows.
+A failure leaves its rows pending and a rate-limit response defers only that destination.
+The host supplies durable storage and schedules wake-ups while suspended.
