@@ -1,4 +1,5 @@
-import { AbstractSimplePool, type SubCloser } from 'nostr-tools/abstract-pool';
+import { RateLimitAwarePool, withPublishRateLimit } from './relay-rate-limit.js';
+import type { SubCloser } from 'nostr-tools/abstract-pool';
 import { verifyEvent } from 'nostr-tools/pure';
 import { matchFilter, matchFilters } from 'nostr-tools/filter';
 import { createSimplePoolNostrRelayVerificationBoundary } from './simple-pool-relay-transport.js';
@@ -12,7 +13,7 @@ type Batch = { entries: Entry[]; links: Map<string, Link>; closed: boolean; reop
 
 /** Batches OR filters without merging their fields, preserving recipient/author intersections. */
 export class RuntimeRelays {
-  private readonly pool: AbstractSimplePool;
+  private readonly pool: RateLimitAwarePool;
   private readonly boundary: ReturnType<typeof createSimplePoolNostrRelayVerificationBoundary>;
   private readonly reconciliation?: RuntimeReconciliation;
   private relays: string[];
@@ -29,7 +30,7 @@ export class RuntimeRelays {
     this.relays = normalizeRelays(options.relays ?? []);
     this.maxFilters = positive(options.maxFiltersPerBatch, 20);
     this.maxBytes = positive(options.maxFilterBytesPerBatch, 32768);
-    this.pool = new AbstractSimplePool({
+    this.pool = new RateLimitAwarePool({
       maxWaitForConnection: options.historyTimeoutMs ?? 3000,
       websocketImplementation: options.websocketImplementation,
       verifyEvent: (event): event is NostrVerifiedEvent => this.boundary.verifyEvent(event),
@@ -83,11 +84,12 @@ export class RuntimeRelays {
     const timeout = this.options.publishTimeoutMs ?? 5000;
     const relay = await this.pool.ensureRelay(url, { connectionTimeout: timeout });
     relay.publishTimeout = timeout;
-    try { await relay.publish(event); }
+    const publish = () => withPublishRateLimit(this.pool, url, event.id, () => relay.publish(event));
+    try { await publish(); }
     catch (error) {
       if (!errorText(error).startsWith('auth-required:') || !this.options.signAuthEvent) throw error;
       await relay.auth(async (template) => verifyNostrEvent(await this.options.signAuthEvent!(url, template)));
-      await relay.publish(event);
+      await publish();
     }
   }
   close(): void {

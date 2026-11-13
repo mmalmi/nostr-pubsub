@@ -1,3 +1,4 @@
+import { RelayRateLimitError } from './relay-rate-limit.js';
 import { matchFilters } from 'nostr-tools/filter';
 import { verifyNostrEvent, validateQueryOptions } from './types.js';
 import { localIndexSource } from './source.js';
@@ -428,7 +429,10 @@ export class NostrRuntime {
                     outcomes[index] = { id: attempts[index].id, accepted: remote, ...(remote ? {} : { queued: true }) };
                     if (remote)
                         resolve(true);
-                }, (error) => { outcomes[index] = { id: attempts[index].id, accepted: false, error: asError(error).message }; })
+                }, (error) => {
+                    outcomes[index] = { id: attempts[index].id, accepted: false, error: asError(error).message,
+                        ...(error instanceof RelayRateLimitError ? { rateLimited: true, retryAfterMs: error.retryAfterMs } : {}), };
+                })
                     .finally(() => { if (--remaining === 0)
                     resolve(false); });
             });

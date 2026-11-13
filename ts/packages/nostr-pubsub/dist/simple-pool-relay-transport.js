@@ -1,3 +1,4 @@
+import { withPublishRateLimit, RelayRateLimitError } from './relay-rate-limit.js';
 import { SimplePool } from 'nostr-tools';
 import { copyVerifiedNostrEvent, PubsubError, verifyNostrEvent, } from './types.js';
 const verificationBoundaries = new WeakSet();
@@ -150,10 +151,12 @@ export class SimplePoolNostrRelayTransport {
                     throw new Error(result);
                 return result;
             });
-        const results = await Promise.allSettled(attempts.map((attempt) => withTimeout(attempt, this.publishTimeoutMs)));
+        const results = await Promise.allSettled(attempts.map((attempt, index) => withPublishRateLimit(this.pool, relays[index], verified.id, () => withTimeout(attempt, this.publishTimeoutMs))));
         if (results.some((result) => result.status === 'fulfilled'))
             return;
         const failure = results.find((result) => result.status === 'rejected');
+        if (failure?.status === 'rejected' && failure.reason instanceof RelayRateLimitError)
+            throw failure.reason;
         throw new Error(rejectionMessage(failure));
     }
 }

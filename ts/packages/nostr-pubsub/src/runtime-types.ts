@@ -61,7 +61,7 @@ export interface RuntimePublishResult {
   accepted: boolean;
   remoteAccepted: boolean;
   queued: boolean;
-  sources: Array<{ id: string; accepted: boolean; pending?: boolean; queued?: boolean; error?: string }>;
+  sources: Array<{ id: string; accepted: boolean; pending?: boolean; queued?: boolean; error?: string; rateLimited?: true; retryAfterMs?: number }>;
 }
 export interface RuntimeRelayStats { url: string; connected: boolean; }
 export interface RuntimeMetrics {

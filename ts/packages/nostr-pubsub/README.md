@@ -226,10 +226,12 @@ live subscriptions remain open:
 ```ts
 import {
   NostrRelayEventSource,
+  RateLimitAwarePool,
   SimplePoolNostrRelayTransport,
 } from 'nostr-pubsub';
 
 const relayTransport = new SimplePoolNostrRelayTransport({
+  pool: new RateLimitAwarePool(),
   getRelays: () => settings.readRelays(),
   queryQuietWindowMs: 600,
 });
@@ -240,6 +242,13 @@ const historical = await relayEvents.query([{ kinds: [0], authors }], {
 });
 const live = relayEvents.subscribe([{ kinds: [1], since }], receiveEvent);
 ```
+
+A rate-limited publication rejects with `RelayRateLimitError`. Its `relay` identifies
+the destination and its optional `retryAfterMs` carries the relay's delay. Use
+`RateLimitAwarePool` to retain the optional NIP-01 wire parameter. Plain pools
+can classify the rejection from the reason string. The runtime exposes
+`rateLimited` and `retryAfterMs` on the rejected source's publish result.
+Callers choose a default delay when the relay omits one.
 
 `FipsNostrPubsubClient` is the browser peer carrier matching Rust
 `FipsPubsubClient` on authenticated reliable FIPS-TCP service
