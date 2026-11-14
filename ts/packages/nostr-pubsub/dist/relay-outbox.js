@@ -11,13 +11,17 @@ export async function enqueueRelayPublication(event, relays, put, options = {}) 
 export async function drainRelayOutbox(relay, rows, options) {
     const progress = { sent: 0, present: 0, failed: 0 };
     const pending = rows.filter(row => row.relay === relay);
-    const automatic = pending.filter(row => !row.broadcast).slice(0, 100);
+    const automatic = pending.filter(row => !row.broadcast);
     const broadcast = pending.filter(row => row.broadcast)
         .sort((a, b) => (a.created_at ?? 0) - (b.created_at ?? 0));
-    async function send(batch) {
+    async function send(batch, limit = Infinity) {
+        let attempted = 0;
         for (const row of batch) {
+            if (attempted >= limit)
+                break;
             if (!await options.enabled(row))
                 continue;
+            attempted++;
             try {
                 await options.send(row);
             }
@@ -37,21 +41,33 @@ export async function drainRelayOutbox(relay, rows, options) {
         }
         return true;
     }
-    if (!await send(automatic))
+    if (!await send(automatic, 100))
         return progress;
     for (let offset = 0; offset < broadcast.length; offset += 512) {
         let batch = broadcast.slice(offset, offset + 512);
-        if (!await options.enabled(batch[0]))
-            break;
-        const missing = await options.missing?.(batch);
-        if (missing) {
-            const present = batch.filter(row => !missing.has(row.id)).map(row => row.id);
-            if (present.length) {
-                await options.acknowledge(present);
-                progress.present += present.length;
-                options.onProgress?.({ ...progress });
+        if (options.missing) {
+            const enabled = [];
+            for (const row of batch) {
+                if (await options.enabled(row))
+                    enabled.push(row);
             }
-            batch = batch.filter(row => missing.has(row.id));
+            if (!enabled.length)
+                continue;
+            batch = enabled;
+            const missing = await options.missing(batch);
+            if (missing) {
+                const present = [];
+                for (const row of batch) {
+                    if (!missing.has(row.id) && await options.enabled(row))
+                        present.push(row.id);
+                }
+                if (present.length) {
+                    await options.acknowledge(present);
+                    progress.present += present.length;
+                    options.onProgress?.({ ...progress });
+                }
+                batch = batch.filter(row => missing.has(row.id));
+            }
         }
         if (!await send(batch))
             break;

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.31
+
+Keep paused deliveries pending and continue with enabled rows at the same relay. Only eligible deliveries count toward the automatic send limit or enter broadcast inventory comparisons.
+
 ## 0.5.30
 
 Add a durable per-relay outbox API with independent acknowledgements, missing-event comparison and persistent rate-limit deadlines. Expose structured rate-limit replies from the relay transport.
