@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.50-recovery.1 - 2026-11-16
+
+Use FIPS core 0.4.118-recovery.1 and the matching TCP endpoint for automatic peer restart recovery.
+
 ## 0.5.49
 
 - Use FIPS core 0.4.117 and TCP endpoint 0.2.52 to support peer recovery
