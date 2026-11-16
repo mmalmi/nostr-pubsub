@@ -207,9 +207,15 @@ pub(super) fn deliver_local(
     event: VerifiedEvent,
     source: EventSource,
 ) -> bool {
-    active.delivery.enqueue(QueryEvent {
+    // A feed window keeps what its subscription was given.
+    let remembered = active.feed.is_some().then(|| event.clone());
+    let fresh = active.delivery.enqueue(QueryEvent {
         event,
         source,
         priority: SOURCE_PRIORITY_FIPS_ENDPOINT,
-    })
+    });
+    if fresh && let (Some(feed), Some(event)) = (active.feed.as_mut(), remembered) {
+        feed.window.remember(&event);
+    }
+    fresh
 }

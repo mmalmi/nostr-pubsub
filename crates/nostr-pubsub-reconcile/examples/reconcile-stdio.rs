@@ -63,7 +63,13 @@ fn command(session: &mut Option<Session>, value: &Value) -> Result<Value, String
             Ok(json!({}))
         }
         Some("initiate") => {
-            Ok(json!({"next": hex(&session.as_mut().ok_or("no session")?.initiate()?)}))
+            let session = session.as_mut().ok_or("no session")?;
+            let opening = if value["fingerprintFirst"].as_bool() == Some(true) {
+                session.initiate_fingerprint_first()?
+            } else {
+                session.initiate()?
+            };
+            Ok(json!({"next": hex(&opening)}))
         }
         Some("respond") => Ok(
             json!({"next": hex(&session.as_mut().ok_or("no session")?.respond(&unhex(&value["frame"])?)?)}),

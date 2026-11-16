@@ -23,9 +23,11 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 mod anonymous_publication;
+mod client_feeds;
 mod client_inner;
 mod client_publication;
 mod client_received_event;
+pub mod feed;
 mod privacy_roles;
 pub use anonymous_publication::{FipsAnonymousPublisher, FipsRemotePublication};
 pub use privacy_roles::FipsDiscoveryScope;
@@ -488,6 +490,7 @@ impl FipsPubsubClient {
             publications: Mutex::new(HashMap::new()),
             endpoint: Arc::clone(&endpoint),
             codec,
+            feeds: Mutex::new(client_feeds::FeedState::new(&options)),
             options,
             routed_peers: Mutex::new(routed_peers),
             peer_transport,
@@ -602,6 +605,21 @@ impl FipsPubsubClient {
 
     pub async fn subscribe(&self, filters: Vec<Filter>) -> Result<FipsPubsubSubscription> {
         self.inner.subscribe(filters, true).await
+    }
+
+    /// Open a public peer feed for one filter (see [`feed`]). Events this
+    /// client publishes or receives on it fill a bounded window; a peer that
+    /// provides the feed reconciles against that window and announces only
+    /// what is missing. `peers` limits which peers get the request; `None`
+    /// sends it to every connected peer. There is no local replay.
+    pub async fn subscribe_feed(
+        &self,
+        filter: Filter,
+        peers: Option<Vec<String>>,
+    ) -> Result<FipsPubsubSubscription> {
+        self.inner
+            .subscribe_feed(filter, peers.map(|peers| peers.into_iter().collect()))
+            .await
     }
 
     /// A subscription provider that requires new peer observations. It shares
@@ -787,6 +805,14 @@ impl FipsPubsubSubscription {
 
     pub fn close(mut self) {
         self.cleanup();
+    }
+
+    /// For a feed subscription, replace the peers it is sent to. Removed peers
+    /// get a `CLOSE`; newly admitted connected peers get the request.
+    pub async fn set_feed_peers(&self, peers: Option<Vec<String>>) -> Result<()> {
+        self.inner
+            .set_feed_peers(&self.key, peers.map(|peers| peers.into_iter().collect()))
+            .await
     }
 
     fn cleanup(&mut self) {

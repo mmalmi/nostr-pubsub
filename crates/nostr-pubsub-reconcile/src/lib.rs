@@ -130,6 +130,15 @@ impl Session {
         self.engine.initiate().map_err(|e| e.to_string())
     }
 
+    /// Like [`Self::initiate`], but the first frame carries one fingerprint for
+    /// the whole window. Repeat syncs of an unchanged window end in one round.
+    pub fn initiate_fingerprint_first(&mut self) -> Result<Vec<u8>> {
+        self.tick()?;
+        self.engine
+            .initiate_fingerprint_first()
+            .map_err(|e| e.to_string())
+    }
+
     pub fn respond(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
         self.accept(frame)?;
         self.engine.reconcile(frame).map_err(|e| e.to_string())

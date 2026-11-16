@@ -76,6 +76,28 @@ impl Negentropy {
         Ok(output)
     }
 
+    /// Open with one fingerprint for the whole window, so peers already in sync
+    /// finish in one round. An empty window opens with its empty ID list.
+    pub fn initiate_fingerprint_first(&mut self) -> Result<Vec<u8>, Error> {
+        if self.is_initiator {
+            return Err(Error::AlreadyBuiltInitialMessage);
+        }
+        self.is_initiator = true;
+
+        let mut output: Vec<u8> = Vec::new();
+        output.push(u8::try_from(PROTOCOL_VERSION).expect("protocol version fits u8"));
+        let count = self.storage.size();
+        if count == 0 {
+            output.extend(self.split_range(0, 0, Bound::with_timestamp(MAX_U64))?);
+        } else {
+            let fingerprint = self.storage.range_fingerprint(0, count)?;
+            output.extend(self.encode_bound(&Bound::with_timestamp(MAX_U64)));
+            output.extend(self.encode_mode(Mode::Fingerprint));
+            output.extend(fingerprint.iter());
+        }
+        Ok(output)
+    }
+
     /// Reconcile (server method)
     pub fn reconcile(&mut self, query: &[u8]) -> Result<Vec<u8>, Error> {
         if self.is_initiator {

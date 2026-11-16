@@ -24,6 +24,7 @@ nvpn-fips-tcp-endpoint = { version = "=0.2.57" }
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
 nostr-pubsub = { version = "0.1.20", path = "crates/nostr-pubsub" }
+nostr-pubsub-reconcile = { version = "0.1.4", path = "crates/nostr-pubsub-reconcile" }
 nostr-pubsub-social-graph = { version = "0.3.1", path = "crates/nostr-pubsub-social-graph" }
 nostr-social-graph = "0.2.1"
 nostr-social-memory = "0.2.1"

@@ -184,7 +184,7 @@ impl ClientInner {
         if accepted {
             // Admission is independent of sender subscription state. Inbound
             // anonymous clients are not added to the outgoing provider roster.
-            let _ = self.deliver_local_event(&peer.npub(), &event);
+            let _ = self.deliver_local_event(&peer.npub(), None, &event);
             match self.remember_event(event.clone(), source, self.options.max_hops) {
                 Ok(true) => {
                     if let Ok(targets) =

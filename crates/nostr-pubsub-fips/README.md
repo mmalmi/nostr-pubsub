@@ -9,8 +9,9 @@ crate opens no Nostr relay socket.
 
 The Rust dependencies are published as `nvpn-fips-core`, `nvpn-fips-tcp`, and
 `nvpn-fips-tcp-endpoint`. Source imports abbreviate these names locally.
-Version `0.6.4` requires `nostr-pubsub` `0.1.20` or later and pins FIPS
-core `0.4.122`, TCP `0.2.6`, and TCP endpoint `0.2.56`.
+Version `0.6.6` requires `nostr-pubsub` `0.1.20` or later and
+`nostr-pubsub-reconcile` `0.1.4` or later, and pins FIPS core `0.4.123`, TCP
+`0.2.6`, and TCP endpoint `0.2.57`.
 
 The rating facade uses `nostr-pubsub-social-graph` `0.3.1` or later, with
 `nostr-social-graph` and `nostr-social-memory` `0.2.1` or later. Public reputation options expose the adapter's
@@ -145,6 +146,26 @@ available while peers request them; the client itself is not a durable store.
 The package also exports the lower-level `FipsInvWantTcpDriver` for non-Nostr
 mesh protocols, plus transport-neutral FIPS peerfinding and reputation
 adapters. It targets the FIPS `0.4.x` endpoint API.
+
+## Public peer feeds
+
+`FipsPubsubClient::subscribe_feed(filter, peers)` opens a public peer feed, the
+same feed the TypeScript client opens with `replaceFeed`. The filter takes public
+kinds, optionally narrowed to at most 256 authors or to one notified key. The
+feed keeps a window of up to 256 events it published or was given. Its request
+id is `wf1-ts-N` when that window holds events and `cf1-ts-N` when it is empty.
+
+A client providing the feed answers a warm request with a `FEED-SYNC/1`
+Negentropy session over the events it can offer, then announces only what the
+subscriber lacks through ordinary `INV`/`WANT`. A cold request, a declined
+session or one past its 2.5 second deadline gets the latest
+`max_replay_events` instead. `peers` limits which peers receive the request
+(`None`: every connected peer); `FipsPubsubSubscription::set_feed_peers`
+changes it, closing the request on removed peers. Publish an application's
+held events after opening the feed and before admitting peers, so the first
+request is warm. The `feed` module holds the frame codec and the deterministic
+session state machine; `examples/feed-sync-stdio.rs` exposes it to the
+TypeScript interop tests.
 
 ## Private provider operations
 

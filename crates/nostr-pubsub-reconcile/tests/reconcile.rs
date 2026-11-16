@@ -208,3 +208,66 @@ fn validates_the_tail_even_when_an_earlier_range_fills_the_output() {
     .unwrap();
     assert!(peer.respond(&[0x61, 0, 0, 2, 0, 0xff]).is_err());
 }
+
+fn session(records: Vec<Record>) -> Session {
+    Session::new(
+        records,
+        Filter {
+            since: 0,
+            until: (1 << 63) - 1,
+        },
+        Limits {
+            max_frame_bytes: 4096,
+            ..Limits::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn fingerprint_first_finds_the_same_gaps_and_ends_in_one_round_when_in_sync() {
+    let all: Vec<_> = (0..300).map(|n| record(100 + n / 3, n)).collect();
+    let a: Vec<_> = all
+        .iter()
+        .copied()
+        .filter(|r| r.id != record(0, 7).id)
+        .collect();
+    let b: Vec<_> = all
+        .iter()
+        .copied()
+        .filter(|r| r.id != record(0, 11).id)
+        .collect();
+    let mut initiator = session(a);
+    let mut responder = session(b);
+    let mut query = initiator.initiate_fingerprint_first().unwrap();
+    // Version, an infinite upper bound, fingerprint mode and one fingerprint.
+    assert_eq!(query.len(), 1 + 2 + 1 + 16);
+    let (mut have, mut need) = (Vec::new(), Vec::new());
+    loop {
+        let step = initiator
+            .reconcile(&responder.respond(&query).unwrap())
+            .unwrap();
+        have.extend(step.have);
+        need.extend(step.need);
+        match step.next {
+            Some(next) => query = next,
+            None => break,
+        }
+    }
+    assert_eq!(have, vec![record(0, 11).id]);
+    assert_eq!(need, vec![record(0, 7).id]);
+
+    let mut initiator = session(all.clone());
+    let mut responder = session(all);
+    let opening = initiator.initiate_fingerprint_first().unwrap();
+    let step = initiator
+        .reconcile(&responder.respond(&opening).unwrap())
+        .unwrap();
+    assert!(step.next.is_none() && step.have.is_empty() && step.need.is_empty());
+
+    let mut empty = session(Vec::new());
+    assert_eq!(
+        empty.initiate_fingerprint_first().unwrap(),
+        session(Vec::new()).initiate().unwrap()
+    );
+}

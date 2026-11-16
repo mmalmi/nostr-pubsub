@@ -63,6 +63,7 @@ pub(super) async fn transport_loop(
                 }
             }
             _ = peer_tick.tick() => {
+                inner.expire_feed_syncs(now_ms());
                 sync_transport_peers(&inner, &mut driver, &mut known_links).await;
                 (None, 0)
             }
@@ -239,6 +240,9 @@ fn forget_peer_state(inner: &ClientInner, peer_npub: &str) {
     if let Ok(mut subscriptions) = inner.lock_subscriptions() {
         for subscription in subscriptions.values_mut() {
             subscription.peers.remove(peer_npub);
+            if let Some(feed) = subscription.feed.as_mut() {
+                feed.forget_peer(peer_npub);
+            }
         }
     }
 }

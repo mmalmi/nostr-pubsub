@@ -90,7 +90,7 @@ impl super::ClientInner {
             .unwrap_or_default();
         for (key, subscription) in active {
             subscription.delivery.close();
-            self.send_close(&key, subscription.peers);
+            self.send_close(&key, &subscription);
         }
         if let Ok(mut publications) = self.publications.lock() {
             publications.clear();

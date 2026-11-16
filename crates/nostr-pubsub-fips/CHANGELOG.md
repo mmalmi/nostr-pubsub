@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.6 - 2026-11-16
+
+- Add public peer feeds with Negentropy catch-up, wire-compatible with the
+  TypeScript client: `subscribe_feed`, `FipsPubsubSubscription::set_feed_peers`
+  and the `feed` module (`FEED-SYNC/1` frames, `wf1-ts-N`/`cf1-ts-N` request
+  ids, feed windows and sessions). Feed sessions use
+  `nostr-pubsub-reconcile` 0.1.4.
+- Ordinary requests, replay and other frames are unchanged.
+
 ## 0.6.5 - 2026-11-16
 
 Use the shared FIPS core 0.4.123 and TCP endpoint 0.2.57.

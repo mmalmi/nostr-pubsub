@@ -14,8 +14,8 @@ function record(n: number): ReconciliationRecord {
 }
 
 describe('native and TypeScript Negentropy peers', () => {
-  for (const initiator of ['TypeScript', 'TypeScript fingerprint first', 'Rust']) {
-    const browserInitiates = initiator !== 'Rust';
+  for (const initiator of ['TypeScript', 'TypeScript fingerprint first', 'Rust', 'Rust fingerprint first']) {
+    const browserInitiates = !initiator.startsWith('Rust');
     it(`exchanges real bounded frames with ${initiator} initiating`, async () => {
       const rust = spawn('cargo', ['run', '--locked', '--quiet', '-p', 'nostr-pubsub-reconcile', '--example', 'reconcile-stdio'], {
         cwd: fileURLToPath(new URL('../../../../', import.meta.url)), stdio: 'pipe',
@@ -38,7 +38,7 @@ describe('native and TypeScript Negentropy peers', () => {
         const filter = { since: record(3).timestamp, until: record(9990).timestamp };
         const typescript = new Reconciliation(a, filter, { maxFrameBytes: 4096 });
         await command({ command: 'new', records: b.map(r => ({ timestamp: String(r.timestamp), id: hex(r.id) })), since: String(filter.since), until: String(filter.until), frameBytes: 4096 });
-        let frame = browserInitiates ? await typescript.initiate({fingerprintFirst: initiator === 'TypeScript fingerprint first'}) : bytes((await command({ command: 'initiate' })).next);
+        let frame = browserInitiates ? await typescript.initiate({fingerprintFirst: initiator === 'TypeScript fingerprint first'}) : bytes((await command({ command: 'initiate', fingerprintFirst: initiator === 'Rust fingerprint first' })).next);
         const have: string[] = [], need: string[] = [];
         for (let round = 0; ; round++) {
           expect(round).toBeLessThan(256); expect(frame.length).toBeLessThanOrEqual(4096);

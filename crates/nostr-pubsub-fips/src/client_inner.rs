@@ -55,6 +55,7 @@ pub(super) struct ClientInner {
     pub(super) observed_full_events: Mutex<ScopedSeenIds>,
     pub(super) provider_behavior: Mutex<ProviderBehavior>,
     pub(super) pending_wants: Mutex<PendingWants>,
+    pub(super) feeds: Mutex<crate::client_feeds::FeedState>,
 }
 
 impl ClientInner {
@@ -148,6 +149,7 @@ impl ClientInner {
                     fresh: !replay_local,
                     peers: subscribed_peers,
                     delivery: Arc::clone(&delivery),
+                    feed: None,
                 },
             );
         }
@@ -192,6 +194,10 @@ impl ClientInner {
     }
 
     pub(super) async fn handle_frame(&self, source_peer: PeerIdentity, frame: &[u8]) {
+        if crate::feed::FeedSyncFrame::is_feed_sync(frame) {
+            self.handle_feed_sync(source_peer, frame);
+            return;
+        }
         let Ok(message) = self.codec.decode_frame(frame) else {
             self.record_provider_violation(source_peer, ProviderViolation::MalformedFrame);
             return;
@@ -222,6 +228,12 @@ impl ClientInner {
                 subscription_id,
                 event,
             } => {
+                // A feed answer names the request id this client sent the peer.
+                let subscription_id = subscription_id.map(|id| {
+                    self.local_feed_ids(&source_npub, vec![id.clone()])
+                        .pop()
+                        .unwrap_or(id)
+                });
                 self.handle_received_event(source_peer, subscription_id, event)
                     .await;
             }
@@ -236,7 +248,7 @@ impl ClientInner {
                     source_peer,
                     &source_npub,
                     InventoryAdvertisement {
-                        subscription_ids,
+                        subscription_ids: self.local_feed_ids(&source_npub, subscription_ids),
                         event_id,
                         event_kind,
                         payload_bytes,
@@ -259,6 +271,10 @@ impl ClientInner {
         subscription_id: &SubscriptionId,
         filters: &[Filter],
     ) {
+        if crate::feed::is_public_feed_id(subscription_id.as_str()) {
+            self.handle_feed_req(source_peer, subscription_id, filters);
+            return;
+        }
         if self
             .remember_peer_subscription(source_id, subscription_id, filters.to_vec())
             .is_err()
@@ -325,7 +341,7 @@ impl ClientInner {
             self.subscription_events_received
                 .fetch_add(1, Ordering::Relaxed);
         }
-        if !self.deliver_local_event(source_npub, event) {
+        if !self.deliver_local_event(source_npub, subscription_id, event) {
             return;
         }
         let source = EventSource::fips_endpoint(source_npub);
@@ -376,7 +392,12 @@ impl ClientInner {
         Ok(())
     }
 
-    pub(super) fn deliver_local_event(&self, source_npub: &str, event: &VerifiedEvent) -> bool {
+    pub(super) fn deliver_local_event(
+        &self,
+        source_npub: &str,
+        response_id: Option<&SubscriptionId>,
+        event: &VerifiedEvent,
+    ) -> bool {
         let event_id = event.as_event().id.to_string();
         let Ok(mut subscriptions) = self.subscriptions.lock() else {
             return false;
@@ -384,6 +405,10 @@ impl ClientInner {
         let mut delivered = false;
         let mut lagged = Vec::new();
         for (key, active) in subscriptions.iter_mut() {
+            // A feed takes only events answered on its own request.
+            if active.feed.is_some() && response_id.map(SubscriptionId::as_str) != Some(key) {
+                continue;
+            }
             if !active.peers.contains(source_npub)
                 || PubsubPeerInterest::from_filters(&active.filters, event)
                     != PubsubPeerInterest::Subscribed
@@ -548,6 +573,10 @@ impl ClientInner {
             let Ok(peer) = PeerIdentity::from_npub(&npub) else {
                 continue;
             };
+            let subscription_ids = self.feed_inventory_ids(&npub, subscription_ids, event);
+            if subscription_ids.is_empty() {
+                continue;
+            }
             let Ok(frame) = self.inventory_frame(subscription_ids, event, hop_limit) else {
                 continue;
             };
@@ -743,6 +772,9 @@ impl ClientInner {
         source_id: &SourceId,
         event_id: &EventId,
     ) -> Result<Option<(SubscriptionId, VerifiedEvent)>> {
+        if let Some(answer) = self.feed_answer(source_id.as_str(), event_id) {
+            return Ok(Some(answer));
+        }
         let events = self
             .recent_events
             .lock()
@@ -758,7 +790,7 @@ impl ClientInner {
         let Some(subscription) = subscriptions
             .matching_subscriptions(source_id, &event)
             .into_iter()
-            .next()
+            .find(|subscription| !crate::feed::is_public_feed_id(&subscription.subscription_id))
         else {
             return Ok(None);
         };
@@ -786,26 +818,27 @@ impl ClientInner {
         }
         // Retain bounded full-event observations to recognize answers already
         // in flight. Peer-epoch reset and normal FIFO eviction still clear them.
-        self.send_close(key, active.peers);
+        if active.feed.is_some() {
+            self.retire_local_feed(key);
+        }
+        self.send_close(key, &active);
     }
 
-    pub(super) fn send_close(&self, key: &str, peers: HashSet<String>) {
-        let Ok(frame) =
-            self.codec
-                .encode_frame(&FipsPubsubWireMessage::close(SubscriptionId::new(
-                    key.to_string(),
-                )))
-        else {
-            return;
-        };
-        for npub in peers {
-            let Ok(peer) = PeerIdentity::from_npub(&npub) else {
+    pub(super) fn send_close(&self, key: &str, active: &ActiveSubscription) {
+        for npub in &active.peers {
+            let Ok(peer) = PeerIdentity::from_npub(npub) else {
                 continue;
             };
-            let _ = self.transport_tx.try_send(TransportCommand::Send {
-                peer,
-                frame: frame.clone(),
-            });
+            let id = Self::close_ids(active, key, npub);
+            let Ok(frame) = self
+                .codec
+                .encode_frame(&FipsPubsubWireMessage::close(SubscriptionId::new(id)))
+            else {
+                continue;
+            };
+            let _ = self
+                .transport_tx
+                .try_send(TransportCommand::Send { peer, frame });
         }
     }
 
@@ -821,9 +854,14 @@ impl ClientInner {
         let mut frames = Vec::new();
         if let Ok(mut subscriptions) = self.subscriptions.lock() {
             for (key, active) in subscriptions.iter_mut() {
+                let id = match active.feed.as_mut() {
+                    Some(feed) if !feed.admits(peer_npub) => continue,
+                    Some(feed) => feed.request_id(key, peer_npub),
+                    None => key.clone(),
+                };
                 active.peers.insert(peer_npub.to_string());
                 if let Ok(frame) = self.codec.encode_frame(&FipsPubsubWireMessage::req(
-                    SubscriptionId::new(key.clone()),
+                    SubscriptionId::new(id),
                     active.filters.clone(),
                 )) {
                     frames.push(frame);
@@ -834,6 +872,7 @@ impl ClientInner {
     }
 
     pub(super) fn reset_peer_epoch(&self, peer_npub: &str) {
+        self.forget_feed_peer(peer_npub);
         if let Ok(mut observed) = self.observed_inventories.lock() {
             observed.clear_peer(peer_npub);
         }
@@ -888,6 +927,7 @@ pub(super) struct ActiveSubscription {
     pub(super) fresh: bool,
     pub(super) peers: HashSet<String>,
     pub(super) delivery: Arc<LocalDelivery>,
+    pub(super) feed: Option<crate::client_feeds::FeedSubscription>,
 }
 
 pub(super) struct InventoryAdvertisement {

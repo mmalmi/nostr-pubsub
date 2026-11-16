@@ -23,6 +23,7 @@ impl ClientInner {
             });
         }
 
+        self.feed_publication(&event);
         let subscribed = self.peer_delivery_targets(&event, None)?;
         let _admission = self.admit()?;
         let is_new = self

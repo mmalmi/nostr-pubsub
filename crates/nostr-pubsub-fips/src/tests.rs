@@ -24,6 +24,7 @@ use tokio::time::timeout;
 use super::*;
 
 mod delivery;
+mod feeds;
 mod late_events;
 mod managed_reputation;
 mod peer_policy;

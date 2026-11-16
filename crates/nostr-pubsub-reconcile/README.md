@@ -57,3 +57,7 @@ Version 0.1.3 carries its own copies of the few wire types it used from
 `negentropy`, which is now only a development dependency: the tests still check
 fingerprints and malformed-frame handling against it. Frames and the public API
 are unchanged.
+
+Version 0.1.4 adds `Session::initiate_fingerprint_first`, which opens with one
+fingerprint for the whole window, as the TypeScript `initiate({ fingerprintFirst:
+true })` does. A repeat sync of an unchanged window then ends in one round.
