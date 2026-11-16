@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.5 - 2026-11-16
+
+Use the shared FIPS core 0.4.123 and TCP endpoint 0.2.57.
+
 ## 0.6.4 - 2026-11-11
 
 - Accept kind 1060 message envelopes that name no recipient.
