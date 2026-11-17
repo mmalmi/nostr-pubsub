@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.32
+
+Preserve independent publication retries when sending the same event to different destinations. Relay history can fall back to a replica after an incomplete response. The SimplePool publisher returns after the first positive acknowledgment. Profile replacement ignores incidental `d` tags, and repeated deliveries use one slot in limited memory queries.
+
+Persistent adapters must round-trip the full pending row, including optional `additionalScopes`. Adapters shared by multiple writers can implement `updatePending` in a storage transaction.
+
 ## 0.5.31
 
 Keep paused deliveries pending and continue with enabled rows at the same relay. Only eligible deliveries count toward the automatic send limit or enter broadcast inventory comparisons.

@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "async-trait",
  "nostr",
