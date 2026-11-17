@@ -6,8 +6,8 @@ export interface NostrRelaySubscription {
 }
 export interface NostrRelayTransportHandlers {
     onEvent(event: NostrEvent): void;
-    /** Called after a terminal subscription close. */
-    onClose?(reasons?: readonly string[]): void;
+    /** True only for completed history. For legacy transports, a reasonless close denotes EOSE. */
+    onClose?(reasons?: readonly string[], complete?: boolean): void;
 }
 export interface NostrRelayTransportSubscribeOptions {
     /** Historical queries may close on aggregate EOSE or a transport-owned bound. */

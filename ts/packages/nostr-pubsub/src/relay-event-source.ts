@@ -27,8 +27,8 @@ export interface NostrRelaySubscription {
 
 export interface NostrRelayTransportHandlers {
   onEvent(event: NostrEvent): void;
-  /** Called after a terminal subscription close. */
-  onClose?(reasons?: readonly string[]): void;
+  /** True only for completed history. For legacy transports, a reasonless close denotes EOSE. */
+  onClose?(reasons?: readonly string[], complete?: boolean): void;
 }
 
 export interface NostrRelayTransportSubscribeOptions {
@@ -89,7 +89,7 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
       let closeOnAssign = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let subscription: NostrRelaySubscription | undefined;
-      const finish = (error?: unknown): void => {
+      const finish = (error?: unknown, complete = true): void => {
         if (settled) return;
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
@@ -97,7 +97,7 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
         if (subscription === undefined) closeOnAssign = true;
         else subscription.close('nostr-pubsub query complete');
         if (error !== undefined) reject(error);
-        else resolve({ events: ordered(events.values(), options.limit) });
+        else resolve({ events: ordered(events.values(), options.limit), ...(complete ? {} : { complete: false }) });
       };
       const cancel = (): void => finish(abortError(options.signal?.reason));
       options.signal?.addEventListener('abort', cancel, { once: true });
@@ -123,7 +123,7 @@ implements NostrEventReader, NostrEventPublisher, NostrEventSubscriber {
             // Invalid relay events never enter a query result.
           }
         },
-        onClose: () => finish(),
+        onClose: (reasons, complete) => finish(undefined, complete ?? !reasons?.length),
       }, { closeOnEose: true });
       if (closeOnAssign) subscription.close('nostr-pubsub query complete');
     });

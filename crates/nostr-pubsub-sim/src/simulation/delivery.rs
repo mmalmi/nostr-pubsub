@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nostr::Event;
 
@@ -170,38 +170,57 @@ impl Simulation {
 }
 
 fn delivery_path_hops(records: &[VerifiedDeliveryRecord]) -> Result<Vec<u64>> {
+    #[derive(Clone, Copy)]
+    enum Path {
+        Parent(usize),
+        Visiting,
+        Depth(u64),
+    }
     let mut by_event = BTreeMap::<&str, Vec<&VerifiedDeliveryRecord>>::new();
     for record in records {
         by_event.entry(&record.event_id).or_default().push(record);
     }
     let mut hops = Vec::new();
     for (event_id, event_records) in by_event {
-        let mut parents = BTreeMap::new();
+        let mut paths = HashMap::with_capacity(event_records.len());
         for record in &event_records {
-            if parents.insert(record.receiver, record.provider).is_some() {
+            if paths
+                .insert(record.receiver, Path::Parent(record.provider))
+                .is_some()
+            {
                 return Err(SimulationError::Pubsub(format!(
                     "duplicate first-delivery parent for event {event_id} receiver {}",
                     record.receiver
                 )));
             }
         }
-        for record in event_records
-            .iter()
-            .filter(|record| record.final_interested_delivery)
-        {
+        // Resolve each first-delivery edge once, including forwarding-only branches.
+        let mut trail = Vec::new();
+        for record in event_records {
             let mut cursor = record.receiver;
-            let mut visited = HashSet::new();
-            let mut depth = 0_u64;
-            while let Some(parent) = parents.get(&cursor).copied() {
-                if !visited.insert(cursor) {
-                    return Err(SimulationError::Pubsub(format!(
-                        "delivery cycle for event {event_id} at node {cursor}"
-                    )));
+            let mut depth = loop {
+                match paths.get(&cursor).copied() {
+                    None => break 0,
+                    Some(Path::Depth(depth)) => break depth,
+                    Some(Path::Visiting) => {
+                        return Err(SimulationError::Pubsub(format!(
+                            "delivery cycle for event {event_id} at node {cursor}"
+                        )));
+                    }
+                    Some(Path::Parent(parent)) => {
+                        paths.insert(cursor, Path::Visiting);
+                        trail.push(cursor);
+                        cursor = parent;
+                    }
                 }
-                depth = depth.saturating_add(1);
-                cursor = parent;
+            };
+            while let Some(node) = trail.pop() {
+                depth += 1;
+                paths.insert(node, Path::Depth(depth));
             }
-            hops.push(depth);
+            if record.final_interested_delivery {
+                hops.push(depth);
+            }
         }
     }
     Ok(hops)
@@ -250,6 +269,23 @@ mod tests {
     fn interested_path_depth_follows_first_acceptance_parents() {
         let records = vec![record(0, 1, false), record(1, 2, true), record(1, 3, true)];
         assert_eq!(delivery_path_hops(&records).unwrap(), vec![2, 2]);
+    }
+
+    #[test]
+    fn resolves_shared_paths_out_of_order_and_checks_forwarding_only_cycles() {
+        let mut records = (1..=4096)
+            .rev()
+            .map(|node| record(node - 1, node, true))
+            .collect::<Vec<_>>();
+        let depths = delivery_path_hops(&records).unwrap();
+        assert_eq!(depths, (1..=4096).rev().collect::<Vec<u64>>());
+        records.extend([record(5000, 5001, false), record(5001, 5000, false)]);
+        assert!(
+            delivery_path_hops(&records)
+                .unwrap_err()
+                .to_string()
+                .contains("delivery cycle")
+        );
     }
 
     fn record(provider: usize, receiver: usize, final_delivery: bool) -> VerifiedDeliveryRecord {

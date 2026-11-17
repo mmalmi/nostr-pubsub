@@ -28,22 +28,22 @@ export function expired(event: NostrEvent): boolean {
 export function abortError(reason?: unknown): DOMException {
   return new DOMException(typeof reason === 'string' ? reason : 'Nostr operation cancelled', 'AbortError');
 }
-export function replacementFilter(event: NostrEvent): NostrFilter | undefined {
-  if (event.kind === 0 || event.kind === 3 || (event.kind >= 10000 && event.kind < 20000)) {
-    return { authors: [event.pubkey], kinds: [event.kind] };
-  }
-  if (event.kind >= 30000 && event.kind < 40000) {
-    const identifier = event.tags.find((t) => t[0] === 'd')?.[1] ?? '';
-    // A missing d tag has the same address as d="" but does not match a #d filter.
-    return { authors: [event.pubkey], kinds: [event.kind], ...(identifier ? { '#d': [identifier] } : {}) };
-  }
+function replacementIdentifier(event: NostrEvent): string | undefined {
+  if (event.kind === 0 || event.kind === 3 || (event.kind >= 10000 && event.kind < 20000)) return '';
+  if (event.kind >= 30000 && event.kind < 40000) return event.tags.find(tag => tag[0] === 'd')?.[1] ?? '';
 }
-function address(event: NostrEvent): string | undefined {
-  return replacementFilter(event) ? `${event.kind}:${event.pubkey}:${event.tags.find((t) => t[0] === 'd')?.[1] ?? ''}` : undefined;
+export function replacementFilter(event: NostrEvent): NostrFilter | undefined {
+  const identifier = replacementIdentifier(event);
+  // Missing and empty d tags share an address but only the latter matches a #d filter.
+  if (identifier !== undefined) return { authors: [event.pubkey], kinds: [event.kind], ...(identifier ? { '#d': [identifier] } : {}) };
+}
+export function eventAddress(event: NostrEvent): string | undefined {
+  const identifier = replacementIdentifier(event);
+  if (identifier !== undefined) return `${event.kind}:${event.pubkey}:${identifier}`;
 }
 function deletedBy(event: NostrEvent, deletion: NostrEvent): boolean {
   if (deletion.kind !== 5 || deletion.pubkey !== event.pubkey || deletion.created_at < event.created_at || event.kind === 5) return false;
-  const key = address(event);
+  const key = eventAddress(event);
   return deletion.tags.some((tag) => (tag[0] === 'e' && tag[1] === event.id) || (tag[0] === 'a' && key !== undefined && tag[1] === key));
 }
 /** Called serially by a runtime after signature admission. Deletion events are retained as tombstones. */
@@ -54,15 +54,18 @@ export async function storeRuntimeEvent(store: RuntimeEventStore, event: NostrEv
 export async function admitRuntimeEvent(store: RuntimeEventStore, event: NostrEvent): Promise<'admitted' | 'superseded' | 'rejected'> {
   if (expired(event)) return 'rejected';
   if (event.kind >= 20000 && event.kind < 30000) return 'admitted';
+  const key = eventAddress(event);
   const ownDeletions = await store.query([{ authors: [event.pubkey], kinds: [5], '#e': [event.id] },
-    ...(address(event) ? [{ authors: [event.pubkey], kinds: [5], '#a': [address(event)!] }] : [])]);
+    ...(key ? [{ authors: [event.pubkey], kinds: [5], '#a': [key] }] : [])]);
   if (ownDeletions.some((deletion) => deletedBy(event, deletion))) return 'rejected';
   const replacement = replacementFilter(event);
   if (replacement) {
-    const previous = (await store.query([replacement])).filter((old) => address(old) === address(event));
-    if (previous.some((old) => eventOrder(old, event) < 0)) return 'superseded';
-    // Retain only the NIP-01 winner, including the lower ID on timestamp ties.
-    await store.delete(previous.filter((old) => old.id !== event.id).map((old) => old.id));
+    const previous = (await store.query([replacement])).filter((old) => eventAddress(old) === key);
+    // Older stores may already hold multiple winners split by incidental d tags.
+    const winner = previous.reduce((best, old) => eventOrder(old, best) < 0 ? old : best, event);
+    const stale = previous.filter(old => old.id !== winner.id).map(old => old.id);
+    if (stale.length) await store.delete(stale);
+    if (winner.id !== event.id) return 'superseded';
   }
   if (event.kind === 5) {
     const filters: NostrFilter[] = [];
@@ -98,6 +101,7 @@ export class MemoryEventStore implements RuntimeEventStore {
   /** The stored events in `eventOrder`, kept current so a query need not sort the store; rebuilt when unset. */
   private ordered?: NostrEvent[];
   private readonly pending = new Map<string, RuntimeOutboxEntry>();
+  private pendingScopeCount = 0;
   constructor(readonly maxEvents = 20000, readonly maxPending = 1000) {
     if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || !Number.isSafeInteger(maxPending) || maxPending < 1) throw new RangeError('Invalid event store bounds');
   }
@@ -138,10 +142,27 @@ export class MemoryEventStore implements RuntimeEventStore {
     }
     return false;
   }
+  async updatePending(id: string, update: (row: RuntimeOutboxEntry | undefined) => RuntimeOutboxEntry | undefined): Promise<void> {
+    const current = structuredClone(this.pending.get(id));
+    const next = update(current);
+    if (next === current) return;
+    if (next) await this.putPending(next);
+    else await this.deletePending(id);
+  }
   async listPending(): Promise<RuntimeOutboxEntry[]> { return [...this.pending.values()].map((entry) => structuredClone(entry)); }
   async putPending(entry: RuntimeOutboxEntry): Promise<void> {
-    if (!this.pending.has(entry.event.id) && this.pending.size >= this.maxPending) throw new Error('Outbox capacity exhausted');
+    const previous = this.pending.get(entry.event.id);
+    const count = this.pendingScopeCount + pendingCount(entry) - pendingCount(previous);
+    if (count > this.maxPending) throw new Error('Outbox capacity exhausted');
     this.pending.set(entry.event.id, structuredClone(entry));
+    this.pendingScopeCount = count;
   }
-  async deletePending(id: string): Promise<void> { this.pending.delete(id); }
+  async deletePending(id: string): Promise<void> {
+    this.pendingScopeCount -= pendingCount(this.pending.get(id));
+    this.pending.delete(id);
+  }
+}
+
+function pendingCount(entry: RuntimeOutboxEntry | undefined): number {
+  return entry ? 1 + (entry.additionalScopes?.length ?? 0) : 0;
 }

@@ -59,7 +59,7 @@ interface StoredEvent {
 }
 
 export class InMemoryEventBus implements EventBus, NostrEventSubscriber {
-  private readonly events: StoredEvent[] = [];
+  private readonly events = new Map<string, StoredEvent>();
   private readonly subscriptions = new Set<{
     filters: NostrFilter[];
     handler: (event: QueryEvent) => void;
@@ -76,7 +76,7 @@ export class InMemoryEventBus implements EventBus, NostrEventSubscriber {
     const report = reportParts(decision);
     if (report.accepted) {
       const stored = { event: verifiedEvent, source, priority: report.priority };
-      this.events.push(stored);
+      if (!this.events.has(verifiedEvent.id)) this.events.set(verifiedEvent.id, stored);
       for (const subscription of this.subscriptions) {
         if (subscription.filters.some((filter) => matchFilter(filter, verifiedEvent))) {
           subscription.handler(stored);
@@ -89,7 +89,7 @@ export class InMemoryEventBus implements EventBus, NostrEventSubscriber {
   async query(filters: NostrFilter[], options: QueryOptions = {}): Promise<QueryReport> {
     validateQueryOptions(options);
     throwIfQueryStopped(options);
-    const ordered = [...this.events].sort((left, right) =>
+    const ordered = [...this.events.values()].sort((left, right) =>
       right.event.created_at - left.event.created_at || compareText(left.event.id, right.event.id)
     );
     const byId = new Map<string, QueryEvent>();

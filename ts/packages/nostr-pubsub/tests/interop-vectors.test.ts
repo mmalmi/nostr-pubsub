@@ -173,6 +173,17 @@ describe('Rust/TypeScript interop vectors', () => {
     expect(want.key).toEqual(key);
   });
 
+  it('counts distinct matching event IDs within each filter and preserves first provenance', async () => {
+    const bus = new InMemoryEventBus();
+    const fixture = vectors.memoryQueryCase;
+    for (const [index, name] of fixture.events.entries()) {
+      await bus.publish(events[name], { id: String(index), kind: 'local-index' });
+    }
+    const { events: rows } = await bus.query(fixture.filters);
+    expect(rows.map(row => row.event.id)).toEqual(fixture.expectedEvents.map(name => events[name].id));
+    expect(rows[0]?.source.id).toBe('0');
+  });
+
   it('orders routed queries by FIPS and policy priority before relay fallback', async () => {
     const testCase = vectors.routedQueryCase;
     const policy = new VectorPolicy(

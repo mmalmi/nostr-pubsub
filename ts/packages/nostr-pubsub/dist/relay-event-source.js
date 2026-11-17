@@ -45,7 +45,7 @@ export class NostrRelayEventSource {
             let closeOnAssign = false;
             let timer;
             let subscription;
-            const finish = (error) => {
+            const finish = (error, complete = true) => {
                 if (settled)
                     return;
                 settled = true;
@@ -59,7 +59,7 @@ export class NostrRelayEventSource {
                 if (error !== undefined)
                     reject(error);
                 else
-                    resolve({ events: ordered(events.values(), options.limit) });
+                    resolve({ events: ordered(events.values(), options.limit), ...(complete ? {} : { complete: false }) });
             };
             const cancel = () => finish(abortError(options.signal?.reason));
             options.signal?.addEventListener('abort', cancel, { once: true });
@@ -84,7 +84,7 @@ export class NostrRelayEventSource {
                         // Invalid relay events never enter a query result.
                     }
                 },
-                onClose: () => finish(),
+                onClose: (reasons, complete) => finish(undefined, complete ?? !reasons?.length),
             }, { closeOnEose: true });
             if (closeOnAssign)
                 subscription.close('nostr-pubsub query complete');

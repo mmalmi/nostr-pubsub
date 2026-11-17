@@ -1,5 +1,5 @@
 import { retentionAcceptsEvent, type EventRetentionPolicy } from './filter.js';
-import { eventOrder, selectStoredEvents } from './runtime-store.js';
+import { eventAddress, eventOrder, selectStoredEvents } from './runtime-store.js';
 import { verifyNostrEvent, type NostrEvent, type NostrFilter, type NostrVerifiedEvent, type QueryOptions } from './types.js';
 
 export const MAX_RETAINED_EVENT_BYTES = 64 * 1024;
@@ -29,7 +29,7 @@ export class RetainedEvents {
     const retained: NostrVerifiedEvent[] = [];
     let size = 128;
     for (const event of candidates) {
-      const key = coordinate(event) ?? event.id;
+      const key = eventAddress(event) ?? event.id;
       if (seen.has(key) || !retainedEventIsCurrent(event)) continue;
       seen.add(key);
       size += bytes(event) + 1;
@@ -43,9 +43,9 @@ export class RetainedEvents {
     if (!retentionAcceptsEvent(this.policy, event) || !retainedEventIsCurrent(event) ||
       this.events.some(old => old.id === event.id)) return false;
     if (bytes(event) > MAX_RETAINED_EVENT_BYTES) return false;
-    const key = coordinate(event);
-    if (key && this.events.some(old => coordinate(old) === key && eventOrder(old, event) <= 0)) return false;
-    this.events = this.events.filter(old => retainedEventIsCurrent(old) && (!key || coordinate(old) !== key));
+    const key = eventAddress(event);
+    if (key && this.events.some(old => eventAddress(old) === key && eventOrder(old, event) <= 0)) return false;
+    this.events = this.events.filter(old => retainedEventIsCurrent(old) && (!key || eventAddress(old) !== key));
     this.events.push(event);
     this.events.sort(eventOrder);
     this.events.length = Math.min(this.events.length, this.policy.maxEvents);
@@ -65,11 +65,5 @@ export function retainedEventIsCurrent(event: NostrEvent): boolean {
   const expiration = value !== undefined && /^\d+$/.test(value) ? BigInt(value) : undefined;
   return !(event.kind >= 20000 && event.kind < 30000) && event.created_at <= now + 300 &&
     (expirationTag === undefined || (expiration !== undefined && expiration > BigInt(now) && expiration <= 18446744073709551615n));
-}
-function coordinate(event: NostrEvent): string | undefined {
-  if (event.kind === 0 || event.kind === 3 || (event.kind >= 10000 && event.kind < 20000))
-    return event.kind + ':' + event.pubkey;
-  if (event.kind >= 30000 && event.kind < 40000)
-    return event.kind + ':' + event.pubkey + ':' + (event.tags.find(tag => tag[0] === 'd')?.[1] ?? '');
 }
 function bytes(event: NostrEvent): number { return new TextEncoder().encode(JSON.stringify(event)).length; }

@@ -105,7 +105,11 @@ mesh history reports incomplete and leaves live subscriptions running. Relay
 reconnect overlaps the last seen second and deduplicates event IDs. `cache-only`
 queries complete from local storage; `network-only` omits initial cache replay.
 Explicit `relays` scope also excludes additional sources unless `sources` is
-specified, and the outbox preserves those destinations when retrying.
+specified, and the outbox preserves those destinations when retrying. Separate sends
+of one event keep independent destination scopes. Event-ID-keyed store adapters
+must round-trip the full pending row, including optional `additionalScopes`.
+Stores shared across tabs or processes should implement `updatePending` in one
+storage transaction. Single-owner adapters can keep using list/put/delete.
 
 `publish().remoteAccepted` requires a positive relay/source acknowledgment.
 Local echo, persisted retry intent, and a FIPS send queue do not count as remote

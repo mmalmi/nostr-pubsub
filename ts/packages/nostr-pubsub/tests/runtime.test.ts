@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { AbstractSimplePool } from 'nostr-tools/abstract-pool';
 import { finalizeEvent, verifyEvent } from 'nostr-tools/pure';
-import { NostrRuntime, MemoryEventStore, SimplePoolNostrRelayTransport, verifyNostrEvent, type NostrEvent, type NostrRuntimeOptions, type QueryEvent } from '../src/index.js';
+import { NostrRuntime, MemoryEventStore, NostrRelayEventSource, SimplePoolNostrRelayTransport, verifyNostrEvent, type NostrEvent, type NostrRuntimeOptions, type QueryEvent } from '../src/index.js';
 import { RuntimeRelayFixture, until } from './runtime-relay-fixture.js';
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -153,6 +153,41 @@ describe('Nostr runtime over real relay sockets', () => {
     expect(await store.listPending()).toEqual([]); expect(seen).toEqual([queued.id]);
     expect(await client.publish(rejected, { requireAck: true })).toMatchObject({ accepted: true, queued: false });
     expect(seen).toEqual([queued.id, rejected.id]);
+  });
+  it('distinguishes wire EOSE from a quiet relay or a relay closing its request', async () => {
+    const ready = await relay();
+    const interrupted = await relay();
+    const pool = new AbstractSimplePool({ verifyEvent, websocketImplementation: WebSocket as unknown as typeof globalThis.WebSocket });
+    const urls = [await ready.url(), await interrupted.url()];
+    const source = new NostrRelayEventSource(urls[0]!, new SimplePoolNostrRelayTransport({
+      pool, getRelays: () => urls, queryQuietWindowMs: 100,
+    }));
+    try {
+      const signed = event('history');
+      ready.events.push(signed);
+      interrupted.maxFilters = 0;
+      const partial = await source.query([{ kinds: [1] }]);
+      expect(partial.complete).toBe(false);
+      expect(partial.events.map(row => row.event.id)).toEqual([signed.id]);
+      interrupted.maxFilters = 1;
+      interrupted.eoseDelay = 300;
+      expect((await source.query([{}])).complete).toBe(false);
+      interrupted.eoseDelay = 0;
+      expect((await source.query([{}])).complete).not.toBe(false);
+    } finally { pool.destroy(); }
+  });
+  it('ignores d tags on replaceable profiles for both replacement and address deletion', async () => {
+    const client = runtime({});
+    const newest = event('new', 0, 101, [['d', 'ignored']]);
+    await client.ingest(event('old', 0, 100));
+    await client.ingest(newest);
+    // Reopen a coordinate containing a second winner persisted by an older adapter.
+    await client.store.put(event('legacy duplicate', 0, 100, [['d', 'split']]));
+    expect(await client.ingest(event('stale', 0, 99, [['d', 'other']]))).toBe(false);
+    expect((await client.store.query([{ kinds: [0] }])).map(row => row.id)).toEqual([newest.id]);
+    await client.ingest(event('', 5, 102, [['a', `0:${newest.pubkey}:`]]));
+    expect(await client.store.query([{ kinds: [0] }])).toEqual([]);
+    expect(await client.ingest(newest)).toBe(false);
   });
   it('never treats a connection failure as a positive relay acknowledgment', async () => {
     const server = new RuntimeRelayFixture(); const url = await server.url(); await server.close();

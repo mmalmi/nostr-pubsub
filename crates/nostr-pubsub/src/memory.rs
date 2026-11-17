@@ -28,7 +28,7 @@ pub struct InMemoryEventBus {
 
 #[derive(Default)]
 struct MemoryState {
-    events: Vec<StoredEvent>,
+    events: HashMap<nostr::EventId, StoredEvent>,
     next_subscription_id: u64,
     subscriptions: HashMap<u64, MemorySubscriber>,
 }
@@ -84,11 +84,14 @@ impl EventBus for InMemoryEventBus {
                     source: source.clone(),
                     priority,
                 });
-                state.events.push(StoredEvent {
-                    event,
-                    source,
-                    priority,
-                });
+                state
+                    .events
+                    .entry(event.as_event().id)
+                    .or_insert(StoredEvent {
+                        event,
+                        source,
+                        priority,
+                    });
                 (incoming, handlers)
             };
             if let (Some(incoming), Some((last, rest))) = (incoming, handlers.split_last()) {
@@ -112,7 +115,7 @@ impl EventBus for InMemoryEventBus {
             .state
             .read()
             .map_err(|_| PubsubError::Storage("event bus lock poisoned".to_string()))?;
-        let mut stored = state.events.iter().collect::<Vec<_>>();
+        let mut stored = state.events.values().collect::<Vec<_>>();
         stored.sort_by(|left, right| newest_first(left.event.as_event(), right.event.as_event()));
         let filters = if filters.is_empty() {
             vec![Filter::new()]

@@ -1,12 +1,15 @@
 import type { NostrEvent, NostrFilter, QueryOptions, NostrEventVerifier } from './types.js';
 import type { NostrEventPublisher, NostrEventReader, NostrEventSubscriber } from './event-bus.js';
 export type RuntimeCacheMode = 'cache-first' | 'network-only' | 'cache-only';
-export interface RuntimeOutboxEntry {
-    event: NostrEvent;
+export interface RuntimePendingScope {
     attempts: number;
     updatedAt: number;
     relays?: readonly string[];
     sources?: readonly string[];
+}
+export interface RuntimeOutboxEntry extends RuntimePendingScope {
+    event: NostrEvent;
+    additionalScopes?: RuntimePendingScope[];
 }
 /** Storage only; the runtime owns signature admission and event replacement/deletion rules. */
 export interface RuntimeEventStore {
@@ -16,6 +19,8 @@ export interface RuntimeEventStore {
     listPending(): Promise<RuntimeOutboxEntry[]>;
     putPending(entry: RuntimeOutboxEntry): Promise<void>;
     deletePending(id: string): Promise<void>;
+    /** Atomic row update for stores with multiple independent writers (e.g. browser tabs). */
+    updatePending?(id: string, update: (row: RuntimeOutboxEntry | undefined) => RuntimeOutboxEntry | undefined): Promise<void>;
     close?(): void | Promise<void>;
 }
 export interface RuntimeSource extends Partial<NostrEventReader>, Partial<NostrEventPublisher>, Partial<NostrEventSubscriber> {

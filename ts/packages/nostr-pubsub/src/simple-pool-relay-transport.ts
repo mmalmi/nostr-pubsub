@@ -1,4 +1,4 @@
-import { withPublishRateLimit, RelayRateLimitError } from './relay-rate-limit.js';
+import { withPublishRateLimit } from './relay-rate-limit.js';
 import { SimplePool } from 'nostr-tools';
 import {
   copyVerifiedNostrEvent,
@@ -16,7 +16,7 @@ import type {
   NostrRelayTransportSubscribeOptions,
 } from './relay-event-source.js';
 
-type RelayPool = Pick<SimplePool, 'publish' | 'subscribeMany'> & Partial<Pick<SimplePool, 'ensureRelay'>>;
+type RelayPool = Pick<SimplePool, 'publish' | 'subscribeMany'> & Partial<Pick<SimplePool, 'ensureRelay' | 'allowConnectingToRelay' | 'onRelayConnectionFailure' | 'onRelayConnectionSuccess' | 'trackRelays' | 'seenOn' | 'maxWaitForConnection'>>;
 type RelayPoolSubscription = ReturnType<RelayPool['subscribeMany']>;
 const verificationBoundaries = new WeakSet<SimplePoolNostrRelayVerificationBoundary>();
 
@@ -110,7 +110,7 @@ export class SimplePoolNostrRelayTransport implements NostrRelayTransport {
     }
     const relays = uniqueRelays(this.getRelays());
     if (relays.length === 0) {
-      handlers.onClose?.(['No Nostr relays configured']);
+      handlers.onClose?.(['No Nostr relays configured'], false);
       return { close: () => undefined };
     }
 
@@ -118,16 +118,16 @@ export class SimplePoolNostrRelayTransport implements NostrRelayTransport {
     let closed = false;
     let quietTimer: ReturnType<typeof setTimeout> | undefined;
     let subscriptions: RelayPoolSubscription[] = [];
-    let remainingEose = filters.length;
-    let remainingClose = filters.length;
+    let remaining = historical ? filters.length * relays.length : filters.length;
+    let allEosed = true;
     const closeReasons: string[] = [];
-    const finish = (reasons: readonly string[], reason: string): void => {
+    const finish = (reasons: readonly string[], reason: string, complete = false): void => {
       if (closed) return;
       closed = true;
       if (quietTimer !== undefined) clearTimeout(quietTimer);
       quietTimer = undefined;
       for (const subscription of subscriptions) void subscription.close(reason);
-      handlers.onClose?.(reasons);
+      handlers.onClose?.(reasons, complete);
     };
     const armQuietWindow = (): void => {
       if (!historical || closed) return;
@@ -138,33 +138,34 @@ export class SimplePoolNostrRelayTransport implements NostrRelayTransport {
       }, this.queryQuietWindowMs);
     };
 
-    subscriptions = filters.map((filter) => this.pool.subscribeMany(relays, filter, {
-      onevent: (event) => {
-        let verified: NostrVerifiedEvent;
-        try {
-          verified = this.verificationBoundary?.admitEvent(event)
-            ?? verifyNostrEvent(event);
-        } catch {
-          return;
-        }
-        handlers.onEvent(verified);
-        armQuietWindow();
-      },
-      oneose: historical
-        ? () => {
-          remainingEose -= 1;
-          if (remainingEose === 0) {
-            const reason = 'Nostr relay query reached EOSE';
-            finish([reason], reason);
-          }
-        }
-        : undefined,
-      onclose: (reasons) => {
-        closeReasons.push(...reasons);
-        remainingClose -= 1;
-        if (remainingClose === 0) finish(closeReasons, 'Nostr relay subscription closed');
-      },
-    }));
+    const onEvent = (event: NostrEvent): boolean => {
+      if (closed) return false;
+      let verified: NostrVerifiedEvent;
+      try {
+        verified = this.verificationBoundary?.admitEvent(event) ?? verifyNostrEvent(event);
+      } catch { return false; }
+      handlers.onEvent(verified);
+      armQuietWindow();
+      return true;
+    };
+    const ended = (eosed: boolean, reasons: readonly string[]): void => {
+      allEosed &&= eosed;
+      closeReasons.push(...reasons);
+      if (--remaining > 0) return;
+      const reason = allEosed ? 'Nostr relay query reached EOSE' : 'Nostr relay subscription closed';
+      finish(allEosed ? [reason] : closeReasons, reason, allEosed);
+    };
+    subscriptions = historical
+      ? filters.flatMap(filter => {
+        const seen = new Set<string>();
+        return relays.map(url => this.subscribeHistory(url, filter, event => {
+          if (seen.has(event.id)) return;
+          if (onEvent(event)) seen.add(event.id);
+        }, ended));
+      })
+      : filters.map(filter => this.pool.subscribeMany(relays, filter, {
+        onevent: onEvent, onclose: reasons => ended(false, reasons),
+      }));
 
     if (closed) {
       for (const subscription of subscriptions) {
@@ -179,6 +180,52 @@ export class SimplePoolNostrRelayTransport implements NostrRelayTransport {
         finish(reason === undefined ? [] : [reason], closeReason);
       },
     };
+  }
+
+  private subscribeHistory(
+    url: string, filter: NostrFilter, onEvent: (event: NostrEvent) => void,
+    ended: (eosed: boolean, reasons: readonly string[]) => void,
+  ): RelayPoolSubscription {
+    let done = false;
+    const end = (complete: boolean, reasons: readonly string[]) => {
+      if (!done) { done = true; ended(complete, reasons); }
+    };
+    if (!this.pool.ensureRelay) {
+      // A pool facade can emit EOSE during close or from its own wait timer.
+      const maxWait = Math.max(this.queryQuietWindowMs, 4500);
+      const deadline = Date.now() + maxWait;
+      return this.pool.subscribeMany([url], filter, {
+        maxWait, onevent: onEvent,
+        oneose: () => queueMicrotask(() => end(Date.now() < deadline, [])),
+        onclose: reasons => end(false, reasons),
+      });
+    }
+    // A concrete pool's aggregate EOSE includes failures and expired timers. Observe the wire EOSE.
+    let close: ((reason?: string) => void) | undefined;
+    const start = async () => {
+      if (this.pool.allowConnectingToRelay?.(url, ['read', [filter]]) === false) {
+        end(false, ['Relay connection declined']); return;
+      }
+      const relay = await this.pool.ensureRelay!(url, { connectionTimeout: this.pool.maxWaitForConnection }).catch(error => {
+        this.pool.onRelayConnectionFailure?.(url); throw error;
+      });
+      this.pool.onRelayConnectionSuccess?.(url);
+      if (done) return;
+      const subscription = relay.prepareSubscription([filter], {
+        onevent: onEvent, oneose: () => end(true, []), onclose: reason => end(false, [reason]),
+        receivedEvent: this.pool.trackRelays ? (source, id) => {
+          const seen = this.pool.seenOn;
+          if (seen && !seen.has(id)) seen.set(id, new Set());
+          seen?.get(id)?.add(source);
+        } : undefined,
+      });
+      relay.ongoingOperations++;
+      relay.idleSince = undefined;
+      close = reason => { if (relay.openSubs.has(subscription.id)) subscription.close(reason); };
+      await relay.send(JSON.stringify(['REQ', subscription.id, filter]));
+    };
+    void start().catch(error => end(false, [String(error)]));
+    return { close: reason => { done = true; close?.(reason); } };
   }
 
   async publish(event: NostrVerifiedEvent): Promise<void> {
@@ -198,14 +245,15 @@ export class SimplePoolNostrRelayTransport implements NostrRelayTransport {
         if (result.startsWith('connection failure:')) throw new Error(result);
         return result;
       });
-    const results = await Promise.allSettled(
-      attempts.map((attempt, index) => withPublishRateLimit(this.pool, relays[index]!, verified.id,
-        () => withTimeout(attempt, this.publishTimeoutMs))),
-    );
-    if (results.some((result) => result.status === 'fulfilled')) return;
-    const failure = results.find((result) => result.status === 'rejected');
-    if (failure?.status === 'rejected' && failure.reason instanceof RelayRateLimitError) throw failure.reason;
-    throw new Error(rejectionMessage(failure));
+    try {
+      await Promise.any(attempts.map((attempt, index) =>
+        withPublishRateLimit(this.pool, relays[index]!, verified.id, () => withTimeout(attempt, this.publishTimeoutMs))));
+    } catch (error) {
+      if (!(error instanceof AggregateError)) throw error;
+      const first = error.errors[0];
+      if (first instanceof Error) throw first;
+      throw new Error(first === undefined ? 'Nostr relay publish failed' : String(first));
+    }
   }
 }
 
@@ -235,11 +283,4 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
       },
     );
   });
-}
-
-function rejectionMessage(
-  failure: PromiseRejectedResult | PromiseFulfilledResult<unknown> | undefined,
-): string {
-  if (failure?.status !== 'rejected') return 'Nostr relay publish failed';
-  return failure.reason instanceof Error ? failure.reason.message : String(failure.reason);
 }

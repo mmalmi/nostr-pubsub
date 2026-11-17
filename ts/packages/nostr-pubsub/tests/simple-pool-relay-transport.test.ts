@@ -168,7 +168,7 @@ describe('SimplePool Nostr relay transport', () => {
 
     expect(queryHandlers.onClose).toHaveBeenCalledWith([
       'Nostr relay query quiet window elapsed',
-    ]);
+    ], false);
     expect(pool.subscriptions[0]?.close).toHaveBeenCalledWith(
       'Nostr relay query quiet window elapsed',
     );
@@ -176,7 +176,7 @@ describe('SimplePool Nostr relay transport', () => {
     expect(pool.subscriptions[1]?.close).not.toHaveBeenCalled();
   });
 
-  it('finishes a historical query on aggregate EOSE', () => {
+  it('finishes a historical query on aggregate EOSE', async () => {
     const pool = new MemorySimplePool();
     const transport = new SimplePoolNostrRelayTransport({
       getRelays: () => ['wss://one.example'],
@@ -193,7 +193,8 @@ describe('SimplePool Nostr relay transport', () => {
     expect(handlers.onClose).not.toHaveBeenCalled();
     pool.subscriptions[1]?.params.oneose?.();
 
-    expect(handlers.onClose).toHaveBeenCalledWith(['Nostr relay query reached EOSE']);
+    await Promise.resolve();
+    expect(handlers.onClose).toHaveBeenCalledWith(['Nostr relay query reached EOSE'], true);
     expect(pool.subscriptions.every((subscription) => subscription.close.mock.calls.length === 1))
       .toBe(true);
   });
@@ -221,13 +222,25 @@ describe('SimplePool Nostr relay transport', () => {
     expect(pool.publish).toHaveBeenCalledTimes(1);
   });
 
+  it('completes a successful publish while another relay is still silent', async () => {
+    const pool = new MemorySimplePool();
+    let reject!: (error: Error) => void;
+    const silent = new Promise<string>((_, fail) => { reject = fail; });
+    pool.publish.mockReturnValueOnce([silent, Promise.resolve('ok')]);
+    const transport = new SimplePoolNostrRelayTransport({
+      getRelays: () => ['wss://silent.example', 'wss://fast.example'], pool,
+    });
+    try { await expect(transport.publish(note('fast', 5))).resolves.toBeUndefined(); }
+    finally { reject(new Error('late disconnect')); }
+  }, 1000);
+
   it('closes immediately when no relays are configured', () => {
     const transport = new SimplePoolNostrRelayTransport({ getRelays: () => [] });
     const handlers: NostrRelayTransportHandlers = { onEvent: vi.fn(), onClose: vi.fn() };
 
     const subscription = transport.subscribe([{ kinds: [1] }], handlers);
 
-    expect(handlers.onClose).toHaveBeenCalledWith(['No Nostr relays configured']);
+    expect(handlers.onClose).toHaveBeenCalledWith(['No Nostr relays configured'], false);
     expect(() => subscription.close()).not.toThrow();
   });
 });

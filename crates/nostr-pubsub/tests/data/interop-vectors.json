@@ -240,6 +240,11 @@
     "hopLimit": 4,
     "expectedPayloadBytes": 5
   },
+  "memoryQueryCase": {
+    "events": ["relayNote", "relayNote", "socialNote"],
+    "filters": [{ "kinds": [1], "limit": 1 }, { "kinds": [1], "limit": 2 }],
+    "expectedEvents": ["relayNote", "socialNote"]
+  },
   "routedQueryCase": {
     "filters": [{ "kinds": [1] }],
     "limit": 1,

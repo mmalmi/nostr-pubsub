@@ -24,6 +24,7 @@ struct InteropVectors {
     retention_cases: Vec<RetentionCase>,
     peer_subscription_case: PeerSubscriptionCase,
     inv_want_case: InvWantCase,
+    memory_query_case: MemoryQueryCase,
     routed_query_case: RoutedQueryCase,
 }
 
@@ -218,6 +219,14 @@ struct ContentKeyVector {
     stream_id: String,
     origin: String,
     seq: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryQueryCase {
+    events: Vec<String>,
+    filters: Vec<Filter>,
+    expected_events: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -528,6 +537,37 @@ fn inv_want_frames_match_typescript_vectors() {
     assert_eq!(inventory.hop_limit, test_case.hop_limit);
     assert_eq!(want.key, frame.key);
     assert_eq!(InvWantMessage::Frame(frame).key(), &key);
+}
+
+#[tokio::test]
+async fn duplicate_deliveries_do_not_consume_history_slots() {
+    let vectors = load_vectors();
+    let case = &vectors.memory_query_case;
+    let bus = InMemoryEventBus::new();
+    for name in &case.events {
+        bus.publish(
+            verified_event(&vectors, name),
+            nostr_pubsub::EventSource::local_index("cache"),
+        )
+        .await
+        .unwrap();
+    }
+    let report = bus
+        .query(case.filters.clone(), QueryOptions::default())
+        .await
+        .unwrap();
+    let ids: Vec<_> = report
+        .events
+        .iter()
+        .map(|row| row.event.as_event().id)
+        .collect();
+    assert_eq!(
+        ids,
+        case.expected_events
+            .iter()
+            .map(|name| vectors.events[name].id)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

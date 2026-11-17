@@ -244,7 +244,7 @@ export {
 export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
 export type {
   NostrRuntimeOptions, RuntimeCacheMode, RuntimeCompletion, RuntimeEventInfo, RuntimeEventStore,
-  RuntimeMetrics, RuntimeOutboxEntry, RuntimePublishOptions, RuntimePublishResult, RuntimeQueryOptions,
+  RuntimeMetrics, RuntimeOutboxEntry, RuntimePendingScope, RuntimePublishOptions, RuntimePublishResult, RuntimeQueryOptions,
   RuntimeQueryResult, RuntimeRelayStats, RuntimeReconciliationOptions, RuntimeSource, RuntimeSubscribeOptions,
   RuntimeSubscription, RuntimeSubscriptionHandlers,
 } from './runtime-types.js';

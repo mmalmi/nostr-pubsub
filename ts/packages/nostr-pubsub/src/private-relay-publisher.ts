@@ -1,3 +1,4 @@
+import { pendingPublications, publicationOptions, updatePublicationScope, updatePending } from './runtime-outbox.js';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { NostrRuntime } from './runtime.js';
 import { MemoryEventStore } from './runtime-store.js';
@@ -66,6 +67,12 @@ export function publicationLaneStore(store: RuntimeEventStore, lane: 'public' | 
       return store.putPending(entry);
     },
     deletePending: id => store.deletePending(id),
+    updatePending: (id, update) => updatePending(store, id, current => {
+      if (current && !allowed(current.event)) throw new Error('Publication belongs to a different connection lane');
+      const next = update(current);
+      if (next && !allowed(next.event)) throw new Error('Publication belongs to a different connection lane');
+      return next;
+    }),
     ...(store.close ? { close: () => store.close!() } : {}),
   };
 }
@@ -106,6 +113,7 @@ export function createPrivateRelayPublisher(options: PrivateRelayPublisherOption
     catch (error) { return Promise.reject(error); }
     // A peer-only attempt cannot supply a relay receipt for the same envelope.
     // Match NostrRuntime's per-event/options coalescing boundary.
+    publishOptions = publicationOptions(publishOptions);
     const operationKey = JSON.stringify([event.id, publishOptions]);
     const existing = active.get(operationKey);
     if (existing) return existing.result;
@@ -115,11 +123,7 @@ export function createPrivateRelayPublisher(options: PrivateRelayPublisherOption
     const operationStore: RuntimeEventStore = {
       query: (filters, queryOptions) => store.query(filters, queryOptions),
       put: value => store.put(value), delete: ids => store.delete(ids), listPending: async () => [],
-      putPending: async entry => {
-        const old = (await store.listPending()).find(row => row.event.id === entry.event.id);
-        await store.putPending({ ...entry, attempts: (old?.attempts ?? 0) + 1 });
-      },
-      deletePending: id => store.deletePending(id),
+      putPending: entry => store.putPending(entry), deletePending: id => store.deletePending(id),
     };
     const runtime = new NostrRuntime({
       relays, store: operationStore, sources: [...sources.values()],
@@ -130,15 +134,13 @@ export function createPrivateRelayPublisher(options: PrivateRelayPublisherOption
     });
     const result = (async () => {
       const queue = !publishOptions.requireAck && publishOptions.queue !== false;
-      if (queue) await operationStore.putPending({
-        event, attempts: 0, updatedAt: Date.now(), relays: publishOptions.relays, sources: publishOptions.sources,
-      });
+      if (queue) await updatePublicationScope(store, event, publishOptions, 'queue');
       // Queue ownership stays outside the disposable operation. Hosts may extend
       // ordinary runtime publication to return after local persistence; queue:false
       // still awaits delivery before this event's connection can be closed.
       const report = await runtime.publish(event, { ...publishOptions, queue: false });
       const retired = report.sources.some(source => source.id === 'local-cache' && !!source.error);
-      if (queue && (report.accepted || retired)) await store.deletePending(event.id);
+      if (queue && (report.accepted || retired)) await updatePublicationScope(store, event, publishOptions, 'retire');
       return { ...report, queued: queue && !report.accepted && !retired };
     })().finally(async () => {
       try { await runtime.close(); }
@@ -153,7 +155,7 @@ export function createPrivateRelayPublisher(options: PrivateRelayPublisherOption
     if (stopped || retrying) return;
     retrying = true;
     try {
-      const pending = await store.listPending();
+      const pending = pendingPublications(await store.listPending());
       for (let offset = 0; offset < pending.length && !stopped; offset += 4) {
         await Promise.all(pending.slice(offset, offset + 4).map(entry =>
           publish(entry.event, { relays: entry.relays, sources: entry.sources }).catch(report)));

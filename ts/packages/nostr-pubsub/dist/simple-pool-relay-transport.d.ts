@@ -1,7 +1,7 @@
 import { SimplePool } from 'nostr-tools';
 import { type NostrEvent, type NostrEventVerifier, type NostrFilter, type NostrVerifiedEvent } from './types.js';
 import type { NostrRelaySubscription, NostrRelayTransport, NostrRelayTransportHandlers, NostrRelayTransportSubscribeOptions } from './relay-event-source.js';
-type RelayPool = Pick<SimplePool, 'publish' | 'subscribeMany'> & Partial<Pick<SimplePool, 'ensureRelay'>>;
+type RelayPool = Pick<SimplePool, 'publish' | 'subscribeMany'> & Partial<Pick<SimplePool, 'ensureRelay' | 'allowConnectingToRelay' | 'onRelayConnectionFailure' | 'onRelayConnectionSuccess' | 'trackRelays' | 'seenOn' | 'maxWaitForConnection'>>;
 export interface SimplePoolNostrRelayVerificationBoundary {
     /** Pass this exact function to the shared SimplePool constructor. */
     readonly verifyEvent: NostrEventVerifier;
@@ -37,6 +37,7 @@ export declare class SimplePoolNostrRelayTransport implements NostrRelayTranspor
     private readonly publishTimeoutMs;
     constructor(options: SimplePoolNostrRelayTransportOptions);
     subscribe(filters: NostrFilter[], handlers: NostrRelayTransportHandlers, options?: NostrRelayTransportSubscribeOptions): NostrRelaySubscription;
+    private subscribeHistory;
     publish(event: NostrVerifiedEvent): Promise<void>;
 }
 export {};

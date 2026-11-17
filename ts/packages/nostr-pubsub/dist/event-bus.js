@@ -3,7 +3,7 @@ import { allowWithPriority, reportParts } from './policy.js';
 import { verifyNostrEvent, validateQueryOptions, } from './types.js';
 export class InMemoryEventBus {
     policy;
-    events = [];
+    events = new Map();
     subscriptions = new Set();
     constructor(policy) {
         this.policy = policy;
@@ -16,7 +16,8 @@ export class InMemoryEventBus {
         const report = reportParts(decision);
         if (report.accepted) {
             const stored = { event: verifiedEvent, source, priority: report.priority };
-            this.events.push(stored);
+            if (!this.events.has(verifiedEvent.id))
+                this.events.set(verifiedEvent.id, stored);
             for (const subscription of this.subscriptions) {
                 if (subscription.filters.some((filter) => matchFilter(filter, verifiedEvent))) {
                     subscription.handler(stored);
@@ -28,7 +29,7 @@ export class InMemoryEventBus {
     async query(filters, options = {}) {
         validateQueryOptions(options);
         throwIfQueryStopped(options);
-        const ordered = [...this.events].sort((left, right) => right.event.created_at - left.event.created_at || compareText(left.event.id, right.event.id));
+        const ordered = [...this.events.values()].sort((left, right) => right.event.created_at - left.event.created_at || compareText(left.event.id, right.event.id));
         const byId = new Map();
         const effectiveFilters = filters.length === 0 ? [{}] : filters;
         for (const filter of effectiveFilters) {

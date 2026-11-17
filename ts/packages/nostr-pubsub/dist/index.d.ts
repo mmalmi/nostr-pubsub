@@ -29,7 +29,7 @@ export { createPrivateRelayPublisher, isPrivateRelayEvent, publicationLaneStore,
 export { isRelayDiscoveryFilter, splitRelayDiscoveryFilters } from './discovery-scope.js';
 export { normalizeRelayUrl, rankRelays, relayListEntries, MAX_RELAY_URL_LENGTH, RELAY_LIST_KIND, type RankedRelay, type RelayListEntry, type RelayListUse, type RelayRankOptions, } from './relay-lists.js';
 export { MemoryEventStore, selectStoredEvents, storeRuntimeEvent } from './runtime-store.js';
-export type { NostrRuntimeOptions, RuntimeCacheMode, RuntimeCompletion, RuntimeEventInfo, RuntimeEventStore, RuntimeMetrics, RuntimeOutboxEntry, RuntimePublishOptions, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeRelayStats, RuntimeReconciliationOptions, RuntimeSource, RuntimeSubscribeOptions, RuntimeSubscription, RuntimeSubscriptionHandlers, } from './runtime-types.js';
+export type { NostrRuntimeOptions, RuntimeCacheMode, RuntimeCompletion, RuntimeEventInfo, RuntimeEventStore, RuntimeMetrics, RuntimeOutboxEntry, RuntimePendingScope, RuntimePublishOptions, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeRelayStats, RuntimeReconciliationOptions, RuntimeSource, RuntimeSubscribeOptions, RuntimeSubscription, RuntimeSubscriptionHandlers, } from './runtime-types.js';
 export { createAnonymousFipsPublisher, createAnonymousFipsDiscovery, type AnonymousFipsEndpoint, type AnonymousFipsOptions } from './anonymous-fips.js';
 export type { FipsPrivacyRole } from './fips-privacy-role.js';
 export type { FipsRemotePublication, FipsReceiptOptions } from './fips-publication-receipts.js';

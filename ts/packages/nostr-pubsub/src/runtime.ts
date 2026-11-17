@@ -1,3 +1,4 @@
+import { pendingPublications, publicationOptions, updatePublicationScope } from './runtime-outbox.js';
 import { RelayRateLimitError } from './relay-rate-limit.js';
 import { matchFilters } from 'nostr-tools/filter';
 import { verifyNostrEvent, validateQueryOptions, type NostrEvent, type NostrFilter } from './types.js';
@@ -115,7 +116,7 @@ export class NostrRuntime {
   }
 
   publish(event: NostrEvent, options: RuntimePublishOptions = {}): Promise<RuntimePublishResult> {
-    return this.startPublish(event, options).result;
+    return this.startPublish(event, publicationOptions(options)).result;
   }
   private startPublish(event: NostrEvent, options: RuntimePublishOptions) {
     this.ensureOpen();
@@ -139,7 +140,7 @@ export class NostrRuntime {
     if (this.stopped || this.retrying) return;
     this.retrying = true;
     try {
-      const pending = await this.store.listPending();
+      const pending = pendingPublications(await this.store.listPending());
       for (let offset = 0; offset < pending.length && !this.stopped; offset += 4) {
         await Promise.all(pending.slice(offset, offset + 4).map(({ event, relays, sources }) => {
           const { result, delivery } = this.startPublish(event, { relays, sources });
@@ -298,12 +299,9 @@ export class NostrRuntime {
     const event = verifyNostrEvent(raw, this.options.verifyEvent);
     const queue = !options.requireAck && options.queue !== false;
     const echo = !options.requireAck && options.localEcho !== false;
-    if (queue) {
-      const old = (await this.store.listPending()).find((entry) => entry.event.id === event.id);
-      await this.store.putPending({ event, attempts: (old?.attempts ?? 0) + 1, updatedAt: Date.now(), relays: options.relays, sources: options.sources });
-    }
+    if (queue) await updatePublicationScope(this.store, event, options, 'queue');
     if (echo && !await this.ingest(event, 'local-publish')) {
-      if (queue) await this.store.deletePending(event.id);
+      if (queue) await updatePublicationScope(this.store, event, options, 'retire');
       return { accepted: false, remoteAccepted: false, queued: false, sources: [{ id: 'local-cache', accepted: false, error: 'Event is expired, deleted or superseded' }] };
     }
     const attempts = this.relays.publishAttempts(event, options.relays).map(({ id, result }) => ({ id, remote: true, result }));
@@ -338,7 +336,7 @@ export class NostrRuntime {
       });
     });
     if (accepted) {
-      if (queue) await this.store.deletePending(event.id);
+      if (queue) await updatePublicationScope(this.store, event, options, 'retire');
       if (!echo) await this.ingest(event, 'local-publish');
     }
     return { accepted, remoteAccepted: accepted, queued: queue && !accepted, sources: outcomes.map((outcome) => ({ ...outcome })) };
