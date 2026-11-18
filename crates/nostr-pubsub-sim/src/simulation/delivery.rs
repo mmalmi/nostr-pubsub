@@ -273,10 +273,7 @@ mod tests {
 
     #[test]
     fn resolves_shared_paths_out_of_order_and_checks_forwarding_only_cycles() {
-        let mut records = (1..=4096)
-            .rev()
-            .map(|node| record(node - 1, node, true))
-            .collect::<Vec<_>>();
+        let mut records = reverse_chain();
         let depths = delivery_path_hops(&records).unwrap();
         assert_eq!(depths, (1..=4096).rev().collect::<Vec<u64>>());
         records.extend([record(5000, 5001, false), record(5001, 5000, false)]);
@@ -286,6 +283,36 @@ mod tests {
                 .to_string()
                 .contains("delivery cycle")
         );
+    }
+
+    #[test]
+    #[ignore = "manual wall-clock benchmark, run in release mode"]
+    fn benchmark_delivery_path_accounting() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let records = reverse_chain();
+        assert_eq!(delivery_path_hops(&records).unwrap().len(), records.len());
+        let mut samples = [Duration::ZERO; 5];
+        for sample in &mut samples {
+            let start = Instant::now();
+            for _ in 0..100 {
+                black_box(delivery_path_hops(black_box(&records)).unwrap());
+            }
+            *sample = start.elapsed() / 100;
+        }
+        samples.sort_unstable();
+        eprintln!(
+            "Median time to resolve a 4,096-hop delivery chain: {:?}",
+            samples[2]
+        );
+    }
+
+    fn reverse_chain() -> Vec<VerifiedDeliveryRecord> {
+        (1..=4096)
+            .rev()
+            .map(|node| record(node - 1, node, true))
+            .collect()
     }
 
     fn record(provider: usize, receiver: usize, final_delivery: bool) -> VerifiedDeliveryRecord {

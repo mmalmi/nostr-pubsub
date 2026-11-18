@@ -283,6 +283,24 @@ p95, p99, and maximum as the optimization and denial-of-service signals:
 reputation convergence. The virtual clock has no sleeps and says nothing about
 CPU duration or throughput of the simulator itself.
 
+To compare simulator performance across revisions, build once per revision and
+run the same 1,000-node scenario five times on an idle machine. Save each
+revision's CSV and compare delivery counts, hop depths, and virtual latency
+alongside the median elapsed time.
+
+```sh
+cargo build --locked --release -p nostr-pubsub-sim
+time target/release/nostr-pubsub-sim --nodes 1000 --attackers 200 --topology peer --mode local --seed 42 > simulation.csv
+```
+
+The following benchmark isolates the reporting step. It resolves the same
+4,096-hop chain in reverse input order and prints the median of five batches
+of 100 calls. Record construction and compilation are outside the timed loop.
+
+```sh
+cargo test --locked --release -p nostr-pubsub-sim benchmark_delivery_path_accounting -- --ignored --nocapture
+```
+
 ### Incentive and bilateral-risk scenarios
 
 Every verified delivery trail is also priced under five optional service-layer
