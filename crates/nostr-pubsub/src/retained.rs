@@ -68,13 +68,13 @@ impl RetainedEvents {
             return false;
         }
         let coordinate = event_coordinate(raw);
-        if let Some(coordinate) = &coordinate {
-            if self.events.iter().any(|(old, _)| {
+        if coordinate.as_ref().is_some_and(|coordinate| {
+            self.events.iter().any(|(old, _)| {
                 event_coordinate(old.as_event()).as_ref() == Some(coordinate)
                     && !event_supersedes(raw, old.as_event())
-            }) {
-                return false;
-            }
+            })
+        }) {
+            return false;
         }
         self.events.retain(|(old, _)| {
             retained_event_is_current(old.as_event(), now)
@@ -97,6 +97,7 @@ impl RetainedEvents {
             .any(|(stored, _)| stored.as_event().id == id)
     }
 
+    #[must_use]
     pub fn snapshot(&self, now: u64) -> Vec<Event> {
         self.current(now).cloned().collect()
     }
@@ -109,6 +110,7 @@ impl RetainedEvents {
             .filter(move |event| retained_event_is_current(event, now))
     }
 
+    #[must_use]
     pub fn query(&self, filters: &[Filter], options: QueryOptions, now: u64) -> Vec<VerifiedEvent> {
         let mut selected = HashSet::new();
         for filter in filters {

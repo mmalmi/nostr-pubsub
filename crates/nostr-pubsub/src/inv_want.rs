@@ -124,6 +124,10 @@ impl InvWantMessage {
     }
 }
 
+#[expect(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 #[async_trait]
 pub trait InvWantBus: Send + Sync {
     async fn announce_inventory(

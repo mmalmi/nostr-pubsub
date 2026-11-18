@@ -241,6 +241,10 @@ pub struct SourcePolicyContext<'a> {
     pub capabilities: &'a [String],
 }
 
+#[expect(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 #[async_trait]
 pub trait PubsubPolicy: Send + Sync {
     async fn check_event(&self, context: EventPolicyContext<'_>) -> Result<PolicyDecision>;
@@ -309,6 +313,10 @@ impl EventRetentionPolicy {
     }
 }
 
+#[expect(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 #[async_trait]
 pub trait EventBus: Send + Sync {
     async fn publish(&self, event: VerifiedEvent, source: EventSource) -> Result<PublishReport>;

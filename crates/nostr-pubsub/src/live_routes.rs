@@ -26,6 +26,10 @@ pub enum SubscriptionDeliveryStatus {
     Lagged,
 }
 
+#[expect(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 #[async_trait]
 pub trait NostrEventSubscription: Send {
     /// `None` means this provider does not report local delivery health.
@@ -36,6 +40,10 @@ pub trait NostrEventSubscription: Send {
     async fn close(self: Box<Self>) -> Result<()>;
 }
 
+#[expect(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 #[async_trait]
 pub trait NostrEventSubscriber: Send + Sync {
     async fn subscribe(

@@ -33,10 +33,9 @@ fn restored_signed_announcements_keep_only_current_coordinate_winners() {
     let events = cache.query(&[Filter::new()], QueryOptions::default(), 1002);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].as_event(), &latest);
-    assert!(
-        cache
-            .query(&[Filter::new()], QueryOptions::default(), 1601)
-            .is_empty()
+    assert_eq!(
+        cache.query(&[Filter::new()], QueryOptions::default(), 1601),
+        []
     );
 }
 #[test]
@@ -48,7 +47,7 @@ fn bounded_retention_uses_nostr_ties_and_filter_limits() {
     for events in [[a.clone(), b.clone()], [b, a]] {
         let mut cache = RetainedEvents::new(policy()).unwrap();
         cache.restore(events, 1000);
-        assert_eq!(cache.snapshot(1000), [winner.clone()]);
+        assert_eq!(cache.snapshot(1000), std::slice::from_ref(&winner));
         for _ in 0..8 {
             cache.insert(
                 VerifiedEvent::try_from(advert(&Keys::generate(), 1001, "mesh", "")).unwrap(),
@@ -62,10 +61,9 @@ fn bounded_retention_uses_nostr_ties_and_filter_limits() {
                 .len(),
             1
         );
-        assert!(
-            cache
-                .query(&[Filter::new().limit(0)], QueryOptions::default(), 1001)
-                .is_empty()
+        assert_eq!(
+            cache.query(&[Filter::new().limit(0)], QueryOptions::default(), 1001),
+            []
         );
     }
 }
