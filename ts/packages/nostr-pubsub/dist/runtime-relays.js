@@ -2,8 +2,11 @@ import { RateLimitAwarePool, withPublishRateLimit } from './relay-rate-limit.js'
 import { verifyEvent } from 'nostr-tools/pure';
 import { matchFilter, matchFilters } from 'nostr-tools/filter';
 import { createSimplePoolNostrRelayVerificationBoundary } from './simple-pool-relay-transport.js';
-import { verifyNostrEvent } from './types.js';
+import { verifyNostrEvent, validateQueryOptions } from './types.js';
 import { RuntimeReconciliation } from './runtime-reconciliation.js';
+import { abortError, expired, selectStoredEvents } from './runtime-store.js';
+const MAX_TRANSIENT_RESULTS = 256;
+const MAX_TIMER_MS = 2_147_483_647;
 /** Batches OR filters without merging their fields, preserving recipient/author intersections. */
 export class RuntimeRelays {
     options;
@@ -12,6 +15,7 @@ export class RuntimeRelays {
     reconciliation;
     relays;
     batches = new Set();
+    transientQueries = new Set();
     pending = [];
     timer;
     stopped = false;
@@ -42,12 +46,62 @@ export class RuntimeRelays {
         return this.relays.map((url) => ({ url, connected: statuses.get(url) ?? false }));
     }
     count() { return [...this.batches].reduce((total, batch) => total + batch.links.size, 0); }
-    subscribe(filters, event, state, relays, isolated = false) {
+    transientCount() { return this.transientQueries.size; }
+    async queryTransient(relay, filters, options) {
+        validateQueryOptions(options);
+        if (options.signal?.aborted)
+            throw abortError(options.signal.reason);
+        if (filters.length === 0)
+            throw new RangeError('Nostr queries require at least one filter');
+        const limit = options.limit ?? MAX_TRANSIENT_RESULTS;
+        if (limit < 1 || limit > MAX_TRANSIENT_RESULTS)
+            throw new RangeError('Transient query limit must be between 1 and 256');
+        const deadline = options.deadline ?? Date.now() + (this.options.historyTimeoutMs ?? 10_000);
+        if (deadline <= Date.now())
+            return { events: [], complete: false, reason: 'timeout', sources: [] };
+        const url = normalizeRelays([relay])[0];
+        const boundedFilters = filters.map((filter) => {
+            validateQueryOptions({ limit: filter.limit });
+            return { ...filter, limit: Math.min(filter.limit ?? limit, limit) };
+        });
+        return new Promise((resolve, reject) => {
+            const events = new Map();
+            const onClose = () => finish('closed');
+            const onAbort = () => {
+                cleanup();
+                reject(abortError(options.signal?.reason));
+            };
+            const cleanup = () => {
+                subscription.close();
+                clearTimeout(timer);
+                this.transientQueries.delete(onClose);
+                options.signal?.removeEventListener('abort', onAbort);
+            };
+            const finish = (reason, error) => {
+                cleanup();
+                const complete = reason === 'eose';
+                resolve({
+                    events: selectStoredEvents(events.values(), boundedFilters, { limit }),
+                    complete, reason, sources: [{ id: url, complete, ...(error && { error }) }],
+                });
+            };
+            const subscription = this.subscribe(boundedFilters, (event) => {
+                if (events.size < limit && !events.has(event.id) && !expired(event))
+                    events.set(event.id, event);
+            }, (_source, complete, error) => {
+                finish(complete ? 'eose' : events.size ? 'closed' : 'unavailable', error);
+            }, { relays: [url], isolated: true, transient: true });
+            const timer = setTimeout(() => finish('timeout'), Math.min(MAX_TIMER_MS, Math.max(0, deadline - Date.now())));
+            this.transientQueries.add(onClose);
+            options.signal?.addEventListener('abort', onAbort, { once: true });
+        });
+    }
+    subscribe(filters, event, state, { relays, isolated = false, transient = false } = {}) {
         if (this.stopped)
             throw new Error('Nostr runtime is closed');
         if (filters.length > this.maxFilters || bytes(filters) > this.maxBytes)
             throw new RangeError('Nostr subscription exceeds filter batch bounds');
-        const entry = { isolated, relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
+        const entry = { isolated, transient, relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
         this.pending.push(entry);
         if (!this.timer)
             this.timer = setTimeout(() => this.flush(), this.options.batchWindowMs ?? 10);
@@ -105,6 +159,8 @@ export class RuntimeRelays {
     }
     close() {
         this.stopped = true;
+        for (const close of this.transientQueries)
+            close();
         if (this.timer)
             clearTimeout(this.timer);
         this.pending = [];
@@ -161,6 +217,7 @@ export class RuntimeRelays {
             const relay = await this.pool.ensureRelay(url);
             if (!current())
                 return;
+            const transient = batch.entries[0].transient;
             const original = uniqueFilters(batch.entries);
             const keys = original.map(filterKey);
             const filters = original.map((filter, index) => {
@@ -199,7 +256,7 @@ export class RuntimeRelays {
                 onclose: (reason) => {
                     if (!current())
                         return;
-                    if (reason.startsWith('auth-required:') && this.options.signAuthEvent && !link.authenticating) {
+                    if (!transient && reason.startsWith('auth-required:') && this.options.signAuthEvent && !link.authenticating) {
                         link.authenticating = true;
                         // AUTH is initial setup, not a failed historical result. Keep the
                         // caller's deadline active while awaiting its acknowledgment.
@@ -218,7 +275,7 @@ export class RuntimeRelays {
             link.close = () => { if (relay.openSubs.has(subscription.id))
                 subscription.close('Nostr runtime subscription closed'); };
             await relay.send(JSON.stringify(['REQ', subscription.id, ...filters]));
-            if (current() && this.reconciliation) {
+            if (current() && !transient && this.reconciliation) {
                 const stop = this.reconciliation.start(relay, original, deliver);
                 const close = link.close;
                 link.close = () => { stop(); close?.(); };
@@ -234,6 +291,8 @@ export class RuntimeRelays {
         for (const entry of batch.entries)
             if (!entry.closed)
                 entry.state(url, false, reason);
+        if (batch.closed)
+            return;
         const delay = Math.min(30000, (this.options.reconnectDelayMs ?? 500) * 2 ** Math.min(link.attempts++, 6));
         link.timer = setTimeout(() => { link.timer = undefined; void this.connect(batch, url, link); }, delay);
     }

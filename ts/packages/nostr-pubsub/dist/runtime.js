@@ -35,8 +35,7 @@ export class NostrRuntime {
             throw new RangeError('Nostr subscriptions require at least one filter');
         if (options.includeSuperseded && options.cache !== 'network-only')
             throw new Error('Historical replaceable versions require network-only queries');
-        if (this.listeners.size >= (this.options.maxSubscriptions ?? 1024))
-            throw new RangeError('Nostr subscription capacity exhausted');
+        this.ensureSubscriptionCapacity();
         validateQueryOptions({ deadline: options.deadline });
         const listener = {
             filters: structuredClone(filters), handlers, options, seen: new Set(), closers: new Map(),
@@ -78,6 +77,17 @@ export class NostrRuntime {
                 onError: (error) => this.options.onError?.(error),
             }, options);
         });
+    }
+    /**
+     * Read a bounded page (1–256 events) from one explicit relay on the shared socket.
+     * Checks signatures, filters and expiration without local replay, writes or reconciliation.
+     * This request sends no AUTH. If the socket is already authenticated, its existing
+     * connection identity still applies. Use an anonymous runtime when required.
+     */
+    async queryTransientRelay(relay, filters, options = {}) {
+        this.ensureOpen();
+        this.ensureSubscriptionCapacity();
+        return await this.relays.queryTransient(relay, filters, options);
     }
     async ingest(raw, source = 'external') {
         return this.admit(raw, source);
@@ -186,7 +196,7 @@ export class NostrRuntime {
         void this.retryPending().catch((error) => this.options.onError?.(asError(error)));
     }
     getRelayStats() { return this.relays.stats(); }
-    metrics() { return { ...this.counters, subscriptions: this.listeners.size, relaySubscriptions: this.relays.count() }; }
+    metrics() { return { ...this.counters, subscriptions: this.listeners.size + this.relays.transientCount(), relaySubscriptions: this.relays.count() }; }
     addSource(source) {
         this.ensureOpen();
         this.removeSource(source.id);
@@ -227,7 +237,7 @@ export class NostrRuntime {
         if (listener.options.cache !== 'cache-only') {
             for (const url of listener.options.relays?.map((url) => new URL(url).toString()) ?? this.relays.urls())
                 listener.pending.add(url);
-            const subscription = this.relays.subscribe(listener.filters, (event, source) => this.receive(listener, event, source), (source, complete, error) => this.sourceState(listener, source, complete, error), listener.options.relays, listener.options.isolated);
+            const subscription = this.relays.subscribe(listener.filters, (event, source) => this.receive(listener, event, source), (source, complete, error) => this.sourceState(listener, source, complete, error), { relays: listener.options.relays, isolated: listener.options.isolated });
             listener.closers.set('relay-transport', () => subscription.close());
             for (const source of this.sources.values())
                 if (this.wantsSource(listener, source.id)) {
@@ -459,6 +469,11 @@ export class NostrRuntime {
     }
     ensureOpen() { if (this.stopped)
         throw new Error('Nostr runtime is closed'); }
+    ensureSubscriptionCapacity() {
+        if (this.listeners.size + this.relays.transientCount() >= (this.options.maxSubscriptions ?? 1024)) {
+            throw new RangeError('Nostr subscription capacity exhausted');
+        }
+    }
 }
 export function createNostrRuntime(options = {}) { return new NostrRuntime(options); }
 function asError(error) { return error instanceof Error ? error : new Error(String(error)); }

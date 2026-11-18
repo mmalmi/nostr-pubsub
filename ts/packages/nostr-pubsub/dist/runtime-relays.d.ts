@@ -1,8 +1,14 @@
 import type { SubCloser } from 'nostr-tools/abstract-pool';
-import { type NostrEvent, type NostrFilter } from './types.js';
-import type { NostrRuntimeOptions, RuntimeRelayStats } from './runtime-types.js';
+import { type NostrEvent, type NostrFilter, type QueryOptions } from './types.js';
+import type { NostrRuntimeOptions, RuntimeQueryResult, RuntimeRelayStats } from './runtime-types.js';
+type Scope = {
+    relays?: readonly string[];
+    isolated?: boolean;
+    transient?: boolean;
+};
 type Entry = {
     isolated: boolean;
+    transient: boolean;
     relays?: readonly string[];
     filters: NostrFilter[];
     event: (event: NostrEvent, relay: string) => void;
@@ -33,6 +39,7 @@ export declare class RuntimeRelays {
     private readonly reconciliation?;
     private relays;
     private readonly batches;
+    private readonly transientQueries;
     private pending;
     private timer?;
     private stopped;
@@ -43,7 +50,9 @@ export declare class RuntimeRelays {
     urls(): string[];
     stats(): RuntimeRelayStats[];
     count(): number;
-    subscribe(filters: NostrFilter[], event: Entry['event'], state: Entry['state'], relays?: readonly string[], isolated?: boolean): SubCloser;
+    transientCount(): number;
+    queryTransient(relay: string, filters: NostrFilter[], options: QueryOptions): Promise<RuntimeQueryResult>;
+    subscribe(filters: NostrFilter[], event: Entry['event'], state: Entry['state'], { relays, isolated, transient }?: Scope): SubCloser;
     setRelays(urls: readonly string[]): void;
     publishAttempts(event: NostrEvent, urls?: readonly string[]): Array<{
         id: string;

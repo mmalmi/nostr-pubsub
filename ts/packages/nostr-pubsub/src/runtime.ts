@@ -1,7 +1,7 @@
 import { pendingPublications, publicationOptions, updatePublicationScope } from './runtime-outbox.js';
 import { RelayRateLimitError } from './relay-rate-limit.js';
 import { matchFilters } from 'nostr-tools/filter';
-import { verifyNostrEvent, validateQueryOptions, type NostrEvent, type NostrFilter } from './types.js';
+import { verifyNostrEvent, validateQueryOptions, type NostrEvent, type NostrFilter, type QueryOptions } from './types.js';
 import { localIndexSource } from './source.js';
 import { MemoryEventStore, abortError, selectStoredEvents, admitRuntimeEvent } from './runtime-store.js';
 import { RuntimeInterests } from './runtime-interests.js';
@@ -43,7 +43,7 @@ export class NostrRuntime {
     this.ensureOpen();
     if (!filters.length) throw new RangeError('Nostr subscriptions require at least one filter');
     if (options.includeSuperseded && options.cache !== 'network-only') throw new Error('Historical replaceable versions require network-only queries');
-    if (this.listeners.size >= (this.options.maxSubscriptions ?? 1024)) throw new RangeError('Nostr subscription capacity exhausted');
+    this.ensureSubscriptionCapacity();
     validateQueryOptions({ deadline: options.deadline });
     const listener: Listener = {
       filters: structuredClone(filters), handlers, options, seen: new Set(), closers: new Map(),
@@ -80,6 +80,17 @@ export class NostrRuntime {
         onError: (error) => this.options.onError?.(error),
       }, options);
     });
+  }
+  /**
+   * Read a bounded page (1–256 events) from one explicit relay on the shared socket.
+   * Checks signatures, filters and expiration without local replay, writes or reconciliation.
+   * This request sends no AUTH. If the socket is already authenticated, its existing
+   * connection identity still applies. Use an anonymous runtime when required.
+   */
+  async queryTransientRelay(relay: string, filters: NostrFilter[], options: QueryOptions = {}): Promise<RuntimeQueryResult> {
+    this.ensureOpen();
+    this.ensureSubscriptionCapacity();
+    return await this.relays.queryTransient(relay, filters, options);
   }
   async ingest(raw: NostrEvent, source = 'external'): Promise<boolean> {
     return this.admit(raw, source);
@@ -159,7 +170,7 @@ export class NostrRuntime {
     void this.retryPending().catch((error) => this.options.onError?.(asError(error)));
   }
   getRelayStats() { return this.relays.stats(); }
-  metrics(): RuntimeMetrics { return { ...this.counters, subscriptions: this.listeners.size, relaySubscriptions: this.relays.count() }; }
+  metrics(): RuntimeMetrics { return { ...this.counters, subscriptions: this.listeners.size + this.relays.transientCount(), relaySubscriptions: this.relays.count() }; }
   addSource(source: RuntimeSource): void {
     this.ensureOpen(); this.removeSource(source.id); this.sources.set(source.id, source);
     for (const listener of this.listeners) if (this.wantsSource(listener, source.id)) void this.attachSource(listener, source);
@@ -188,7 +199,8 @@ export class NostrRuntime {
     if (listener.options.cache !== 'cache-only') {
       for (const url of listener.options.relays?.map((url) => new URL(url).toString()) ?? this.relays.urls()) listener.pending.add(url);
       const subscription = this.relays.subscribe(listener.filters, (event, source) => this.receive(listener, event, source),
-        (source, complete, error) => this.sourceState(listener, source, complete, error), listener.options.relays, listener.options.isolated);
+        (source, complete, error) => this.sourceState(listener, source, complete, error),
+        { relays: listener.options.relays, isolated: listener.options.isolated });
       listener.closers.set('relay-transport', () => subscription.close());
       for (const source of this.sources.values()) if (this.wantsSource(listener, source.id)) { listener.pending.add(source.id); void this.attachSource(listener, source); }
     }
@@ -351,6 +363,11 @@ export class NostrRuntime {
     try { (listener.handlers.onError ?? this.options.onError)?.(normalized); } catch { /* consumer errors do not stop network processing */ }
   }
   private ensureOpen(): void { if (this.stopped) throw new Error('Nostr runtime is closed'); }
+  private ensureSubscriptionCapacity(): void {
+    if (this.listeners.size + this.relays.transientCount() >= (this.options.maxSubscriptions ?? 1024)) {
+      throw new RangeError('Nostr subscription capacity exhausted');
+    }
+  }
 }
 export function createNostrRuntime(options: NostrRuntimeOptions = {}): NostrRuntime { return new NostrRuntime(options); }
 function asError(error: unknown): Error { return error instanceof Error ? error : new Error(String(error)); }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.33
+
+Add `NostrRuntime.queryTransientRelay` for bounded, verified queries on one caller-selected relay. It uses the shared connection, returns partial results on timeout, and keeps candidates out of local replay and storage.
+
 ## 0.5.32
 
 Preserve independent publication retries when sending the same event to different destinations. Relay history can fall back to a replica after an incomplete response. The SimplePool publisher returns after the first positive acknowledgment. Profile replacement ignores incidental `d` tags, and repeated deliveries use one slot in limited memory queries.
