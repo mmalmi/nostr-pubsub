@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "async-trait",
  "hex",
@@ -2742,9 +2742,9 @@ dependencies = [
 
 [[package]]
 name = "nvpn-fips-core"
-version = "0.4.123"
+version = "0.4.124"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b23ab830c7abdd3510dd2586688a0b29f4a34646d524e7937145df70903599c"
+checksum = "cfdf586bc3a1f21f39bdcd7dea79c994afe005c54c2d87a23389ddfdc033ab63"
 dependencies = [
  "async-wsocket",
  "base64 0.22.1",
@@ -2811,9 +2811,9 @@ checksum = "299df22559c4af63e7d276fcb90cf000f2f1cd5546c213f17d8860154c1383d7"
 
 [[package]]
 name = "nvpn-fips-tcp-endpoint"
-version = "0.2.57"
+version = "0.2.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f3fa2f912e0d105a7ee4166c15df11ac5179d453a152b339e351868ecb871eb"
+checksum = "7e53480d239ea8e367f78d9b3cf5c2205ded0f103854e468fafb3a0e8d9b1c9a"
 dependencies = [
  "nvpn-fips-core",
  "nvpn-fips-tcp",
