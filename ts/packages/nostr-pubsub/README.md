@@ -48,7 +48,7 @@ received and reports incomplete history.
 
 ## More
 
-The [TypeScript guide](https://github.com/mmalmi/nostr-pubsub/blob/nostr-pubsub-ts-v0.5.34/docs/typescript-guide.md)
+The [TypeScript guide](https://github.com/mmalmi/nostr-pubsub/blob/nostr-pubsub-ts-v0.5.35/docs/typescript-guide.md)
 covers live subscriptions, publishing and retries, caching, pagination, private
-messages, and peer-to-peer routing. The [changelog](https://github.com/mmalmi/nostr-pubsub/blob/nostr-pubsub-ts-v0.5.34/ts/packages/nostr-pubsub/CHANGELOG.md)
+messages, and peer-to-peer routing. The [changelog](https://github.com/mmalmi/nostr-pubsub/blob/nostr-pubsub-ts-v0.5.35/ts/packages/nostr-pubsub/CHANGELOG.md)
 lists changes by version.

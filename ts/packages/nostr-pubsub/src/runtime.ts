@@ -15,7 +15,8 @@ import type {
 type Listener = {
   filters: NostrFilter[]; handlers: RuntimeSubscriptionHandlers; options: RuntimeSubscribeOptions;
   seen: Set<string>; closers: Map<string, () => void>; statuses: Map<string, { complete: boolean; error?: string }>;
-  pending: Set<string>; timer?: ReturnType<typeof setTimeout>; stopped: boolean; notified: boolean;
+  pending: Set<string>; timer?: ReturnType<typeof setTimeout>; settleTimer?: ReturnType<typeof setTimeout>;
+  stopped: boolean; notified: boolean;
   controller: AbortController; abort?: () => void; ready: Promise<void>; admissionError?: string;
 };
 
@@ -202,7 +203,10 @@ export class NostrRuntime {
         (source, complete, error) => this.sourceState(listener, source, complete, error),
         { relays: listener.options.relays, isolated: listener.options.isolated });
       listener.closers.set('relay-transport', () => subscription.close());
-      for (const source of this.sources.values()) if (this.wantsSource(listener, source.id)) { listener.pending.add(source.id); void this.attachSource(listener, source); }
+      for (const source of this.sources.values()) {
+        if (!this.wantsSource(listener, source.id) || !this.sourceSupports(source, listener.filters)) continue;
+        listener.pending.add(source.id); void this.attachSource(listener, source);
+      }
     }
     if (listener.options.cache !== 'network-only') {
       const events = await this.store.query(listener.filters, { signal: listener.controller.signal, deadline: listener.options.deadline });
@@ -215,6 +219,18 @@ export class NostrRuntime {
     if (listener.stopped) return;
     if (listener.options.cache === 'cache-only') { this.complete(listener, 'cache'); return; }
     await this.maybeComplete(listener);
+  }
+  private sourceSupports(source: RuntimeSource, filters: NostrFilter[]): boolean {
+    try { return source.supports?.(filters) ?? true; } catch { return false; }
+  }
+  private background(listener: Listener): boolean { return listener.options.persist === 'background'; }
+  /** Deliver a verified network event now and persist it without holding the read. */
+  private deliverThenAdmit(listener: Listener, raw: NostrEvent, source: string): void {
+    let event: NostrEvent;
+    try { event = verifyNostrEvent(raw, this.options.verifyEvent); }
+    catch (error) { this.counters.verificationFailures++; this.report(listener, error); return; }
+    this.deliver(listener, event, { source, cached: false });
+    void this.admit(event, source).catch(() => undefined);
   }
   private wantsSource(listener: Listener, id: string): boolean {
     return listener.options.cache !== 'cache-only' && (listener.options.sources ? listener.options.sources.includes(id) : listener.options.relays === undefined);
@@ -232,7 +248,8 @@ export class NostrRuntime {
           deadline: listener.options.deadline ?? Date.now() + (this.options.historyTimeoutMs ?? 10000), signal: listener.controller.signal,
         });
         if (listener.stopped || this.sources.get(source.id) !== source) return;
-        for (const { event } of report.events) await this.admit(event, source.id, listener);
+        if (this.background(listener)) for (const { event } of report.events) this.deliverThenAdmit(listener, event, source.id);
+        else for (const { event } of report.events) await this.admit(event, source.id, listener);
         this.sourceState(listener, source.id, report.complete !== false);
       } else this.sourceState(listener, source.id, false, 'Source has no historical completion');
     } catch (error) {
@@ -246,6 +263,7 @@ export class NostrRuntime {
     this.counters.receivedEvents++;
     const key = listener.options.isolated ? `${source}:${event.id}` : event.id;
     if (listener.seen.has(key) || (!listener.options.isolated && this.incoming.get(event.id)?.sources.has(source))) { this.counters.duplicateEvents++; return; }
+    if (this.background(listener)) { this.deliverThenAdmit(listener, event, source); return; }
     void this.admit(event, source, listener).catch((error) => this.report(listener, error));
   }
   private deliver(listener: Listener, event: NostrEvent, info: RuntimeEventInfo): void {
@@ -256,6 +274,12 @@ export class NostrRuntime {
     if (listener.seen.size > (this.options.maxSeenEventsPerSubscription ?? 4096)) listener.seen.delete(listener.seen.values().next().value!);
     this.counters.deliveredEvents++;
     try { listener.handlers.onEvent(event, info); } catch (error) { this.report(listener, error); }
+    if (listener.options.settle?.ids && !listener.notified && this.allIdsSeen(listener)) this.complete(listener, 'eose');
+  }
+  private allIdsSeen(listener: Listener): boolean {
+    const ids = listener.filters.flatMap((filter) => filter.ids ?? []);
+    if (!ids.length || listener.filters.some((filter) => !filter.ids?.length)) return false;
+    return ids.every((id) => listener.seen.has(id) || [...listener.seen].some((key) => key.endsWith(`:${id}`)));
   }
   private acceptsOrigin(listener: Listener, info: RuntimeEventInfo): boolean {
     if (info.cached) return listener.options.cache !== 'network-only';
@@ -268,6 +292,11 @@ export class NostrRuntime {
   private sourceState(listener: Listener, id: string, complete: boolean, error?: string): void {
     if (listener.stopped) return;
     listener.pending.delete(id); listener.statuses.set(id, { complete, error });
+    try { listener.handlers.onSource?.({ id, complete, ...(error ? { error } : {}) }); } catch (caught) { this.report(listener, caught); }
+    const settle = listener.options.settle;
+    if (settle?.sources && !listener.settleTimer && !listener.notified && listener.statuses.size >= settle.sources) {
+      listener.settleTimer = setTimeout(() => this.complete(listener, 'eose'), Math.max(0, settle.graceMs ?? 300));
+    }
     // Wait for ordered admission/cache writes before exposing EOSE.
     void listener.ready.then(() => this.maybeComplete(listener));
   }
@@ -276,8 +305,11 @@ export class NostrRuntime {
     // Drain the current chain before reporting EOSE, including arrivals during cache replay.
     while (!listener.stopped && !listener.notified && listener.pending.size === 0) {
       const writes = this.writes;
-      await writes;
-      if (writes !== this.writes) continue;
+      // Background persistence reports history without draining unrelated writes.
+      if (!this.background(listener)) {
+        await writes;
+        if (writes !== this.writes) continue;
+      }
       if (listener.stopped || listener.notified || listener.pending.size) return;
       const states = [...listener.statuses.values()];
       this.complete(listener, states.length && states.every((state) => state.complete) ? 'eose'
@@ -289,6 +321,7 @@ export class NostrRuntime {
     if (listener.stopped || listener.notified) return;
     listener.notified = true;
     if (listener.timer) clearTimeout(listener.timer);
+    if (listener.settleTimer) clearTimeout(listener.settleTimer);
     const sources = [...listener.statuses].map(([id, state]) => ({ id, ...state }));
     for (const id of listener.pending) sources.push({ id, complete: false, error: 'Historical query is incomplete' });
     if (listener.admissionError) {
@@ -303,6 +336,7 @@ export class NostrRuntime {
     listener.stopped = true;
     listener.controller.abort();
     if (listener.timer) clearTimeout(listener.timer);
+    if (listener.settleTimer) clearTimeout(listener.settleTimer);
     listener.options.signal?.removeEventListener('abort', listener.abort!);
     for (const close of listener.closers.values()) close();
     listener.closers.clear(); this.listeners.delete(listener); this.interests.remove(listener);
