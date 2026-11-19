@@ -96,3 +96,19 @@ it('keeps the awaited default: history completes after admission', async () => {
     expect(result.events).toHaveLength(1);
   } finally { await runtime.close(); }
 });
+
+it('delivers a durable source without admitting its events to the runtime store', async () => {
+  const events = [note(9), note(10)];
+  const store = new SlowStore();
+  const put = vi.spyOn(store, 'put');
+  const runtime = createNostrRuntime({ relays: [], store, sources: [answering('index', events, { durable: true })] });
+  try {
+    const started = Date.now();
+    const result = await runtime.query([{ kinds: [1] }], { deadline: Date.now() + 5_000 });
+    expect(Date.now() - started).toBeLessThan(300);
+    expect(result.events.map((event) => event.id).sort()).toEqual(events.map((event) => event.id).sort());
+    expect(result.complete).toBe(true);
+    await sleep(50);
+    expect(put).not.toHaveBeenCalled();
+  } finally { await runtime.close(); }
+});

@@ -225,13 +225,14 @@ export class NostrRuntime {
   }
   private background(listener: Listener): boolean { return listener.options.persist === 'background'; }
   /** Deliver a verified network event now and persist it without holding the read. */
-  private deliverThenAdmit(listener: Listener, raw: NostrEvent, source: string): void {
+  private deliverThenAdmit(listener: Listener, raw: NostrEvent, source: string, persist = true): void {
     let event: NostrEvent;
     try { event = verifyNostrEvent(raw, this.options.verifyEvent); }
     catch (error) { this.counters.verificationFailures++; this.report(listener, error); return; }
     this.deliver(listener, event, { source, cached: false });
-    void this.admit(event, source).catch(() => undefined);
+    if (persist) void this.admit(event, source).catch(() => undefined);
   }
+  private durable(source: string): boolean { return this.sources.get(source)?.durable === true; }
   private wantsSource(listener: Listener, id: string): boolean {
     return listener.options.cache !== 'cache-only' && (listener.options.sources ? listener.options.sources.includes(id) : listener.options.relays === undefined);
   }
@@ -248,7 +249,8 @@ export class NostrRuntime {
           deadline: listener.options.deadline ?? Date.now() + (this.options.historyTimeoutMs ?? 10000), signal: listener.controller.signal,
         });
         if (listener.stopped || this.sources.get(source.id) !== source) return;
-        if (this.background(listener)) for (const { event } of report.events) this.deliverThenAdmit(listener, event, source.id);
+        if (source.durable) for (const { event } of report.events) this.deliverThenAdmit(listener, event, source.id, false);
+        else if (this.background(listener)) for (const { event } of report.events) this.deliverThenAdmit(listener, event, source.id);
         else for (const { event } of report.events) await this.admit(event, source.id, listener);
         this.sourceState(listener, source.id, report.complete !== false);
       } else this.sourceState(listener, source.id, false, 'Source has no historical completion');
@@ -263,6 +265,7 @@ export class NostrRuntime {
     this.counters.receivedEvents++;
     const key = listener.options.isolated ? `${source}:${event.id}` : event.id;
     if (listener.seen.has(key) || (!listener.options.isolated && this.incoming.get(event.id)?.sources.has(source))) { this.counters.duplicateEvents++; return; }
+    if (this.durable(source)) { this.deliverThenAdmit(listener, event, source, false); return; }
     if (this.background(listener)) { this.deliverThenAdmit(listener, event, source); return; }
     void this.admit(event, source, listener).catch((error) => this.report(listener, error));
   }

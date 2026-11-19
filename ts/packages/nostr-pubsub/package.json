@@ -1,6 +1,6 @@
 {
   "name": "nostr-pubsub",
-  "version": "0.5.35",
+  "version": "0.5.36",
   "description": "Browser-ready Nostr event and source routing primitives",
   "type": "module",
   "main": "dist/index.js",

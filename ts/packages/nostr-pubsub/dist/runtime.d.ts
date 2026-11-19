@@ -41,6 +41,7 @@ export declare class NostrRuntime {
     private background;
     /** Deliver a verified network event now and persist it without holding the read. */
     private deliverThenAdmit;
+    private durable;
     private wantsSource;
     private attachSource;
     private receive;

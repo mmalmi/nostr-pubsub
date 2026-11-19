@@ -277,7 +277,7 @@ export class NostrRuntime {
     }
     background(listener) { return listener.options.persist === 'background'; }
     /** Deliver a verified network event now and persist it without holding the read. */
-    deliverThenAdmit(listener, raw, source) {
+    deliverThenAdmit(listener, raw, source, persist = true) {
         let event;
         try {
             event = verifyNostrEvent(raw, this.options.verifyEvent);
@@ -288,8 +288,10 @@ export class NostrRuntime {
             return;
         }
         this.deliver(listener, event, { source, cached: false });
-        void this.admit(event, source).catch(() => undefined);
+        if (persist)
+            void this.admit(event, source).catch(() => undefined);
     }
+    durable(source) { return this.sources.get(source)?.durable === true; }
     wantsSource(listener, id) {
         return listener.options.cache !== 'cache-only' && (listener.options.sources ? listener.options.sources.includes(id) : listener.options.relays === undefined);
     }
@@ -310,7 +312,10 @@ export class NostrRuntime {
                 });
                 if (listener.stopped || this.sources.get(source.id) !== source)
                     return;
-                if (this.background(listener))
+                if (source.durable)
+                    for (const { event } of report.events)
+                        this.deliverThenAdmit(listener, event, source.id, false);
+                else if (this.background(listener))
                     for (const { event } of report.events)
                         this.deliverThenAdmit(listener, event, source.id);
                 else
@@ -335,6 +340,10 @@ export class NostrRuntime {
         const key = listener.options.isolated ? `${source}:${event.id}` : event.id;
         if (listener.seen.has(key) || (!listener.options.isolated && this.incoming.get(event.id)?.sources.has(source))) {
             this.counters.duplicateEvents++;
+            return;
+        }
+        if (this.durable(source)) {
+            this.deliverThenAdmit(listener, event, source, false);
             return;
         }
         if (this.background(listener)) {

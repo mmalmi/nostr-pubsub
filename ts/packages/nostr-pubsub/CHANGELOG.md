@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.36
+
+Add `RuntimeSource.durable` for sources whose events already persist elsewhere, such as a local event index. The runtime verifies and delivers their events without admitting them to its store, so they are not stored twice and live relay events do not queue behind their writes.
+
 ## 0.5.35
 
 Add read options for apps that combine a slow local store with several sources. `persist: 'background'` delivers verified source and relay events before store admission and reports history without draining unrelated writes; events are still persisted. `settle` ends history after a number of sources finish plus a grace period, or as soon as every requested id arrived, which counts as a complete answer. `onSource` reports each source's completion, and a source can implement `supports(filters)` to skip queries it cannot answer instead of being reported unavailable.

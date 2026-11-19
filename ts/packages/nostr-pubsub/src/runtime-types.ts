@@ -20,6 +20,11 @@ export interface RuntimeSource extends Partial<NostrEventReader>, Partial<NostrE
   id: string;
   /** Return false to skip filters this source cannot answer instead of reporting it unavailable. */
   supports?(filters: NostrFilter[]): boolean;
+  /**
+   * Set when this source's events already persist elsewhere, such as a local
+   * index. They are verified and delivered without runtime-store admission.
+   */
+  durable?: boolean;
   /** Set queued for mesh transports which accept sending without a remote acknowledgment. */
   publishAcceptance?: 'remote' | 'queued';
 }
