@@ -37,10 +37,15 @@ export declare class NostrRuntime {
     removeSource(id: string): void;
     close(): Promise<void>;
     private startListener;
+    private sourceSupports;
+    private background;
+    /** Deliver a verified network event now and persist it without holding the read. */
+    private deliverThenAdmit;
     private wantsSource;
     private attachSource;
     private receive;
     private deliver;
+    private allIdsSeen;
     private acceptsOrigin;
     private sourceState;
     private maybeComplete;

@@ -25,6 +25,8 @@ export interface RuntimeEventStore {
 }
 export interface RuntimeSource extends Partial<NostrEventReader>, Partial<NostrEventPublisher>, Partial<NostrEventSubscriber> {
     id: string;
+    /** Return false to skip filters this source cannot answer instead of reporting it unavailable. */
+    supports?(filters: NostrFilter[]): boolean;
     /** Set queued for mesh transports which accept sending without a remote acknowledgment. */
     publishAcceptance?: 'remote' | 'queued';
 }
@@ -45,6 +47,12 @@ export interface RuntimeSubscriptionHandlers {
     onEvent(event: NostrEvent, info: RuntimeEventInfo): void;
     /** Initial history status. Live subscriptions continue after this callback. */
     onEose?(status: RuntimeCompletion): void;
+    /** Called as each relay or source finishes its history, before onEose. */
+    onSource?(status: {
+        id: string;
+        complete: boolean;
+        error?: string;
+    }): void;
     onError?(error: Error): void;
 }
 export interface RuntimeSubscribeOptions {
@@ -62,6 +70,21 @@ export interface RuntimeSubscribeOptions {
     signal?: AbortSignal;
     /** History bound only; never closes a live subscription. */
     deadline?: number;
+    /**
+     * 'background' delivers verified events before store admission and reports history
+     * completion without waiting for pending writes. Events are still persisted. Deletion
+     * and replaceable-version checks then apply to later reads, not to this delivery.
+     */
+    persist?: 'await' | 'background';
+    /**
+     * End history early: after `sources` relays/sources finish, wait `graceMs` (default 300)
+     * for the rest. With `ids`, also end as soon as every requested id was delivered.
+     */
+    settle?: {
+        sources?: number;
+        graceMs?: number;
+        ids?: boolean;
+    };
 }
 export interface RuntimeSubscription {
     close(): void;
