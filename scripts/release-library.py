@@ -77,6 +77,9 @@ class Release:
             return True
         except ProcessLookupError:
             return False
+        except PermissionError:
+            # macOS reports EPERM while an exited member is still being reaped.
+            return True
 
     def run(self, name, args, cwd=None, env=None):
         self.guard()
@@ -103,6 +106,8 @@ class Release:
                         os.killpg(process.pid, sig)
                     except ProcessLookupError:
                         break
+                    except PermissionError:
+                        pass
                     until = time.monotonic() + grace
                     while self.exists(process.pid) and time.monotonic() < until:
                         process.poll()
