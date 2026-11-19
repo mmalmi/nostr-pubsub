@@ -1,455 +1,54 @@
-# nostr-pubsub for TypeScript
+# nostr-pubsub
 
-Browser-ready Nostr source routing, bounded peer subscriptions, FIPS Nostr
-frames, and signed-event inventory/want propagation. The TypeScript package
-lives beside the canonical Rust crates and shares their interoperability
-vectors.
+Use one client to read, subscribe to, and publish signed Nostr events across
+the relays you choose. The runtime verifies signatures and removes duplicate
+notes from query results. It also supports local event
+stores and peer-to-peer sources.
 
-```ts
-import { InvWantCodec, InvWantMesh, meshPeer } from 'nostr-pubsub';
+## Install
 
-const codec = new InvWantCodec('iris.fips.pubsub', 1, 64 * 1024);
-const mesh = new InvWantMesh({ allowedKinds: new Set([37_195]) });
+```sh
+npm install nostr-pubsub
+```
 
-for (const action of mesh.publish(signedEvent, [meshPeer(remoteFipsPubkey)], Date.now())) {
-  if (action.type === 'send') {
-    await fips.send(action.peerId, codec.encode(action.message));
-  }
+## Read recent text notes from a relay
+
+Save this as `read-notes.mjs`. It uses Node.js 24 and its built-in WebSocket
+client. Reading public notes needs no signing key.
+
+```js
+import { NostrRuntime } from 'nostr-pubsub';
+
+const relay = process.argv[2];
+if (!relay) throw new Error('Pass a relay URL as the first argument.');
+
+const runtime = new NostrRuntime({ relays: [relay] });
+try {
+  const { events, complete } = await runtime.query(
+    [{ kinds: [1], limit: 5 }],
+    { deadline: Date.now() + 5000 },
+  );
+
+  for (const note of events) console.log(note.content);
+  if (!complete) console.error('Relay history is incomplete.');
+} finally {
+  await runtime.close();
 }
 ```
 
-The application owns the relay URL list, peer-advert meaning, FIPS peer
-admission, and outbound connection policy. `SimplePoolNostrRelayTransport`
-provides the browser/WebSocket relay mechanics without choosing a default relay
-or gateway. See the repository `docs/inv-want-wire.md` for compatibility and
-security boundaries.
-
-## History pagination
-
-`HistoryCursor` keeps one source/filter history cursor. Feed each verified raw
-delivery to `observe` before application filtering or cross-source deduplication.
-Use a separate cursor for every source and query branch; do not pool timestamps.
-
-A completed page advances its inclusive `until` to the oldest observed event.
-At a saturated boundary second, the page limit grows up to the caller's cap;
-reaching that cap reports `Limited` rather than skipping unseen tied events.
-Only a completed, unsaturated boundary can move to the previous second. Empty
-completed pages are exhausted; a timeout or other partial page keeps its cursor
-and reports `Retry`, while exposing its observed oldest timestamp for diagnostics.
-`since` is retained. Page tokens reject late callbacks after completion or cancel.
-
-The cursor does not fetch events or decide how many matching results an app
-needs. The caller owns subscriptions, completion evidence, request/time/byte
-budgets, and the decision to load another page. Existing one-shot query behavior
-is unchanged.
-
-## Shared application runtime
-
-Enable optional NIP-77 gap recovery with `reconciliation: {}` in the runtime
-options. Cached events and ordinary live `REQ` start immediately. After NIP-11
-advertises support, a bounded comparison runs on the same relay connection;
-missing IDs are fetched by ordinary `REQ` and use the same signature, deletion,
-expiration and replacement admission rules. It never uploads local-only events.
-
-The default comparison covers at most 24 hours ending at the original filter's
-`until` (or now). An explicitly requested older page stays in that older time
-range. Original relay filters and their history completion remain unchanged:
-this is best-effort gap recovery for a slice, not an all-history sync claim.
-ID-only reads, cache-only reads and subscriptions without relays skip it.
-Unsupported relays, malformed frames, inventory limits and timeouts leave normal
-subscriptions running. Defaults limit the snapshot to 2048 records, missing IDs
-to 256, frames to 8192 bytes, rounds to 8 and total work to 3 seconds. At most two
-comparisons run at once, with one per relay and a five-minute relay/filter cooldown.
-`RuntimeReconciliationOptions` exposes these bounds and an optional NIP-11 fetch
-adapter; reconciliation is disabled unless explicitly configured.
-
-`NostrRuntime` owns one relay pool, batches concurrent interests as exact OR
-filters, and composes additional `RuntimeSource` implementations such as
-`FipsNostrPubsubEventSource`. Filters retain their author/recipient intersections;
-filter count, encoded bytes, active subscriptions, verification cache, and
-per-subscription duplicate tracking are bounded. Run it in a worker when the
-application already owns a worker; forward operations instead of starting a
-second pool in the UI.
-
-```ts
-import { NostrRuntime, FipsNostrPubsubEventSource, publicPeerSource } from 'nostr-pubsub';
-
-const runtime = new NostrRuntime({
-  relays: configuredRelays,
-  store: applicationEventStore,
-  sources: [publicPeerSource(new FipsNostrPubsubEventSource(pubsub))],
-});
-const subscription = runtime.subscribe([{ kinds: [1], authors }], {
-  onEvent: (event, info) => renderEvent(event, info.cached),
-  onEose: (status) => showHistoryStatus(status.complete),
-});
-const result = await runtime.query([{ kinds: [0], authors }], {
-  cache: 'cache-first', deadline: Date.now() + 2000, signal,
-});
-const publication = await runtime.publish(signedEvent);
-// Confirmed state changes can require remote acceptance before local delivery.
-await runtime.publish(signedUpdate, { requireAck: true });
-subscription.close();
-await runtime.close();
-```
-
-`RuntimeEventStore` is storage only: query/put/delete events and list/put/delete
-pending publications. Supply a Hashtree index or IndexedDB adapter to retain
-history and outbox intent across reloads. The bounded default `MemoryEventStore`
-is volatile. No login keys or signer state are stored by the runtime, and no old
-application event cache is migrated. The runtime verifies events and applies
-replaceable-event ordering, expiration, and author-authorized deletion tombstones.
-
-Only actual relay EOSE is complete. A deadline, disconnected source, or partial
-mesh history reports incomplete and leaves live subscriptions running. Relay
-reconnect overlaps the last seen second and deduplicates event IDs. `cache-only`
-queries complete from local storage; `network-only` omits initial cache replay.
-Explicit `relays` scope also excludes additional sources unless `sources` is
-specified, and the outbox preserves those destinations when retrying. Separate sends
-of one event keep independent destination scopes. Event-ID-keyed store adapters
-must round-trip the full pending row, including optional `additionalScopes`.
-Stores shared across tabs or processes should implement `updatePending` in one
-storage transaction. Single-owner adapters can keep using list/put/delete.
-
-`publish().remoteAccepted` requires a positive relay/source acknowledgment.
-Local echo, persisted retry intent, and a FIPS send queue do not count as remote
-acceptance. `requireAck: true` disables both pre-acceptance local delivery and
-queueing; the first positive acknowledgment completes without waiting for silent
-relays. Optional `signAuthEvent(relay, template)` handles relay authentication
-using the application's existing signer.
-
-For a browser application, use `publicPeerSource(carrier)` to keep page queries,
-subscriptions and searches off peer connections while retaining explicit signed
-public publication. To also receive posts, open one feed at account startup:
-
-```ts
-const carrier = new FipsNostrPubsubEventSource(pubsub);
-const peers = await openPublicPeerFeedSource(carrier, {
-  type: 'following', owner: accountPubkey, contacts: signedKind3,
-});
-runtime.addSource(peers);
-// On a verified follow-list update:
-await peers.replaceFeed({ type: 'following', owner: accountPubkey, contacts: newKind3 });
-// On shutdown:
-runtime.removeSource(peers.id);
-peers.close();
-```
-
-`{type: 'latest'}` receives recent posts from any author. The default feed kind
-is 1. Applications can configure a fixed list of public kinds at startup. A
-following feed verifies the contact list's author and signature, then sorts and
-batches every public follow. An empty list opens no subscription. Up to 16,384
-authors fit in 256-author batches. The optional notifications feed uses
-`{type: 'notifications', owner: signedInPubkey, kinds: [1, 6, 7, 9735]}`.
-Its only subject is the active account's public `#p` tag. Supply up to two feeds
-in an array to `openPublicPeerFeedSource` and `replaceFeed`. Removed scopes lose
-their history, unchanged scopes stay warm, and changing owners clears all scopes.
-Page-level queries match only the last 256 verified feed events in memory.
-The peer source reports partial history. Inbound peer replay must also use
-an independently selected public feed or authored outbox. Connecting an
-application's browsing cache to the carrier would expose its contents.
-
-An established FIPS feed reconnects with an ordinary REQ carrying a reserved
-opaque subscription ID. Legacy responders replay as usual. An upgraded provider
-can initiate a bounded Negentropy comparison (`FEED-SYNC/1`) for that subscription.
-Its first message fingerprints the window. It offers only its missing posts via
-standard INV/WANT/EVENT. Cold joins and new publications use ordinary inventory.
-Each negotiated window draws from at most 256 verified events received through
-that specific feed and intentionally published public events matching that feed.
-The provider independently checks its export policy. Each client permits 16
-concurrent comparisons, up to four per peer per direction, with 16 rounds and
-a 2.5-second deadline. Failure returns to the configured bounded replay once.
-
-Give `FipsNostrPubsubClient` a `retainedEventReader` to serve its public service event
-index through the same FIPS node used by Hashtree files. Queries are bounded by
-the configured replay count, two seconds, and 32 concurrent requests. The reader
-must be local-only; incoming peer requests must not trigger network fetches.
-Existing peer admission and kind policy still apply. This hook neither discovers
-peers nor changes application sharing permissions.
-
-## Event readers and dataset routing
-
-`NostrEventReader`, `NostrEventPublisher`, and `NostrEventSubscriber` let
-applications compose read-only indexes and live sources without granting them
-publication authority. `EventBus` combines the reader and publisher contracts.
-Routes with one `datasetId`
-are replicas of the same logical data; different dataset identities are
-additive and their verified events are merged:
-
-```ts
-const report = await queryRoutesWithPolicy([
-  {
-    route: withRouteDataset(localIndexRoute('archive-primary'), 'archive'),
-    reader: archivePrimary,
-  },
-  {
-    route: withRouteDataset(localIndexRoute('archive-replica'), 'archive'),
-    reader: archiveReplica,
-  },
-  {
-    route: withRouteDataset(localIndexRoute('personal'), 'personal'),
-    reader: personalIndex,
-  },
-], filters, {
-  query: { limit: 100, signal, deadline: Date.now() + 2_000 },
-}, policy);
-```
-
-The historical router tries same-dataset replicas in policy order until one
-produces a complete response, queries allowed additive datasets concurrently,
-isolates source failures, and applies one newest-first limit after verified-ID
-deduplication. The live router opens every allowed source, globally deduplicates
-event IDs across noisy mesh/index/relay subscriptions, and closes every source
-as one subscription. Reports retain route provenance and dataset completeness;
-there is no legacy `{ route, bus }` alias.
-
-CPU-heavy signature checks can run behind an asynchronous trust boundary such
-as a dedicated Web Worker. `verifyNostrEventsWith()` gives the verifier
-immutable defensive clones, requires one boolean result per event, and admits
-fresh canonical copies only when the whole batch is valid:
-
-```ts
-const verified = await verifyNostrEventsWith(events, workerVerifier, { signal });
-```
-
-The router recognizes those returned copies and does not repeat Schnorr
-verification. Keep the injected verifier private to the trusted worker
-request/response path; an all-true verifier is not a general-purpose shortcut.
-
-`NostrPubsubRouter` owns those explicit query, publish, and live route lists for
-long-running services. A Hashtree index can be query-only, while FIPS and relay
-adapters can independently participate in publication and live subscription;
-the router never invents a fallback backend.
-
-The standard relay adapter reads the application's relay list at operation
-start, verifies every inbound and outbound event at its boundary, deduplicates
-relay URLs, and accepts publication when at least one relay succeeds. Historical
-queries finish on aggregate EOSE or a configurable inactivity window; ordinary
-live subscriptions remain open:
-
-```ts
-import {
-  NostrRelayEventSource,
-  RateLimitAwarePool,
-  SimplePoolNostrRelayTransport,
-} from 'nostr-pubsub';
-
-const relayTransport = new SimplePoolNostrRelayTransport({
-  pool: new RateLimitAwarePool(),
-  getRelays: () => settings.readRelays(),
-  queryQuietWindowMs: 600,
-});
-const relayEvents = new NostrRelayEventSource('configured-relays', relayTransport);
-
-const historical = await relayEvents.query([{ kinds: [0], authors }], {
-  deadline: Date.now() + 2_000,
-});
-const live = relayEvents.subscribe([{ kinds: [1], since }], receiveEvent);
-```
-
-A rate-limited publication rejects with `RelayRateLimitError`. Its `relay` identifies
-the destination and its optional `retryAfterMs` carries the relay's delay. Use
-`RateLimitAwarePool` to retain the optional NIP-01 wire parameter. Plain pools
-can classify the rejection from the reason string. The runtime exposes
-`rateLimited` and `retryAfterMs` on the rejected source's publish result.
-Callers choose a default delay when the relay omits one.
-
-`FipsNostrPubsubClient` is the browser peer carrier matching Rust
-`FipsPubsubClient` on authenticated reliable FIPS-TCP service
-`nostr.pubsub/1` (port 7368). It carries verified Nostr `REQ`, `EVENT`, and
-`CLOSE` frames plus grouped `INV` and one-event `WANT`. Historical catch-up and
-new live events use this same flow. The application supplies admitted peer
-identities explicitly, so arbitrary connected FIPS peers are never treated as
-pubsub providers:
-
-```ts
-import { FipsNostrPubsubClient } from 'nostr-pubsub';
-
-const pubsub = new FipsNostrPubsubClient({
-  node: fipsNode,
-  localPeerId: fipsNode.identity.publicKey,
-  peers: () => appOwnedStandaloneLinks.map((link) => link.remotePubkey),
-  allowedKinds: [1059, 1060, 30078, 37368],
-}).start();
-
-const subscription = pubsub.subscribe([{ kinds: [1060] }], (event) => {
-  receiveSignedChatEvent(event);
-});
-await pubsub.publish(signedChatEvent);
-subscription.close();
-```
-
-Records are bounded to the shared TCP/FIPS maximum of 65,525 bytes.
-Peer refresh events can add or restore explicitly admitted standalone links;
-they do not create links or infer admission policy.
-
-For reliable authenticated carriage, `FipsInvWantStream` applies the same
-four-byte big-endian record framing and bounds as Rust. `FipsInvWantTcpDriver`
-binds that stream to `@fips/tcp`, accepts only the peer identity supplied by the
-authenticated FSP service context, converges simultaneous connects on one
-stream, and owns bounded partial-read/write queues. Applications explicitly
-choose peers and reconnect timing:
-
-```ts
-import { FipsInvWantStream, FipsInvWantTcpDriver } from 'nostr-pubsub';
-
-const stream = new FipsInvWantStream();
-const driver = FipsInvWantTcpDriver.bind(
-  fipsNode,
-  localFipsPubkey,
-  stream,
-  {
-    serviceNamespace: 'nostr.pubsub',
-    serviceVersion: 1,
-    servicePort: 39_121,
-    maxPeers: 64,
-    maxQueuedRecordsPerPeer: 64,
-    maxQueuedBytesPerPeer: 2 * 1024 * 1024,
-    maxIoBytesPerDrive: 256 * 1024,
-  },
-);
-await driver.connectPeer(remoteFipsPubkey);
-const report = await driver.poll();
-```
-
-`fipsInvWantTcpCapabilityName()` returns the authenticated capability name for
-the configured namespace and version. Capability roster registration remains
-an FSP concern; the TypeScript FIPS API does not yet expose the Rust endpoint's
-lifecycle-bound capability registration. The driver does not advertise through
-plaintext discovery or add a product-local fallback. The old
-`FipsNostrRelayService` datagram bridge has been removed; use
-`FipsNostrPubsubClient` and the router adapters.
-
-The simultaneous-connect tie-break normalizes FIPS's compressed hex peer keys
-to NIP-19 `npub` strings before ordering them. This deliberately matches the
-Rust driver's ordering; comparing the raw compressed hex would sometimes make
-the two runtimes select and reset opposite streams.
-
-`InvWantMesh` matches the Rust production state machine: inventories use
-canonical lowercase event IDs and local kind, size, and hop bounds; repeated
-inventories must keep identical event kind and size, while remaining hop
-budgets may differ by path under the local cap; and recovery uses no more than
-three providers. Frames are accepted only from a provider sent a `WANT` and
-only when the verified signature, ID, kind, and serialized size match the
-inventory. Bounded fulfilled-route provenance absorbs delayed valid answers
-from requested alternatives without scoring them, while unrequested sources
-remain invalid. A want with neither a cached event nor a live route is ignored,
-and related transient state expires or is evicted together. Cached payloads are
-bounded by both count and `maxCachedEventBytes`, whose aggregate default is
-16 MiB. Seen-inventory and delivered-event deduplication have both TTL and count
-bounds. `retainedState()` reports raw cache bytes and state counts, while
-`maintain()` and `peerBehaviorObservation()` expose the same maintenance and
-evidence semantics as Rust.
-
-If a local transport confirms that the stream or link carrying one active
-request failed, `recordTransportDisruption()` marks only that peer/event
-attempt so expiry does not falsely blame the provider. Do not derive this
-signal from peer-supplied data. Its bounded mark clears on completion, expiry,
-or a new `WANT` attempt to that peer.
-
-`publishVerified()`, `replayVerifiedToPeer()`, and `receiveVerifiedFrame()`
-avoid a repeated signature check only for immutable events returned by
-`verifyNostrEvent()`. Use `publish()`, `replayToPeer()`, or `receive()` for
-untrusted input. Type assertions are not a trust boundary and are rejected by
-the verified fast paths.
-
-
-### Measuring WebRTC catch-up
-
-From the frozen TypeScript workspace, run the following with a Chromium executable in
-`BROWSER_BIN`. The driver connects two local endpoints over one ordered RTC data channel with
-synthetic signed public posts and compares the exact differences in both inventories.
-Both strategies fetch the missing events in one direction using the same WANT and EVENT
-records. INV/WANT exercises the retained replayer and wire codec. The Negentropy peer
-uses the reconciliation library with an experimental NIP-77 control envelope.
+Run it with the URL of a relay that serves public notes.
 
 ```sh
-node packages/nostr-pubsub/bench/run-webrtc.mjs > results.jsonl
+node read-notes.mjs wss://relay.damus.io
 ```
 
-Set `VERIFY_WARM=1` to run the production FIPS clients over actual RTC data channels.
-The check disconnects two peer endpoints in Chromium, publishes while offline, reconnects,
-and verifies the missing post and a subsequent live post. It also checks the wire for
-a navigation-only ID and duplicate announcements. Set `LEGACY_PUBSUB_ENTRY` to the
-absolute path of a verified older package's `dist/index.js` with its dependencies
-available to exercise both mixed-version pairings. The result includes datagram bytes
-and elapsed time for reconnect and delivery. These include the test adapter's port
-header, FIPS/TCP records, and live post. The matrix above measures catch-up alone.
+Kind 1 is a short text note. The query prints up to five notes, newest first.
+If the relay does not finish within five seconds, the example prints any notes
+received and reports incomplete history.
 
-`SIZES`, `SCENARIOS`, `STRATEGIES`, and `REPEATS` select the benchmark matrix.
-Add `negentropy-warm` to `STRATEGIES=inv-want,negentropy` to compare the optional
-whole-window opening. JSON rows include per-direction application bytes, signed event
-bytes, protocol-message count, catch-up milliseconds and CPU milliseconds summed across
-the dedicated browser's processes. Setup, fixture signing, a completion marker and
-SCTP/DTLS/IP headers are excluded from application traffic. Connection establishment
-and fixture signing precede timing. The loopback link has no injected WAN latency
-or loss. Use the same public feed for comparison across peers. Browsing history
-and arbitrary local caches are ineligible for peer reconciliation.
+## More
 
-
-## Private envelopes
-
-`createPrivateRelayPublisher`, its pending store lane and the anonymous FIPS
-publisher send three kinds. Invite responses (1059) and wakes (21111) carry
-exactly one `p`. A kind 1060 message carries one `["v","2"]` and either one `p`
-or none. Without a `p` it needs exactly one non-empty `header` tag, and its
-recipient finds it with an `authors` filter on the sender key instead of a `#p`
-filter. Whether a message names its recipient is decided by the protocol
-library; this package sends both forms and matches, forwards and serves events
-by whatever filters receivers subscribe with.
-
-A kind 1060 with neither a `p` nor a `header` stays quarantined in the private
-pending lane, as before. A message without a `p` has the same shape as shared
-group ciphertext, so this package cannot tell the two apart by tags; hosts that
-must keep shared group ciphertext off relays have to do so where it is created,
-as `nostr-double-ratchet` does by event id.
-
-## Private publication receipts
-
-`createPrivateRelayPublisher` coalesces concurrent sends only when the event and
-publication options match. A peer-only attempt and a relay attempt for the same
-encrypted envelope keep independent delivery results. Completing one operation
-retires only that operation; later relay retries retain fresh connections and
-AUTH identities.
-
-## Building the TypeScript package
-
-Use a clean full-commit checkout, Node 24.14.1 and the workspace-pinned pnpm
-11.7.0. The Linux package-build environment is
-`mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645`.
-The pnpm archive is `https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz`, with
-SHA-256 `deafa7ec98a1218b6a047289b92fbe2395c1e22d3495bb711653013218ee15ee`.
-Verify downloaded inputs before execution and retain the source commit,
-lockfile hash, tool versions, package member hashes and archive integrity.
-
-From the repository root, set `PUBSUB_ARTIFACT_DIR` to an existing absolute
-output directory outside the checkout, then run:
-
-```sh
-cd ts
-pnpm install --frozen-lockfile --ignore-scripts
-pnpm check
-pnpm build
-pnpm --filter nostr-pubsub pack --pack-destination "$PUBSUB_ARTIFACT_DIR"
-```
-
-Run `pnpm test` for the full package suite. Its mandatory Rust process-boundary
-case needs Cargo/Rust 1.99.0 on `PATH` and the repository's locked native
-workspace. GNU/Linux also needs `pkg-config`, D-Bus development files, libclang
-and its builtin headers. `NOSTR_PUBSUB_LEGACY_MODULE` selects a separately
-verified older provider for the dedicated legacy case; without it, only that
-conditional case is skipped. Packaging does not replace these qualification
-gates. Previously accepted test results apply only to unchanged source,
-tests, configuration and locked dependencies.
-
-
-### Delivering to every selected relay
-
-Use `enqueueRelayPublication(event, relays, put)` in the event's local storage transaction.
-Store each delivery under `[event.id, relay]`. Once that transaction commits the caller can
-return, even offline. Use `{ broadcast: true }` for bulk publication and reconciliation.
-On connectivity changes, startup or a retry alarm, call `retryRelayOutbox` and
-`drainRelayOutbox` with the persistent storage and transport callbacks. Only acknowledge
-the specified destination. Receipts, or a successful inventory comparison, clear rows.
-A failure leaves its rows pending and a rate-limit response defers only that destination.
-The host supplies durable storage and schedules wake-ups while suspended.
+The [TypeScript guide](https://github.com/mmalmi/nostr-pubsub/blob/nostr-pubsub-ts-v0.5.34/docs/typescript-guide.md)
+covers live subscriptions, publishing and retries, caching, pagination, private
+messages, and peer-to-peer routing. The [changelog](https://github.com/mmalmi/nostr-pubsub/blob/nostr-pubsub-ts-v0.5.34/ts/packages/nostr-pubsub/CHANGELOG.md)
+lists changes by version.

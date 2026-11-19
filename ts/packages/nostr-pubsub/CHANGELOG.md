@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.34
+
+Add a runnable relay query to the npm README and move the full TypeScript documentation into a linked guide.
+
 ## 0.5.33
 
 Add `NostrRuntime.queryTransientRelay` for bounded, verified queries on one caller-selected relay. It uses the shared connection, returns partial results on timeout, and keeps candidates out of local replay and storage.

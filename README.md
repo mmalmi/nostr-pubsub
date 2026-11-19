@@ -3,6 +3,8 @@
 Neutral Nostr event/source routing primitives for relay, mesh, local-index, and
 test backends.
 
+For JavaScript and TypeScript, start with the [npm package and quick start](https://www.npmjs.com/package/nostr-pubsub) or the [quick start on GitHub](ts/packages/nostr-pubsub/README.md). For Rust, see the [workspace crates](#crates).
+
 This repo intentionally keeps product policy out of the core crate. Product and
 capability repos can share the same event bus and policy shapes while deciding
 their own meanings for peer adverts, paid route offers, rating facts, or file
@@ -158,11 +160,7 @@ TTL-plus-count deduplication, verified-event fast paths, hop enforcement,
 maintenance scoring, and separate valid-frame, invalid-message, and
 unserved-inventory evidence counters as Rust.
 
-Iris browser apps can later consume it with a local dependency such as:
-
-```json
-"nostr-pubsub": "link:../nostr-pubsub/ts/packages/nostr-pubsub"
-```
+See the [TypeScript guide](docs/typescript-guide.md) for runtime, storage, transport, and build details.
 
 For relay-only browser bundles, import these APIs from
 `nostr-pubsub/private-relays` to avoid loading optional FIPS adapters.
