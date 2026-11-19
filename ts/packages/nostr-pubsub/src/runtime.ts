@@ -16,7 +16,7 @@ type Listener = {
   filters: NostrFilter[]; handlers: RuntimeSubscriptionHandlers; options: RuntimeSubscribeOptions;
   seen: Set<string>; closers: Map<string, () => void>; statuses: Map<string, { complete: boolean; error?: string }>;
   pending: Set<string>; timer?: ReturnType<typeof setTimeout>; settleTimer?: ReturnType<typeof setTimeout>;
-  stopped: boolean; notified: boolean;
+  stopped: boolean; notified: boolean; idsSatisfied?: boolean;
   controller: AbortController; abort?: () => void; ready: Promise<void>; admissionError?: string;
 };
 
@@ -274,7 +274,10 @@ export class NostrRuntime {
     if (listener.seen.size > (this.options.maxSeenEventsPerSubscription ?? 4096)) listener.seen.delete(listener.seen.values().next().value!);
     this.counters.deliveredEvents++;
     try { listener.handlers.onEvent(event, info); } catch (error) { this.report(listener, error); }
-    if (listener.options.settle?.ids && !listener.notified && this.allIdsSeen(listener)) this.complete(listener, 'eose');
+    if (listener.options.settle?.ids && !listener.notified && this.allIdsSeen(listener)) {
+      listener.idsSatisfied = true;
+      this.complete(listener, 'eose');
+    }
   }
   private allIdsSeen(listener: Listener): boolean {
     const ids = listener.filters.flatMap((filter) => filter.ids ?? []);
@@ -328,7 +331,9 @@ export class NostrRuntime {
       reason = 'unavailable';
       sources.push({ id: 'local-cache', complete: false, error: listener.admissionError });
     }
-    const complete = reason === 'cache' || (reason === 'eose' && sources.length > 0 && sources.every((source) => source.complete));
+    // Every requested id was delivered: the answer is complete even if other sources were still asking.
+    const complete = reason === 'cache' || (reason === 'eose' && (listener.idsSatisfied === true
+      || (sources.length > 0 && sources.every((source) => source.complete))));
     try { listener.handlers.onEose?.({ complete, reason, sources }); } catch (error) { this.report(listener, error); }
   }
   private stopListener(listener: Listener): void {

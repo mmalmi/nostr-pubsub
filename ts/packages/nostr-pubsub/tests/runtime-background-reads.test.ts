@@ -68,6 +68,7 @@ it('settles as soon as every requested id was delivered', async () => {
     });
     expect(Date.now() - started).toBeLessThan(500);
     expect(result.events.map((event) => event.id).sort()).toEqual(wanted.map((event) => event.id).sort());
+    expect(result.complete).toBe(true);
   } finally { await runtime.close(); }
 });
 
