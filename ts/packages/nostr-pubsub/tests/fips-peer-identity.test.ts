@@ -8,12 +8,16 @@ const x = '22'.repeat(32);
 
 describe('FIPS subscription peer identity', () => {
   it.each([
-    ['02' + x, '03' + x, true],
-    ['03' + x, '02' + x, true],
-    ['02' + x, '03' + x.slice(0, -1) + '3', false],
-    ['02' + x, '04' + x, false],
-    ['02' + x, x, false],
-  ] as const)('reads a signed event only from the admitted identity (%s / %s)', async (configured, source, admitted) => {
+    ['02' + x, '03' + x, undefined, true],
+    ['03' + x, '02' + x, undefined, true],
+    ['02' + x, '03' + x.slice(0, -1) + '3', undefined, false],
+    ['02' + x, '04' + x, undefined, false],
+    ['02' + x, x, undefined, false],
+    ['02' + x, '03' + x, x, true],
+    ['03' + x, '02' + x, x, true],
+    ['02' + x, '03' + x, x.slice(0, -1) + '3', false],
+    ['02' + x, '03' + x, x.slice(2), false],
+  ] as const)('reads a signed event only from the admitted identity (%s / %s)', async (configured, source, peerId, admitted) => {
     const network = new MemoryFipsNetwork();
     const alternate = (configured.startsWith('02') ? '03' : '02') + x;
     let connected = (): readonly string[] => [];
@@ -22,7 +26,7 @@ describe('FIPS subscription peer identity', () => {
       observeConnections: read => { connected = read; },
     }).start();
     const seed = new FipsNostrPubsubClient({
-      node: network.node(configured, source), localPeerId: configured, peers: () => [readerId],
+      node: network.node(configured, source, peerId), localPeerId: configured, peers: () => [readerId],
     }).start();
     try {
       const event = finalizeEvent({ kind: 1, content: 'fixture', tags: [], created_at: 1_700_000_000 }, generateSecretKey());

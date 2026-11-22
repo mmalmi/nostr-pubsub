@@ -38,6 +38,11 @@ export function normalizePeerId(value) {
     const normalized = value.toLowerCase();
     return /^(02|03)[0-9a-f]{64}$/.test(normalized) ? normalized : undefined;
 }
+/** Older FIPS runtimes only supply the compressed route key. */
+export function authenticatedPeerId(route, peerId) {
+    const key = normalizePeerId(route)?.slice(2);
+    return peerId === undefined || peerId === key ? key : undefined;
+}
 /** Key the admitted roster by the complete BIP-340 identity, keeping its caller-facing spelling. */
 export function admittedFipsPeers(values, maximum) {
     const peers = new Map();
@@ -58,7 +63,7 @@ export function parseConnectionEvent(event) {
         return undefined;
     const candidate = event;
     const peerId = normalizePeerId(candidate.remotePubkey);
-    if (peerId === undefined || typeof candidate.state !== 'string')
+    if (peerId === undefined || authenticatedPeerId(peerId, candidate.peerId) === undefined)
         return undefined;
     if (candidate.state === 'connected' || candidate.state === 'established') {
         return { peerId, connected: true };

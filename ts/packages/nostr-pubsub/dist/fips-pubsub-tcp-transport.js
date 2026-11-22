@@ -331,7 +331,7 @@ class NotifyingEndpoint {
     }
     registerService(port, handler) {
         return this.endpoint.registerService(port, async (context) => {
-            const peerId = this.resolvePeer(context.src);
+            const peerId = this.resolvePeer(context.src, context.peerId);
             if (peerId === undefined)
                 return;
             // The link and session can report opposite parities of the same authenticated Nostr key.

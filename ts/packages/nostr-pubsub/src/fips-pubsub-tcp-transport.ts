@@ -41,7 +41,7 @@ export interface FipsPubsubTcpTransportOptions {
 
 export interface FipsPubsubTcpTransportCallbacks {
   /** Return the admitted peer ID used for the TCP tuple, or reject before allocating state. */
-  resolvePeer?(peerId: string): string | undefined;
+  resolvePeer?(route: string, peerId?: string): string | undefined;
   frame(peerId: string, frame: Uint8Array): void;
   connected(peerId: string): void;
   disconnected(peerId: string): void;
@@ -371,7 +371,7 @@ class NotifyingEndpoint implements FipsDatagramEndpoint {
   constructor(
     private readonly endpoint: FipsDatagramEndpoint,
     private readonly received: () => void,
-    private readonly resolvePeer: (peerId: string) => string | undefined,
+    private readonly resolvePeer: (route: string, peerId?: string) => string | undefined,
   ) {}
 
   registerService(
@@ -379,7 +379,7 @@ class NotifyingEndpoint implements FipsDatagramEndpoint {
     handler: (context: FipsServiceContext) => Promise<void> | void,
   ): () => void {
     return this.endpoint.registerService(port, async (context) => {
-      const peerId = this.resolvePeer(context.src);
+      const peerId = this.resolvePeer(context.src, context.peerId);
       if (peerId === undefined) return;
       // The link and session can report opposite parities of the same authenticated Nostr key.
       await handler(peerId === context.src ? context : { ...context, src: peerId });

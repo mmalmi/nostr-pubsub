@@ -33,6 +33,7 @@ import {
   createClientPeerSubscriptionStore,
   normalizeAllowedKinds,
   admittedFipsPeers,
+  authenticatedPeerId,
   normalizePeerId,
   parseConnectionEvent,
   validateClientLimits,
@@ -103,7 +104,7 @@ export class FipsNostrPubsubClient {
         maxFramesPerDrive: this.limits.receiveBatchSize,
       },
       {
-        resolvePeer: peerId => this.resolvePeer(peerId),
+        resolvePeer: (route, peerId) => this.resolvePeer(route, peerId),
         frame: (peerId, frame) => this.handleFrame(peerId, frame),
         connected: (peerId) => this.handleTransportConnected(peerId),
         disconnected: (peerId) => this.handleTransportDisconnected(peerId),
@@ -426,9 +427,9 @@ export class FipsNostrPubsubClient {
   private currentPeers(): string[] {
     return [...admittedFipsPeers(this.peers(), this.limits.maxPeers).values()].sort();
   }
-  private resolvePeer(value: string): string | undefined {
-    const id = normalizePeerId(value);
-    return id === undefined ? undefined : admittedFipsPeers(this.peers(), this.limits.maxPeers).get(id.slice(2));
+  private resolvePeer(route: string, peerId?: string): string | undefined {
+    const id = authenticatedPeerId(route, peerId);
+    return id === undefined ? undefined : admittedFipsPeers(this.peers(), this.limits.maxPeers).get(id);
   }
   private send(peerId: string, message: FipsPubsubWireMessage): Promise<void> {
     const transport = this.transport;

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.39
+
+Use the authenticated x-only Nostr peer ID from FIPS for subscription admission. Streams and callbacks retain the peer key configured by the application. Older runtimes can supply the same identity through their compressed source key.
+
 ## 0.5.38
 
 Fix signed reads over FIPS when WebRTC promotion presents the same authenticated Nostr identity with a different compressed-key encoding. Pubsub uses the configured peer identity for streams, event sources, and revocation.

@@ -10,7 +10,7 @@ export interface FipsPubsubTcpTransportOptions {
 }
 export interface FipsPubsubTcpTransportCallbacks {
     /** Return the admitted peer ID used for the TCP tuple, or reject before allocating state. */
-    resolvePeer?(peerId: string): string | undefined;
+    resolvePeer?(route: string, peerId?: string): string | undefined;
     frame(peerId: string, frame: Uint8Array): void;
     connected(peerId: string): void;
     disconnected(peerId: string): void;

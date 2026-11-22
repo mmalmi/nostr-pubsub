@@ -9,7 +9,7 @@ import { FIPS_NOSTR_PUBSUB_SERVICE_PORT, FipsPubsubWireCodec } from './wire.js';
 import { FipsPubsubTcpTransport } from './fips-pubsub-tcp-transport.js';
 import { FipsPubsubInvWantState } from './fips-pubsub-invwant.js';
 import { FipsPubsubEventCache, acceptEvent, acceptInventory, answerWant, inventoryMessage, replayLocalSubscription, retryPendingWants, } from './fips-pubsub-client-protocol.js';
-import { clientError, createClientPeerSubscriptionStore, normalizeAllowedKinds, admittedFipsPeers, normalizePeerId, parseConnectionEvent, validateClientLimits, } from './fips-pubsub-client-support.js';
+import { clientError, createClientPeerSubscriptionStore, normalizeAllowedKinds, admittedFipsPeers, authenticatedPeerId, normalizePeerId, parseConnectionEvent, validateClientLimits, } from './fips-pubsub-client-support.js';
 export const FIPS_NOSTR_PUBSUB_CAPABILITY = 'nostr.pubsub/1';
 export class FipsNostrPubsubClient {
     limits;
@@ -66,7 +66,7 @@ export class FipsNostrPubsubClient {
             maxIoBytesPerDrive: 512 * 1024,
             maxFramesPerDrive: this.limits.receiveBatchSize,
         }, {
-            resolvePeer: peerId => this.resolvePeer(peerId),
+            resolvePeer: (route, peerId) => this.resolvePeer(route, peerId),
             frame: (peerId, frame) => this.handleFrame(peerId, frame),
             connected: (peerId) => this.handleTransportConnected(peerId),
             disconnected: (peerId) => this.handleTransportDisconnected(peerId),
@@ -398,9 +398,9 @@ export class FipsNostrPubsubClient {
     currentPeers() {
         return [...admittedFipsPeers(this.peers(), this.limits.maxPeers).values()].sort();
     }
-    resolvePeer(value) {
-        const id = normalizePeerId(value);
-        return id === undefined ? undefined : admittedFipsPeers(this.peers(), this.limits.maxPeers).get(id.slice(2));
+    resolvePeer(route, peerId) {
+        const id = authenticatedPeerId(route, peerId);
+        return id === undefined ? undefined : admittedFipsPeers(this.peers(), this.limits.maxPeers).get(id);
     }
     send(peerId, message) {
         const transport = this.transport;
