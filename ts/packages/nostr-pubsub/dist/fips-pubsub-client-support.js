@@ -38,6 +38,21 @@ export function normalizePeerId(value) {
     const normalized = value.toLowerCase();
     return /^(02|03)[0-9a-f]{64}$/.test(normalized) ? normalized : undefined;
 }
+/** Key the admitted roster by the complete BIP-340 identity, keeping its caller-facing spelling. */
+export function admittedFipsPeers(values, maximum) {
+    const peers = new Map();
+    for (const value of values) {
+        const id = normalizePeerId(value);
+        if (id === undefined)
+            continue;
+        const xOnly = id.slice(2);
+        if (!peers.has(xOnly))
+            peers.set(xOnly, id);
+        if (peers.size >= maximum)
+            break;
+    }
+    return peers;
+}
 export function parseConnectionEvent(event) {
     if (event === null || typeof event !== 'object')
         return undefined;

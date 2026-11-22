@@ -5,6 +5,8 @@ export declare function validateClientLimits(overrides: Partial<FipsNostrPubsubC
 export declare function createClientPeerSubscriptionStore(limits: FipsNostrPubsubClientLimits): PubsubPeerSubscriptionStore;
 export declare function normalizeAllowedKinds(kinds: readonly number[] | undefined): Set<number> | undefined;
 export declare function normalizePeerId(value: unknown): string | undefined;
+/** Key the admitted roster by the complete BIP-340 identity, keeping its caller-facing spelling. */
+export declare function admittedFipsPeers(values: readonly string[], maximum: number): Map<string, string>;
 export declare function parseConnectionEvent(event: unknown): {
     peerId: string;
     connected: boolean;

@@ -37,10 +37,10 @@ describe('FIPS provider admission at transmission', () => {
       maxIoBytesPerDrive: 16 * 1024, maxFramesPerDrive: 8 };
     const callbacks = { connected() {}, disconnected() {}, tick() {}, error() {} };
     const sender = new FipsPubsubTcpTransport(left, alice, options, {
-      ...callbacks, admitsPeer: peer => admitted.has(peer), frame() {},
+      ...callbacks, resolvePeer: peer => admitted.has(peer) ? peer : undefined, frame() {},
     });
     const receiver = new FipsPubsubTcpTransport(right, sibling, options, {
-      ...callbacks, admitsPeer: peer => peer === alice, frame: (_peer, frame) => { frames.push(frame); },
+      ...callbacks, resolvePeer: peer => peer === alice ? peer : undefined, frame: (_peer, frame) => { frames.push(frame); },
     });
     const pump = async () => {
       await Promise.allSettled([sender.idle(), receiver.idle()]);

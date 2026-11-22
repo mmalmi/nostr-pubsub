@@ -40,8 +40,8 @@ export interface FipsPubsubTcpTransportOptions {
 }
 
 export interface FipsPubsubTcpTransportCallbacks {
-  /** Reject unadmitted identities before allocating TCP connection state. */
-  admitsPeer?(peerId: string): boolean;
+  /** Return the admitted peer ID used for the TCP tuple, or reject before allocating state. */
+  resolvePeer?(peerId: string): string | undefined;
   frame(peerId: string, frame: Uint8Array): void;
   connected(peerId: string): void;
   disconnected(peerId: string): void;
@@ -72,7 +72,7 @@ export class FipsPubsubTcpTransport {
     validateOptions(options);
     if (localPeerId.trim() === '') throw validation('local peer identity must not be empty');
     const notifying = new NotifyingEndpoint(endpoint, () => this.scheduleDrive(false),
-      peerId => this.callbacks.admitsPeer?.(peerId) !== false);
+      callbacks.resolvePeer ?? (peerId => peerId));
     this.tcp = new FipsTcpEndpoint(notifying, options.servicePort, {
       receiveBuffer: 0xffff,
       sendBuffer: options.maxQueuedBytesPerPeer,
@@ -371,7 +371,7 @@ class NotifyingEndpoint implements FipsDatagramEndpoint {
   constructor(
     private readonly endpoint: FipsDatagramEndpoint,
     private readonly received: () => void,
-    private readonly admitsPeer: (peerId: string) => boolean,
+    private readonly resolvePeer: (peerId: string) => string | undefined,
   ) {}
 
   registerService(
@@ -379,8 +379,10 @@ class NotifyingEndpoint implements FipsDatagramEndpoint {
     handler: (context: FipsServiceContext) => Promise<void> | void,
   ): () => void {
     return this.endpoint.registerService(port, async (context) => {
-      if (!this.admitsPeer(context.src)) return;
-      await handler(context);
+      const peerId = this.resolvePeer(context.src);
+      if (peerId === undefined) return;
+      // The link and session can report opposite parities of the same authenticated Nostr key.
+      await handler(peerId === context.src ? context : { ...context, src: peerId });
       this.received();
     });
   }
@@ -392,7 +394,7 @@ class NotifyingEndpoint implements FipsDatagramEndpoint {
     payload: Uint8Array;
   }): Promise<void> {
     // TCP may flush a record queued before its peer was revoked.
-    if (!this.admitsPeer(args.dst)) return Promise.reject(storage('FIPS pubsub peer is no longer admitted'));
+    if (this.resolvePeer(args.dst) !== args.dst) return Promise.reject(storage('FIPS pubsub peer is no longer admitted'));
     return this.endpoint.sendDatagram(args);
   }
 }

@@ -5,8 +5,8 @@ type FipsPubsubServiceHandler = (context: FipsServiceContext) => Promise<void> |
 export class MemoryFipsNetwork {
   private readonly nodes = new Map<string, MemoryFipsNode>();
 
-  node(peerId: string): MemoryFipsNode {
-    const node = new MemoryFipsNode(peerId, this);
+  node(peerId: string, serviceSource = peerId): MemoryFipsNode {
+    const node = new MemoryFipsNode(peerId, this, serviceSource);
     this.nodes.set(peerId, node);
     return node;
   }
@@ -20,7 +20,7 @@ export class MemoryFipsNode implements FipsPubsubClientNode {
   private readonly services = new Map<number, FipsPubsubServiceHandler>();
   private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
 
-  constructor(readonly id: string, private readonly network: MemoryFipsNetwork) {}
+  constructor(readonly id: string, private readonly network: MemoryFipsNetwork, private readonly serviceSource = id) {}
 
   registerService(port: number, handler: FipsPubsubServiceHandler): () => void {
     this.services.set(port, handler);
@@ -48,7 +48,7 @@ export class MemoryFipsNode implements FipsPubsubClientNode {
     const target = this.network.get(args.dst);
     if (target === undefined) throw new Error(`unroutable FIPS peer ${args.dst}`);
     queueMicrotask(() => void target.receive({
-        src: this.id,
+        src: this.serviceSource,
         srcPort: args.srcPort ?? 0,
         dstPort: args.dstPort,
         payload: new Uint8Array(args.payload),

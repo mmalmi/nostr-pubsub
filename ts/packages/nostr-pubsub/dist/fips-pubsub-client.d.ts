@@ -48,6 +48,7 @@ export declare class FipsNostrPubsubClient {
     private closeSubscription;
     private admitEvent;
     private currentPeers;
+    private resolvePeer;
     private send;
     private background;
     private track;

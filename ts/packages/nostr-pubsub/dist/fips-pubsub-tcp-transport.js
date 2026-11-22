@@ -34,7 +34,7 @@ export class FipsPubsubTcpTransport {
         validateOptions(options);
         if (localPeerId.trim() === '')
             throw validation('local peer identity must not be empty');
-        const notifying = new NotifyingEndpoint(endpoint, () => this.scheduleDrive(false), peerId => this.callbacks.admitsPeer?.(peerId) !== false);
+        const notifying = new NotifyingEndpoint(endpoint, () => this.scheduleDrive(false), callbacks.resolvePeer ?? (peerId => peerId));
         this.tcp = new FipsTcpEndpoint(notifying, options.servicePort, {
             receiveBuffer: 0xffff,
             sendBuffer: options.maxQueuedBytesPerPeer,
@@ -323,23 +323,25 @@ export class FipsPubsubTcpTransport {
 class NotifyingEndpoint {
     endpoint;
     received;
-    admitsPeer;
-    constructor(endpoint, received, admitsPeer) {
+    resolvePeer;
+    constructor(endpoint, received, resolvePeer) {
         this.endpoint = endpoint;
         this.received = received;
-        this.admitsPeer = admitsPeer;
+        this.resolvePeer = resolvePeer;
     }
     registerService(port, handler) {
         return this.endpoint.registerService(port, async (context) => {
-            if (!this.admitsPeer(context.src))
+            const peerId = this.resolvePeer(context.src);
+            if (peerId === undefined)
                 return;
-            await handler(context);
+            // The link and session can report opposite parities of the same authenticated Nostr key.
+            await handler(peerId === context.src ? context : { ...context, src: peerId });
             this.received();
         });
     }
     sendDatagram(args) {
         // TCP may flush a record queued before its peer was revoked.
-        if (!this.admitsPeer(args.dst))
+        if (this.resolvePeer(args.dst) !== args.dst)
             return Promise.reject(storage('FIPS pubsub peer is no longer admitted'));
         return this.endpoint.sendDatagram(args);
     }
