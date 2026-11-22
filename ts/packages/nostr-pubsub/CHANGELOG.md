@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.38
+
+Fix signed reads over FIPS when WebRTC promotion presents the same authenticated Nostr identity with a different compressed-key encoding. Pubsub uses the configured peer identity for streams, event sources, and revocation.
+
 ## 0.5.36
 
 Add `RuntimeSource.durable` for sources whose events already persist elsewhere, such as a local event index. The runtime verifies and delivers their events without admitting them to its store, so they are not stored twice and live relay events do not queue behind their writes.
