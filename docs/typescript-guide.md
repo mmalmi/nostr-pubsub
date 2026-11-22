@@ -99,7 +99,23 @@ is volatile. No login keys or signer state are stored by the runtime, and no old
 application event cache is migrated. The runtime verifies events and applies
 replaceable-event ordering, expiration, and author-authorized deletion tombstones.
 
-Only actual relay EOSE is complete. A deadline, disconnected source, or partial
+For a combined read, register the Hashtree reader as a runtime source alongside the
+relays. Set `durable: true` when the index already stores and serves its own history.
+
+```ts
+const runtime = createNostrRuntime({
+  relays,
+  sources: [{ id: 'hashtree', durable: true, query: (filters, options) => index.query(filters, options) }],
+});
+const page = await runtime.query([{ kinds: [1], limit: 20 }]);
+```
+
+The query merges matching events by ID and returns them newest first. To select
+a particular relay and the index on a single read, pass
+`{ relays: [relay], sources: ['hashtree'] }`. Each entry in `page.sources`
+reports whether that source finished its history.
+
+Only actual relay EOSE is complete for that relay. A deadline, disconnected source, or partial
 mesh history reports incomplete and leaves live subscriptions running. Relay
 reconnect overlaps the last seen second and deduplicates event IDs. `cache-only`
 queries complete from local storage; `network-only` omits initial cache replay.

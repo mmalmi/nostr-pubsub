@@ -45,7 +45,7 @@ export class RuntimeRelays {
       // AUTH can reject without a handler when a short-lived scope closes.
     });
   }
-  urls(): string[] { return [...this.relays]; }
+  urls(): readonly string[] { return this.relays; }
   stats(): RuntimeRelayStats[] {
     const statuses = this.pool.listConnectionStatus();
     return this.relays.map((url) => ({ url, connected: statuses.get(url) ?? false }));

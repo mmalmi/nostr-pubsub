@@ -47,7 +47,7 @@ export declare class RuntimeRelays {
     private readonly maxFilters;
     private readonly maxBytes;
     constructor(options: NostrRuntimeOptions);
-    urls(): string[];
+    urls(): readonly string[];
     stats(): RuntimeRelayStats[];
     count(): number;
     transientCount(): number;

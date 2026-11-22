@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.41
+
+Combined index and relay reads now deliver relay events to background readers even when another subscription is still writing them. Indexes added at runtime honor their filter support. Exact-ID completion tracks unexpired results across the whole read, and empty background queries release their subscriptions. A corrupt index row marks its source incomplete while valid rows remain available.
+
+Scoped reads reuse their relay URLs throughout delivery. Background writes reuse the verified event, and reads with an explicit empty relay list skip relay batching and its request-size limits.
+
 ## 0.5.40
 
 Recognize a matching authenticated peer ID when a FIPS adapter exposes an x-only source. Update the TCP dependency to 0.2.6 for x-only file-transfer and service adapters.
