@@ -11,8 +11,8 @@ importers:
   packages/nostr-pubsub:
     dependencies:
       '@fips/tcp':
-        specifier: https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.5/fips-tcp-0.2.5.tgz
-        version: https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.5/fips-tcp-0.2.5.tgz
+        specifier: https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.6/fips-tcp-0.2.6.tgz
+        version: https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.6/fips-tcp-0.2.6.tgz
       nostr-pubsub-reconcile:
         specifier: https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-reconcile-ts-v0.1.2/nostr-pubsub-reconcile-0.1.2.tgz
         version: https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-reconcile-ts-v0.1.2/nostr-pubsub-reconcile-0.1.2.tgz
@@ -59,9 +59,9 @@ packages:
   '@emnapi/wasi-threads@1.2.2':
     resolution: {integrity: sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA==}
 
-  '@fips/tcp@https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.5/fips-tcp-0.2.5.tgz':
-    resolution: {integrity: sha512-HxpRbTZ6sockyD/SonLhPow+vjb0R0bGY57fOf27k2D5gVfyAGmvMV6TvmF1NzxMJLmEgB1uZ5BHT3pKM86jfw==, tarball: https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.5/fips-tcp-0.2.5.tgz}
-    version: 0.2.5
+  '@fips/tcp@https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.6/fips-tcp-0.2.6.tgz':
+    resolution: {integrity: sha512-lXQHNwTZEyXGYWqzRlNyKpb2UgNWJOon6HljbY1F1Ey49Q9IoE/kdF84gaTkrCpMPS8M/A6y5FTaFPOLl60+bw==, tarball: https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.6/fips-tcp-0.2.6.tgz}
+    version: 0.2.6
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
@@ -561,7 +561,7 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
-  '@fips/tcp@https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.5/fips-tcp-0.2.5.tgz': {}
+  '@fips/tcp@https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.6/fips-tcp-0.2.6.tgz': {}
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 

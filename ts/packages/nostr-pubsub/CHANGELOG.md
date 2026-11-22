@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.40
+
+Recognize a matching authenticated peer ID when a FIPS adapter exposes an x-only source. Update the TCP dependency to 0.2.6 for x-only file-transfer and service adapters.
+
 ## 0.5.39
 
 Use the authenticated x-only Nostr peer ID from FIPS for subscription admission. Streams and callbacks retain the peer key configured by the application. Older runtimes can supply the same identity through their compressed source key.

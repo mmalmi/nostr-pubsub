@@ -6,7 +6,7 @@ export declare function createClientPeerSubscriptionStore(limits: FipsNostrPubsu
 export declare function normalizeAllowedKinds(kinds: readonly number[] | undefined): Set<number> | undefined;
 export declare function normalizePeerId(value: unknown): string | undefined;
 /** Older FIPS runtimes only supply the compressed route key. */
-export declare function authenticatedPeerId(route: string, peerId?: unknown): string | undefined;
+export declare function authenticatedPeerId(route: unknown, peerId?: unknown): string | undefined;
 /** Key the admitted roster by the complete BIP-340 identity, keeping its caller-facing spelling. */
 export declare function admittedFipsPeers(values: readonly string[], maximum: number): Map<string, string>;
 export declare function parseConnectionEvent(event: unknown): {

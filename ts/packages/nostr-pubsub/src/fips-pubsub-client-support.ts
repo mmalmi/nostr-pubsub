@@ -49,9 +49,12 @@ export function normalizePeerId(value: unknown): string | undefined {
 }
 
 /** Older FIPS runtimes only supply the compressed route key. */
-export function authenticatedPeerId(route: string, peerId?: unknown): string | undefined {
+export function authenticatedPeerId(route: unknown, peerId?: unknown): string | undefined {
+  if (typeof route !== 'string') return undefined;
   const key = normalizePeerId(route)?.slice(2);
-  return peerId === undefined || peerId === key ? key : undefined;
+  if (peerId === undefined) return key;
+  if (typeof peerId !== 'string' || !/^[0-9a-f]{64}$/.test(peerId)) return undefined;
+  return (key ?? route.toLowerCase()) === peerId ? peerId : undefined;
 }
 
 /** Key the admitted roster by the complete BIP-340 identity, keeping its caller-facing spelling. */
@@ -72,8 +75,9 @@ export function parseConnectionEvent(
 ): { peerId: string; connected: boolean } | undefined {
   if (event === null || typeof event !== 'object') return undefined;
   const candidate = event as { remotePubkey?: unknown; peerId?: unknown; state?: unknown };
-  const peerId = normalizePeerId(candidate.remotePubkey);
-  if (peerId === undefined || authenticatedPeerId(peerId, candidate.peerId) === undefined) return undefined;
+  const xOnly = authenticatedPeerId(candidate.remotePubkey, candidate.peerId);
+  if (xOnly === undefined) return undefined;
+  const peerId = normalizePeerId(candidate.remotePubkey) ?? '02' + xOnly;
   if (candidate.state === 'connected' || candidate.state === 'established') {
     return { peerId, connected: true };
   }
