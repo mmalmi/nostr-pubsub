@@ -1,6 +1,9 @@
 //! Bounded, verifiable snapshots for application-selected event storage.
 //! Storage adapters own durability; this model owns Nostr retention semantics.
-use crate::{EventRetentionPolicy, Filter, MatchEventOptions, QueryOptions, VerifiedEvent};
+use crate::{
+    EventRetentionPolicy, Filter, QueryOptions, VerifiedEvent, filter_matches_event,
+    json_encoded_len,
+};
 use nostr::Event;
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -37,11 +40,43 @@ impl RetainedEvents {
 
     /// Recheck disk contents; neither a stored ID nor a signature flag is trusted.
     pub fn restore(&mut self, events: impl IntoIterator<Item = Event>, now: u64) {
+        let mut accepted = Vec::new();
         for event in events {
-            if let Ok(event) = VerifiedEvent::try_from(event) {
-                self.insert(event, now);
+            let Ok(event) = VerifiedEvent::try_from(event) else {
+                continue;
+            };
+            let raw = event.as_event();
+            if !self.policy.accepts(&event) || !retained_event_is_current(raw, now) {
+                continue;
+            }
+            let Ok(encoded_len) = json_encoded_len(raw) else {
+                continue;
+            };
+            if encoded_len <= MAX_RETAINED_EVENT_BYTES {
+                accepted.push((event, encoded_len));
             }
         }
+        if accepted.is_empty() {
+            return;
+        }
+        self.events
+            .retain(|(old, _)| retained_event_is_current(old.as_event(), now));
+        self.events.extend(accepted);
+        self.events
+            .sort_by(|(a, _), (b, _)| newest_first(a.as_event(), b.as_event()));
+        let mut seen_ids = HashSet::with_capacity(self.events.len());
+        let mut seen_coords = HashSet::new();
+        self.events.retain(|(event, _)| {
+            let raw = event.as_event();
+            if !seen_ids.insert(raw.id) {
+                return false;
+            }
+            event_coordinate(raw)
+                .map(|(kind, pk, d)| (kind, pk, d.to_owned()))
+                .is_none_or(|coord| seen_coords.insert(coord))
+        });
+        self.bytes = self.events.iter().map(|(_, size)| *size + 1).sum();
+        self.enforce_bounds();
     }
 
     /// Whether `insert` would refuse the event before changing anything.
@@ -61,10 +96,10 @@ impl RetainedEvents {
         }
         let raw = event.as_event();
         let id = raw.id;
-        let Ok(encoded) = serde_json::to_vec(raw) else {
+        let Ok(encoded_len) = json_encoded_len(raw) else {
             return false;
         };
-        if encoded.len() > MAX_RETAINED_EVENT_BYTES {
+        if encoded_len > MAX_RETAINED_EVENT_BYTES {
             return false;
         }
         let coordinate = event_coordinate(raw);
@@ -80,10 +115,18 @@ impl RetainedEvents {
             retained_event_is_current(old.as_event(), now)
                 && (coordinate.is_none() || event_coordinate(old.as_event()) != coordinate)
         });
-        self.events.push((event, encoded.len()));
-        self.events
-            .sort_by(|(a, _), (b, _)| newest_first(a.as_event(), b.as_event()));
+        let index = self
+            .events
+            .partition_point(|(existing, _)| newest_first(existing.as_event(), raw) == Ordering::Less);
+        self.events.insert(index, (event, encoded_len));
         self.bytes = self.events.iter().map(|(_, size)| *size + 1).sum();
+        self.enforce_bounds();
+        self.events
+            .iter()
+            .any(|(stored, _)| stored.as_event().id == id)
+    }
+
+    fn enforce_bounds(&mut self) {
         // Reserve space for the snapshot envelope as well as commas.
         while self.events.len() > self.policy.max_events
             || self.bytes + 128 > MAX_RETAINED_SNAPSHOT_BYTES
@@ -92,9 +135,6 @@ impl RetainedEvents {
                 self.bytes -= size + 1;
             }
         }
-        self.events
-            .iter()
-            .any(|(stored, _)| stored.as_event().id == id)
     }
 
     #[must_use]
@@ -120,7 +160,7 @@ impl RetainedEvents {
                     break;
                 }
                 if retained_event_is_current(event.as_event(), now)
-                    && filter.match_event(event.as_event(), MatchEventOptions::new())
+                    && filter_matches_event(filter, event.as_event())
                 {
                     selected.insert(event.as_event().id);
                     matched += 1;

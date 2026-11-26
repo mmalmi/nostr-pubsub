@@ -1,14 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use nostr::Event;
-use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_INV_WANT_HOP_LIMIT, PubsubError, Result};
+use crate::{DEFAULT_INV_WANT_HOP_LIMIT, PubsubError, Result, json_encoded_len};
 
+#[path = "mesh_codec.rs"]
+mod codec;
 #[path = "mesh_resources.rs"]
 mod resources;
 #[path = "mesh_verified.rs"]
 mod verified;
+pub use codec::{InvWantCodec, InvWantWireMessage};
 use resources::CachedEvent;
 pub use resources::InvWantMeshRetainedState;
 
@@ -25,111 +27,6 @@ const MIN_PEER_BEHAVIOR_SAMPLES: u32 = 3;
 const VALID_FRAME_REWARD: i32 = 20;
 const INVALID_MESSAGE_PENALTY: i32 = -40;
 const UNSERVED_INVENTORY_PENALTY: i32 = -20;
-
-/// Network-neutral inventory/want/frame messages for signed Nostr events.
-///
-/// The containing transport chooses the protocol name, version and framing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum InvWantWireMessage {
-    Inventory {
-        event_id: String,
-        event_kind: u16,
-        payload_bytes: u32,
-        hop_limit: u8,
-    },
-    Want {
-        event_id: String,
-    },
-    Frame {
-        event_id: String,
-        event: Box<Event>,
-    },
-}
-
-#[derive(Debug, Serialize)]
-struct InvWantEnvelopeRef<'a> {
-    protocol: &'a str,
-    version: u8,
-    message: &'a InvWantWireMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct InvWantEnvelope {
-    protocol: String,
-    version: u8,
-    message: InvWantWireMessage,
-}
-
-/// A bounded JSON envelope codec. Transport adapters can preserve their own
-/// deployed namespace and version while sharing the state machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InvWantCodec {
-    protocol: String,
-    version: u8,
-    max_wire_bytes: usize,
-}
-
-impl InvWantCodec {
-    #[must_use]
-    pub fn new(protocol: impl Into<String>, version: u8, max_wire_bytes: usize) -> Self {
-        Self {
-            protocol: protocol.into(),
-            version,
-            max_wire_bytes: max_wire_bytes.max(1),
-        }
-    }
-
-    #[must_use]
-    pub fn protocol(&self) -> &str {
-        &self.protocol
-    }
-
-    #[must_use]
-    pub const fn version(&self) -> u8 {
-        self.version
-    }
-
-    pub fn encode(&self, message: &InvWantWireMessage) -> Result<Vec<u8>> {
-        let encoded = serde_json::to_vec(&InvWantEnvelopeRef {
-            protocol: &self.protocol,
-            version: self.version,
-            message,
-        })
-        .map_err(|error| validation(format!("invalid inv/want JSON: {error}")))?;
-        self.check_wire_len(encoded.len())?;
-        Ok(encoded)
-    }
-
-    pub fn decode(&self, payload: &[u8]) -> Result<InvWantWireMessage> {
-        self.check_wire_len(payload.len())?;
-        let envelope: InvWantEnvelope = serde_json::from_slice(payload)
-            .map_err(|error| validation(format!("invalid inv/want JSON: {error}")))?;
-        if envelope.protocol != self.protocol {
-            return Err(validation(format!(
-                "unsupported inv/want protocol {:?}",
-                envelope.protocol
-            )));
-        }
-        if envelope.version != self.version {
-            return Err(validation(format!(
-                "unsupported inv/want version {}",
-                envelope.version
-            )));
-        }
-        Ok(envelope.message)
-    }
-
-    fn check_wire_len(&self, len: usize) -> Result<()> {
-        if len > self.max_wire_bytes {
-            return Err(validation(format!(
-                "inv/want wire payload is {len} bytes, maximum is {}",
-                self.max_wire_bytes
-            )));
-        }
-        Ok(())
-    }
-}
 
 /// A connected transport peer plus an optional locally observed quality score.
 ///
@@ -161,10 +58,6 @@ impl MeshPeer {
     #[must_use]
     pub const fn is_unknown(&self) -> bool {
         self.quality_score.is_none()
-    }
-
-    fn effective_score(&self) -> i32 {
-        self.quality_score.unwrap_or(0)
     }
 }
 
@@ -718,13 +611,12 @@ impl InvWantMesh {
 
     fn validate_verified_event(&self, event: &Event) -> Result<(String, u32)> {
         self.validate_kind(u16::from(event.kind))?;
-        let payload = serde_json::to_vec(event)
+        let len = json_encoded_len(event)
             .map_err(|error| validation(format!("invalid inv/want JSON: {error}")))?;
-        self.validate_event_len(payload.len())?;
-        let payload_bytes = u32::try_from(payload.len()).map_err(|_| {
+        self.validate_event_len(len)?;
+        let payload_bytes = u32::try_from(len).map_err(|_| {
             validation(format!(
-                "inv/want event is {} bytes, maximum is {}",
-                payload.len(),
+                "inv/want event is {len} bytes, maximum is {}",
                 self.options.max_event_bytes
             ))
         })?;
@@ -788,25 +680,8 @@ impl InvWantMesh {
         excluded_peer: Option<&str>,
         message: &InvWantWireMessage,
     ) -> Vec<InvWantAction> {
-        let peers = self.peers_with_behavior(peers);
-        select_mesh_peers(
-            &peers,
-            excluded_peer,
-            self.options.fanout,
-            self.options.unknown_peer_reserve,
-        )
-        .into_iter()
-        .map(|peer| InvWantAction::Send {
-            peer_id: peer.id,
-            message: message.clone(),
-        })
-        .collect()
-    }
-
-    fn peers_with_behavior(&self, peers: &[MeshPeer]) -> Vec<MeshPeer> {
-        peers
-            .iter()
-            .map(|peer| {
+        select_peer_refs(
+            peers.iter().map(|peer| {
                 let local_score = self.peer_behavior_score(&peer.id);
                 let quality_score = match (peer.quality_score, local_score) {
                     (Some(external), Some(local)) => {
@@ -814,12 +689,18 @@ impl InvWantMesh {
                     }
                     (external, local) => external.or(local),
                 };
-                match quality_score {
-                    Some(score) => MeshPeer::observed(&peer.id, score),
-                    None => MeshPeer::new(&peer.id),
-                }
-            })
-            .collect()
+                (peer.id.as_str(), quality_score)
+            }),
+            excluded_peer,
+            self.options.fanout,
+            self.options.unknown_peer_reserve,
+        )
+        .into_iter()
+        .map(|(peer_id, _)| InvWantAction::Send {
+            peer_id: peer_id.to_string(),
+            message: message.clone(),
+        })
+        .collect()
     }
 
     fn record_peer_behavior(
@@ -870,28 +751,50 @@ pub fn select_mesh_peers(
     fanout: usize,
     unknown_peer_reserve: usize,
 ) -> Vec<MeshPeer> {
-    let mut deduplicated = BTreeMap::<String, MeshPeer>::new();
-    for peer in peers
-        .iter()
-        .filter(|peer| excluded_peer != Some(peer.id.as_str()))
+    select_peer_refs(
+        peers
+            .iter()
+            .map(|peer| (peer.id.as_str(), peer.quality_score)),
+        excluded_peer,
+        fanout,
+        unknown_peer_reserve,
+    )
+    .into_iter()
+    .map(|(id, quality_score)| MeshPeer {
+        id: id.to_string(),
+        quality_score,
+    })
+    .collect()
+}
+
+fn select_peer_refs<'a>(
+    peers: impl IntoIterator<Item = (&'a str, Option<i32>)>,
+    excluded_peer: Option<&str>,
+    fanout: usize,
+    unknown_peer_reserve: usize,
+) -> Vec<(&'a str, Option<i32>)> {
+    let mut deduplicated = BTreeMap::<&'a str, Option<i32>>::new();
+    for (id, quality_score) in peers
+        .into_iter()
+        .filter(|(id, _)| excluded_peer != Some(*id))
     {
         deduplicated
-            .entry(peer.id.clone())
+            .entry(id)
             .and_modify(|existing| {
-                if existing.quality_score.is_none() && peer.quality_score.is_some() {
-                    *existing = peer.clone();
+                if existing.is_none() && quality_score.is_some() {
+                    *existing = quality_score;
                 }
             })
-            .or_insert_with(|| peer.clone());
+            .or_insert(quality_score);
     }
 
-    let mut candidates = deduplicated.into_values().collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        right
-            .effective_score()
-            .cmp(&left.effective_score())
-            .then_with(|| left.is_unknown().cmp(&right.is_unknown()))
-            .then_with(|| left.id.cmp(&right.id))
+    let mut candidates = deduplicated.into_iter().collect::<Vec<_>>();
+    candidates.sort_by(|(left_id, left_score), (right_id, right_score)| {
+        right_score
+            .unwrap_or(0)
+            .cmp(&left_score.unwrap_or(0))
+            .then_with(|| left_score.is_none().cmp(&right_score.is_none()))
+            .then_with(|| left_id.cmp(right_id))
     });
 
     if fanout >= candidates.len() {
@@ -901,21 +804,23 @@ pub fn select_mesh_peers(
     let target = fanout.min(candidates.len());
     let required_unknown = unknown_peer_reserve
         .min(target)
-        .min(candidates.iter().filter(|peer| peer.is_unknown()).count());
-    let mut selected = candidates.iter().take(target).cloned().collect::<Vec<_>>();
+        .min(candidates.iter().filter(|(_, score)| score.is_none()).count());
+    let mut selected = candidates[..target].to_vec();
     let mut replacement_unknowns = candidates[target..]
         .iter()
-        .filter(|peer| peer.is_unknown())
-        .cloned();
+        .copied()
+        .filter(|(_, score)| score.is_none());
 
-    while selected.iter().filter(|peer| peer.is_unknown()).count() < required_unknown {
+    let mut selected_unknowns = selected.iter().filter(|(_, score)| score.is_none()).count();
+    while selected_unknowns < required_unknown {
         let Some(replacement) = replacement_unknowns.next() else {
             break;
         };
-        let Some(replace_index) = selected.iter().rposition(|peer| !peer.is_unknown()) else {
+        let Some(replace_index) = selected.iter().rposition(|(_, score)| score.is_some()) else {
             break;
         };
         selected[replace_index] = replacement;
+        selected_unknowns += 1;
     }
     selected
 }

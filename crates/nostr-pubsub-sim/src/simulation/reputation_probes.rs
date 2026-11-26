@@ -44,7 +44,8 @@ impl Simulation {
             self.scheduler.now_ms(),
             &event,
             ReputationEventOrigin::ForgedProbe,
-        )
+        )?;
+        Ok(())
     }
 
     pub(super) fn publish_poisoned_probe(&mut self) -> Result<()> {
@@ -72,7 +73,8 @@ impl Simulation {
             self.scheduler.now_ms(),
             &event,
             ReputationEventOrigin::PoisonedProbe,
-        )
+        )?;
+        Ok(())
     }
 
     pub(super) fn poisoned_probe_plan(&self) -> Option<(usize, usize, usize)> {

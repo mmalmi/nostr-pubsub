@@ -29,7 +29,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, Timestamp};
+use nostr::{Event, EventBuilder, Filter, Keys, Kind, Tag, Timestamp};
 use nostr_pubsub::{
     DEFAULT_FIPS_PUBSUB_MAX_FRAME_BYTES, EventSource, FipsPubsubWireAdapter, FipsPubsubWireCodec,
     FipsPubsubWireMessage, InvWantAction, InvWantCodec, InvWantMesh, InvWantMeshOptions,
@@ -38,10 +38,10 @@ use nostr_pubsub::{
     SubscriptionId, VerifiedEvent,
 };
 use nostr_pubsub_social_graph::{
-    PeerRatingPublisher, PeerReputation, PeerReputationConfig, PeerReputationPolicies,
+    DEFAULT_PEER_RATING_SCOPE, PeerRatingPublisher, PeerReputation, PeerReputationConfig,
+    PeerReputationPolicies,
 };
-use nostr_social_graph::Rating;
-use nostr_social_memory::RatingEventExt;
+use nostr_social_memory::RATING_KIND;
 
 use crate::clock::VirtualScheduler;
 use crate::metrics::{NodeTrafficLedger, TrafficDirection, TrafficProvenance, basis_points};
@@ -314,6 +314,7 @@ struct Simulation {
     fips_codec: FipsPubsubWireCodec,
     keys: Vec<Keys>,
     peer_ids: Vec<String>,
+    source_ids: Vec<SourceId>,
     peer_indices: HashMap<String, usize>,
     topology: TopologyResult,
     nodes: Vec<SimNode>,
@@ -392,14 +393,43 @@ fn peer_rating_event_with_samples(
     sample_count: u64,
     created_at: u64,
 ) -> Result<Event> {
-    let mut rating = Rating::new(rater, subject, value, 0, 100);
-    rating.id = deterministic_rating_id(rater, subject, value, created_at);
-    rating.scope = Some(PeerReputationConfig::default().scope);
-    rating.created_at = created_at;
-    rating.sample_count = Some(sample_count);
-    let encoded = rating.to_event(signer).map_err(pubsub_error)?;
-    EventBuilder::new(encoded.kind, encoded.content)
-        .tags(encoded.tags)
+    let id = deterministic_rating_id(rater, subject, value, created_at);
+    let rater = rater.trim().to_ascii_lowercase();
+    let subject = subject.trim().to_ascii_lowercase();
+    let external_identifiers = BTreeSet::from([
+        rater.as_str(),
+        subject.as_str(),
+        DEFAULT_PEER_RATING_SCOPE,
+    ]);
+    let pubkeys = BTreeSet::from([rater.as_str(), subject.as_str()]);
+    let created_at_str = created_at.to_string();
+    let value_str = value.to_string();
+    let samples_str = sample_count.to_string();
+
+    let mut tags = Vec::with_capacity(1 + external_identifiers.len() + pubkeys.len() + 10);
+    tags.push(Tag::parse(["i", id.as_str(), "subject"]).map_err(pubsub_error)?);
+    for identifier in external_identifiers {
+        tags.push(Tag::parse(["i", identifier]).map_err(pubsub_error)?);
+    }
+    for pubkey in pubkeys {
+        tags.push(Tag::parse(["p", pubkey]).map_err(pubsub_error)?);
+    }
+    for [predicate, fact_value] in [
+        ["created_at", created_at_str.as_str()],
+        ["max_rating", "100"],
+        ["min_rating", "0"],
+        ["rater", rater.as_str()],
+        ["rating", value_str.as_str()],
+        ["sample_count", samples_str.as_str()],
+        ["schema", "1"],
+        ["scope", DEFAULT_PEER_RATING_SCOPE],
+        ["subject", subject.as_str()],
+        ["type", "rating"],
+    ] {
+        tags.push(Tag::parse([predicate, fact_value]).map_err(pubsub_error)?);
+    }
+    EventBuilder::new(Kind::from(RATING_KIND), "")
+        .tags(tags)
         .custom_created_at(Timestamp::from(created_at))
         .sign_with_keys(signer)
         .map_err(pubsub_error)
@@ -535,6 +565,37 @@ fn pubsub_error(error: impl std::fmt::Display) -> SimulationError {
 mod tests {
     use super::*;
     use crate::TrafficScope;
+    use nostr_social_graph::Rating;
+    use nostr_social_memory::RatingEventExt;
+
+    #[test]
+    fn single_signed_rating_event_matches_social_memory_encoding() {
+        let signer = Keys::generate();
+        let rater = signer.public_key().to_hex();
+        let subject = Keys::generate().public_key().to_hex();
+        let created_at = SIM_UNIX_BASE + 42;
+
+        let direct = peer_rating_event_with_samples(&signer, &rater, &subject, 100, 5, created_at)
+            .unwrap();
+
+        let mut rating = Rating::new(&rater, &subject, 100, 0, 100);
+        rating.id = deterministic_rating_id(&rater, &subject, 100, created_at);
+        rating.scope = Some(PeerReputationConfig::default().scope);
+        rating.created_at = created_at;
+        rating.sample_count = Some(5);
+        let encoded = rating.to_event(&signer).unwrap();
+        let reference = EventBuilder::new(encoded.kind, encoded.content)
+            .tags(encoded.tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(&signer)
+            .unwrap();
+
+        assert_eq!(direct.id, reference.id);
+        assert_eq!(direct.tags, reference.tags);
+        assert_eq!(direct.kind, reference.kind);
+        assert_eq!(direct.content, reference.content);
+        assert_eq!(direct.created_at, reference.created_at);
+    }
 
     #[test]
     fn every_workload_class_has_interested_peers() {

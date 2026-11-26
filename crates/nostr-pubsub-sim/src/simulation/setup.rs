@@ -171,6 +171,7 @@ fn assemble_simulation(
         workload_pairs,
         reputation_publishers,
     } = prepared;
+    let source_ids = peer_ids.iter().cloned().map(super::SourceId::new).collect();
     let report = initial_report(&config, mode, &topology, &nodes);
     let traffic = vec![NodeTrafficLedger::default(); config.node_count];
     let node_resources = vec![NodeResourceLedger::default(); config.node_count];
@@ -221,6 +222,7 @@ fn assemble_simulation(
         mode,
         keys,
         peer_ids,
+        source_ids,
         peer_indices,
         topology,
         nodes,

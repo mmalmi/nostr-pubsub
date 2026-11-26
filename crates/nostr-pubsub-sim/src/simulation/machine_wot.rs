@@ -701,7 +701,8 @@ impl Simulation {
             self.scheduler.now_ms(),
             &event,
             ReputationEventOrigin::RevokedRaterRating,
-        )
+        )?;
+        Ok(())
     }
 
     fn admitted_rater_poison_plan(&self) -> Result<Option<AdmittedRaterAttackPlan>> {

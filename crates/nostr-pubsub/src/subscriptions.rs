@@ -1,11 +1,10 @@
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, VecDeque},
+use std::collections::{BTreeMap, VecDeque};
+
+use nostr::{ClientMessage, Event, Filter};
+
+use crate::{
+    PubsubError, Result, SourceId, VerifiedEvent, json_encoded_len, subscription_filters_match,
 };
-
-use nostr::{ClientMessage, Event, Filter, JsonUtil, SubscriptionId};
-
-use crate::{PubsubError, Result, SourceId, VerifiedEvent, subscription_filters_match};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubsubDeliveryStrategy {
@@ -143,27 +142,42 @@ pub enum PubsubSubscriptionUpdate {
     Ignored,
 }
 
+#[derive(Debug, Clone)]
+struct StoredPeerSubscription {
+    subscription: PubsubPeerSubscription,
+    contribution: SubscriptionContribution,
+}
+
 #[derive(Debug, Clone, Default)]
 struct PeerSubscriptionSet {
-    subscriptions: BTreeMap<String, PubsubPeerSubscription>,
+    subscriptions: BTreeMap<String, StoredPeerSubscription>,
     order: VecDeque<String>,
+    filter_count: usize,
 }
 
 impl PeerSubscriptionSet {
     fn upsert(
         &mut self,
         subscription: PubsubPeerSubscription,
+        contribution: SubscriptionContribution,
         limits: PubsubSubscriptionLimits,
-    ) -> (
-        Option<PubsubPeerSubscription>,
-        Option<PubsubPeerSubscription>,
-    ) {
+    ) -> (Option<StoredPeerSubscription>, Option<StoredPeerSubscription>) {
         let subscription_id = subscription.subscription_id.clone();
         self.order.retain(|id| id != &subscription_id);
         self.order.push_back(subscription_id.clone());
-        let replaced = self
-            .subscriptions
-            .insert(subscription_id.clone(), subscription);
+        self.filter_count = self.filter_count.saturating_add(contribution.filter_count);
+        let replaced = self.subscriptions.insert(
+            subscription_id,
+            StoredPeerSubscription {
+                subscription,
+                contribution,
+            },
+        );
+        if let Some(old) = replaced.as_ref() {
+            self.filter_count = self
+                .filter_count
+                .saturating_sub(old.contribution.filter_count);
+        }
         let evicted = if replaced.is_none() {
             self.evict_oldest_over_limit(limits.max_subscriptions_per_peer)
         } else {
@@ -172,17 +186,24 @@ impl PeerSubscriptionSet {
         (replaced, evicted)
     }
 
-    fn remove(&mut self, subscription_id: &str) -> Option<PubsubPeerSubscription> {
+    fn remove(&mut self, subscription_id: &str) -> Option<StoredPeerSubscription> {
         self.order.retain(|id| id != subscription_id);
-        self.subscriptions.remove(subscription_id)
+        let removed = self.subscriptions.remove(subscription_id)?;
+        self.filter_count = self
+            .filter_count
+            .saturating_sub(removed.contribution.filter_count);
+        Some(removed)
     }
 
-    fn evict_oldest_over_limit(&mut self, limit: usize) -> Option<PubsubPeerSubscription> {
+    fn evict_oldest_over_limit(&mut self, limit: usize) -> Option<StoredPeerSubscription> {
         while self.subscriptions.len() > limit {
             let Some(subscription_id) = self.order.pop_front() else {
                 break;
             };
             if let Some(removed) = self.subscriptions.remove(&subscription_id) {
+                self.filter_count = self
+                    .filter_count
+                    .saturating_sub(removed.contribution.filter_count);
                 return Some(removed);
             }
         }
@@ -263,12 +284,7 @@ impl PubsubPeerSubscriptionStore {
     /// short-circuit before evaluating every candidate.
     #[must_use]
     pub fn peer_filter_count(&self, peer_id: &SourceId) -> usize {
-        self.peers.get(peer_id).map_or(0, |peer| {
-            peer.subscriptions
-                .values()
-                .map(|subscription| subscription.filters.len())
-                .sum()
-        })
+        self.peers.get(peer_id).map_or(0, |peer| peer.filter_count)
     }
 
     /// Measures the exact canonical encoded size of the retained filters and
@@ -293,6 +309,7 @@ impl PubsubPeerSubscriptionStore {
         self.peers
             .get(peer_id)
             .and_then(|peer| peer.subscriptions.get(subscription_id))
+            .map(|stored| &stored.subscription)
     }
 
     pub fn apply_client_message(
@@ -362,17 +379,18 @@ impl PubsubPeerSubscriptionStore {
         self.touch_peer(peer_id.clone());
         if is_new_peer {
             for removed in self.evict_peers_over_limit() {
-                self.subtract_retained(&removed);
+                self.subtract_retained(removed.contribution);
             }
         }
         let peer = self.peers.entry(peer_id).or_default();
-        let (replaced, evicted) = peer.upsert(subscription, self.limits);
+        let (replaced, evicted) = peer.upsert(subscription, added, self.limits);
         if let Some(replaced) = replaced {
-            self.subtract_retained(&replaced);
+            self.subtract_retained(replaced.contribution);
         }
-        if let Some(evicted) = evicted.as_ref() {
-            self.subtract_retained(evicted);
-        }
+        let evicted = evicted.map(|evicted| {
+            self.subtract_retained(evicted.contribution);
+            evicted.subscription
+        });
         self.add_retained(added);
         self.retained.peer_count = self.peers.len();
         Ok(evicted)
@@ -386,10 +404,8 @@ impl PubsubPeerSubscriptionStore {
         let removed = self
             .peers
             .get_mut(peer_id)
-            .and_then(|peer| peer.remove(subscription_id));
-        if let Some(removed) = removed.as_ref() {
-            self.subtract_retained(removed);
-        }
+            .and_then(|peer| peer.remove(subscription_id))?;
+        self.subtract_retained(removed.contribution);
         if self
             .peers
             .get(peer_id)
@@ -397,7 +413,7 @@ impl PubsubPeerSubscriptionStore {
         {
             self.remove_peer(peer_id);
         }
-        removed
+        Some(removed.subscription)
     }
 
     pub fn remove_peer(&mut self, peer_id: &SourceId) -> Vec<PubsubPeerSubscription> {
@@ -405,11 +421,16 @@ impl PubsubPeerSubscriptionStore {
         let removed = self
             .peers
             .remove(peer_id)
-            .map(|peer| peer.subscriptions.into_values().collect())
+            .map(|peer| {
+                peer.subscriptions
+                    .into_values()
+                    .map(|stored| {
+                        self.subtract_retained(stored.contribution);
+                        stored.subscription
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
-        for subscription in &removed {
-            self.subtract_retained(subscription);
-        }
         self.retained.peer_count = self.peers.len();
         removed
     }
@@ -422,7 +443,7 @@ impl PubsubPeerSubscriptionStore {
         if peer
             .subscriptions
             .values()
-            .any(|subscription| subscription.matches(event))
+            .any(|stored| stored.subscription.matches(event))
         {
             PubsubPeerInterest::Subscribed
         } else {
@@ -440,7 +461,8 @@ impl PubsubPeerSubscriptionStore {
             .get(peer_id)
             .into_iter()
             .flat_map(|peer| peer.subscriptions.values())
-            .filter(|subscription| subscription.matches(event))
+            .filter(|stored| stored.subscription.matches(event))
+            .map(|stored| &stored.subscription)
             .collect()
     }
 
@@ -453,8 +475,8 @@ impl PubsubPeerSubscriptionStore {
         self.peers.iter().flat_map(move |(peer_id, peer)| {
             peer.subscriptions
                 .values()
-                .filter(move |subscription| subscription.matches(event))
-                .map(move |subscription| (peer_id, subscription))
+                .filter(move |stored| stored.subscription.matches(event))
+                .map(move |stored| (peer_id, &stored.subscription))
         })
     }
 
@@ -465,7 +487,7 @@ impl PubsubPeerSubscriptionStore {
             .filter(|(_, peer)| {
                 peer.subscriptions
                     .values()
-                    .any(|subscription| subscription.matches(event))
+                    .any(|stored| stored.subscription.matches(event))
             })
             .map(|(peer_id, _)| peer_id.clone())
             .collect()
@@ -476,7 +498,7 @@ impl PubsubPeerSubscriptionStore {
         self.peer_order.push_back(peer_id);
     }
 
-    fn evict_peers_over_limit(&mut self) -> Vec<PubsubPeerSubscription> {
+    fn evict_peers_over_limit(&mut self) -> Vec<StoredPeerSubscription> {
         while self.peers.len() >= self.limits.max_peers {
             let Some(peer_id) = self.peer_order.pop_front() else {
                 break;
@@ -504,8 +526,7 @@ impl PubsubPeerSubscriptionStore {
             .saturating_add(added.encoded_req_bytes);
     }
 
-    fn subtract_retained(&mut self, removed: &PubsubPeerSubscription) {
-        let removed = subscription_contribution_infallible(removed);
+    fn subtract_retained(&mut self, removed: SubscriptionContribution) {
         self.retained.subscription_count = self.retained.subscription_count.saturating_sub(1);
         self.retained.filter_count = self
             .retained
@@ -536,30 +557,23 @@ fn subscription_contribution(
         .filters
         .iter()
         .try_fold(0_usize, |total, filter| {
-            filter
-                .try_as_json()
-                .map(|encoded| total.saturating_add(encoded.len()))
+            json_encoded_len(filter)
+                .map(|len| total.saturating_add(len))
                 .map_err(|error| encoded_state_error("filter", error))
         })?;
-    let encoded_req_bytes = ClientMessage::Req {
-        subscription_id: Cow::Owned(SubscriptionId::new(&subscription.subscription_id)),
-        filters: subscription.filters.iter().map(Cow::Borrowed).collect(),
-    }
-    .try_as_json()
-    .map_err(|error| encoded_state_error("REQ", error))?
-    .len();
+    let sub_id_bytes = json_encoded_len(&subscription.subscription_id)
+        .map_err(|error| encoded_state_error("REQ", error))?;
+    // Compact canonical JSON for `["REQ",<sub_id>,<filter_0>,...]`.
+    let encoded_req_bytes = b"[\"REQ\",".len()
+        .saturating_add(sub_id_bytes)
+        .saturating_add(subscription.filters.len())
+        .saturating_add(encoded_filter_bytes)
+        .saturating_add(b"]".len());
     Ok(SubscriptionContribution {
         filter_count: subscription.filters.len(),
         encoded_filter_bytes,
         encoded_req_bytes,
     })
-}
-
-fn subscription_contribution_infallible(
-    subscription: &PubsubPeerSubscription,
-) -> SubscriptionContribution {
-    subscription_contribution(subscription)
-        .expect("a retained subscription was encoded successfully when inserted")
 }
 
 fn encoded_state_error(kind: &str, error: impl std::fmt::Debug) -> PubsubError {
@@ -570,7 +584,7 @@ fn encoded_state_error(kind: &str, error: impl std::fmt::Debug) -> PubsubError {
 
 #[cfg(test)]
 mod tests {
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind};
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, SubscriptionId};
 
     use super::*;
 

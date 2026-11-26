@@ -12,7 +12,9 @@ use nostr_pubsub::{
 use nostr_social_graph::SocialGraphBackend;
 
 mod reputation;
+mod verified_rating;
 pub use reputation::*;
+pub use verified_rating::parse_verified_rating;
 
 pub const DEFAULT_SOCIAL_GRAPH_ENTRYPOINT_NPUB: &str =
     "npub1g53mukxnjkcmr94fhryzkqutdz2ukq4ks0gvy5af25rgmwsl4ngq43drvk";
@@ -219,15 +221,22 @@ where
     B: SocialGraphBackend + Send + Sync + 'static,
 {
     fn select_mesh_peer(&self, peer_id: &str) -> Result<Option<MeshPeer>> {
-        let source = EventSource::fips_endpoint(peer_id);
-        let (graph_decision, inside_graph) = match parse_pubkey(peer_id) {
-            Some(author_pubkey) => self.decision_and_graph_membership_for_author(&author_pubkey)?,
-            None => (self.decision_for_missing_author(), false),
+        let (graph_decision, inside_graph) = if self.service_reputation.is_none()
+            && self.config.outside_graph_action != GraphDistanceAction::Drop
+            && self.config.missing_author_action != GraphDistanceAction::Drop
+            && is_lower_hex_64(peer_id)
+        {
+            self.decision_and_graph_membership_for_author(peer_id)?
+        } else {
+            match parse_pubkey(peer_id) {
+                Some(author_pubkey) => self.decision_and_graph_membership_for_author(&author_pubkey)?,
+                None => (self.decision_for_missing_author(), false),
+            }
         };
-        let reputation_decision = self
-            .service_reputation
-            .as_ref()
-            .and_then(|reputation| reputation.decision_for_source(&source, None));
+        let reputation_decision = self.service_reputation.as_ref().and_then(|reputation| {
+            let source = EventSource::fips_endpoint(peer_id);
+            reputation.decision_for_source(&source, None)
+        });
         let (decision, has_reputation) = match reputation_decision {
             Some(reputation_decision) => (
                 combine_source_decisions(graph_decision, reputation_decision),
@@ -451,15 +460,23 @@ fn outside_reason(distance: u32, config: &SocialGraphPolicyConfig) -> String {
     }
 }
 
+fn is_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn author_is_muted_by_root<B>(graph: &B, author_pubkey: &str) -> std::result::Result<bool, B::Error>
 where
     B: SocialGraphBackend + ?Sized,
 {
+    let muters = graph.get_user_muted_by(author_pubkey)?;
+    if muters.is_empty() {
+        return Ok(false);
+    }
     let root = graph.get_root()?;
-    let muted = graph.get_muted_by_user(&root)?;
-    Ok(muted
-        .iter()
-        .any(|muted_pubkey| muted_pubkey == author_pubkey))
+    Ok(muters.iter().any(|muter| muter == &root))
 }
 
 fn graph_policy_error(error: impl std::fmt::Display) -> PubsubError {

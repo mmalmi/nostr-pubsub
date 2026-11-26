@@ -86,18 +86,26 @@ impl Simulation {
         let mut due = Vec::new();
         for (subject, observation, evidence) in candidates {
             let value = i64::from(evidence == RatingEvidence::PositiveService) * 100;
-            let event = peer_rating_event_with_samples(
-                &self.keys[observer],
-                &self.peer_ids[observer],
-                &self.peer_ids[subject],
-                value,
-                u64::from(observation.samples),
-                virtual_unix_secs(now_ms),
-            )?;
+            let normalized_score = value * 2 - 100;
             if self.reputation_publishers[observer]
                 .as_ref()
-                .is_some_and(|publisher| publisher.should_publish_event(&event, now_ms))
+                .is_some_and(|publisher| {
+                    publisher.should_publish_rating(
+                        &self.peer_ids[subject],
+                        normalized_score,
+                        u64::from(observation.samples),
+                        now_ms,
+                    )
+                })
             {
+                let event = peer_rating_event_with_samples(
+                    &self.keys[observer],
+                    &self.peer_ids[observer],
+                    &self.peer_ids[subject],
+                    value,
+                    u64::from(observation.samples),
+                    virtual_unix_secs(now_ms),
+                )?;
                 let observed_at_ms = self
                     .bad_observed_at
                     .get(&(observer, subject))
@@ -129,11 +137,12 @@ impl Simulation {
             }
             RatingEvidence::PositiveService => ReputationEventOrigin::PositiveServiceEndorsement,
         };
-        self.publish_reputation_event(observer, subject, observed_at_ms, event, origin)?;
+        let verified =
+            self.publish_reputation_event(observer, subject, observed_at_ms, event, origin)?;
         let recorded = self.reputation_publishers[observer]
             .as_mut()
             .is_some_and(|publisher| {
-                publisher.record_published_event(event, self.scheduler.now_ms())
+                publisher.record_published_verified_event(&verified, self.scheduler.now_ms())
             });
         if recorded {
             self.report.machine_ratings_published =
@@ -157,8 +166,12 @@ impl Simulation {
         self.publish_poisoned_probe()
     }
 
-    pub(super) fn receive_reputation_event(&mut self, node: usize, event: &Event) -> Result<()> {
-        let event_id = event.id.to_hex();
+    pub(super) fn receive_reputation_event(
+        &mut self,
+        node: usize,
+        verified: &VerifiedEvent,
+    ) -> Result<()> {
+        let event_id = verified.as_event().id.to_hex();
         if !self.rating_receipts.insert((node, event_id.clone())) {
             return Ok(());
         }
@@ -219,7 +232,7 @@ impl Simulation {
             )
             | None => {}
         }
-        self.apply_reputation_event(node, event, true)
+        self.apply_reputation_event(node, verified, true)
     }
 
     pub(super) fn publish_reputation_event(
@@ -229,7 +242,7 @@ impl Simulation {
         observed_at_ms: u64,
         event: &Event,
         origin: ReputationEventOrigin,
-    ) -> Result<()> {
+    ) -> Result<VerifiedEvent> {
         let event_id = event.id.to_hex();
         self.record_cpu_work(publisher, |work| {
             work.signature_checks = work.signature_checks.saturating_add(1);
@@ -246,7 +259,7 @@ impl Simulation {
         );
         self.retain_local_event(publisher, event_id, verified.clone())?;
         if !origin.is_spam() {
-            self.apply_reputation_event(publisher, event, false)?;
+            self.apply_reputation_event(publisher, &verified, false)?;
         }
         let peers = self.interested_mesh_peers(publisher, &verified)?;
         self.record_cpu_work(publisher, |work| {
@@ -256,18 +269,20 @@ impl Simulation {
         });
         let actions = self.nodes[publisher]
             .mesh
-            .publish_verified(verified, &peers, self.scheduler.now_ms())
+            .publish_verified(verified.clone(), &peers, self.scheduler.now_ms())
             .map_err(pubsub_error)?;
         self.observe_core_resource_state(publisher);
-        self.dispatch_actions(publisher, actions)
+        self.dispatch_actions(publisher, actions)?;
+        Ok(verified)
     }
 
     fn apply_reputation_event(
         &mut self,
         node: usize,
-        event: &Event,
+        verified: &VerifiedEvent,
         transported: bool,
     ) -> Result<()> {
+        let event = verified.as_event();
         let Some(metadata) = self.reputation_events.get(&event.id.to_hex()).cloned() else {
             return Ok(());
         };
@@ -279,9 +294,7 @@ impl Simulation {
         });
         let before = peer_projection(&policies, &self.peer_ids[metadata.subject])?;
         let now_secs = virtual_unix_secs(self.scheduler.now_ms());
-        self.record_cpu_work(node, |work| {
-            work.signature_checks = work.signature_checks.saturating_add(1);
-        });
+        self.record_avoided_signature_check(node);
         let Some(reputation) = self.nodes[node].machine_reputation.as_mut() else {
             return Ok(());
         };
@@ -292,7 +305,7 @@ impl Simulation {
                 .saturating_add(1);
         }
         let ingested = reputation
-            .ingest_event_at(event, now_secs)
+            .ingest_verified_event_at(verified, now_secs)
             .map_err(pubsub_error)?;
         self.observe_core_resource_state(node);
         self.record_reputation_ingest(metadata.origin, transported, ingested);

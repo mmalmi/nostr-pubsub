@@ -3,13 +3,14 @@ use super::{
     LinkOutage, MALFORMED_TRAINING_SAMPLES, MeshPeer, NodeRole, OutageCause, Packet,
     PeerSelectionMode, PubsubDeliveryAction, PubsubDeliveryPolicy, PubsubPeerInterest,
     REPUTATION_SWEEP_MS, ReputationEventOrigin, Result, ScheduledAction, Simulation,
-    SimulationError, SourceId, SubscriptionClass, SubscriptionPurpose, TopologyStrategy,
-    TrafficDirection, TrafficProvenance, VerifiedEvent, hash_bytes, is_fresh_sybil,
-    is_quiet_attacker, machine_admitted_class, message_fault_key, message_traffic_provenance,
-    mix64, profile_subscription_id, pubsub_error,
+    SimulationError, SubscriptionClass, SubscriptionPurpose, TopologyStrategy, TrafficDirection,
+    TrafficProvenance, VerifiedEvent, hash_bytes, is_fresh_sybil, is_quiet_attacker,
+    machine_admitted_class, message_fault_key, message_traffic_provenance, mix64,
+    profile_subscription_id, pubsub_error,
 };
 use nostr::{Event, Kind};
-use nostr_social_memory::{RATING_KIND, rating_from_event};
+use nostr_pubsub_social_graph::parse_verified_rating;
+use nostr_social_memory::RATING_KIND;
 
 impl Simulation {
     pub(super) fn schedule_attack_pressure(&mut self) -> Result<()> {
@@ -783,7 +784,8 @@ impl Simulation {
             .map(|metadata| metadata.class);
         let is_rating = self.is_rating_event(source, event);
         let mut peers = Vec::new();
-        for destination in self.topology.neighbors[source].clone() {
+        for index in 0..self.topology.neighbors[source].len() {
+            let destination = self.topology.neighbors[source][index];
             if !self.link_is_active(source, destination) {
                 continue;
             }
@@ -832,19 +834,25 @@ impl Simulation {
         event: &VerifiedEvent,
         is_rating: bool,
     ) -> bool {
-        let peer_id = SourceId::new(&self.peer_ids[destination]);
+        let peer_id = &self.source_ids[destination];
         let remote_candidates = self.nodes[source]
             .wire
             .subscriptions()
-            .peer_filter_count(&peer_id);
+            .peer_filter_count(peer_id);
         let local_filters = if is_rating {
             &self.nodes[destination].rating_filters
         } else {
             &self.nodes[destination].filters
         };
         let local_candidates = local_filters.len();
-        let locally_subscribed = PubsubPeerInterest::from_filters(local_filters, event)
-            == PubsubPeerInterest::Subscribed;
+        let remote_announces = PubsubDeliveryPolicy::inventory_to_subscribers().action_for_event(
+            self.nodes[source].wire.subscriptions(),
+            peer_id,
+            event,
+        ) == PubsubDeliveryAction::AnnounceInventory;
+        let subscribed = remote_announces
+            && PubsubPeerInterest::from_filters(local_filters, event)
+                == PubsubPeerInterest::Subscribed;
         self.record_cpu_work(source, |work| {
             work.filter_queries = work.filter_queries.saturating_add(2);
             work.filter_candidates = work.filter_candidates.saturating_add(
@@ -852,23 +860,16 @@ impl Simulation {
                     .unwrap_or(u64::MAX),
             );
         });
-        PubsubDeliveryPolicy::inventory_to_subscribers().action_for_event(
-            self.nodes[source].wire.subscriptions(),
-            &peer_id,
-            event,
-        ) == PubsubDeliveryAction::AnnounceInventory
-            && locally_subscribed
+        subscribed
     }
 
     fn is_rating_event(&mut self, source: usize, event: &VerifiedEvent) -> bool {
-        let event: &Event = event.as_event();
-        if event.kind != Kind::from(RATING_KIND) || !event.content.is_empty() {
+        let raw: &Event = event.as_event();
+        if raw.kind != Kind::from(RATING_KIND) || !raw.content.is_empty() {
             return false;
         }
-        self.record_cpu_work(source, |work| {
-            work.signature_checks = work.signature_checks.saturating_add(1);
-        });
-        rating_from_event(event).is_ok()
+        self.record_avoided_signature_check(source);
+        parse_verified_rating(event).is_ok()
     }
 
     pub(in crate::simulation) fn candidate_peer(

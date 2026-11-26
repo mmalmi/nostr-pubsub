@@ -37,16 +37,29 @@ impl Simulation {
 
     /// Ends one outage and reports whether the link became usable.
     pub(super) fn end_link_outage(&mut self, outage: LinkOutage) -> bool {
+        let other = match outage.cause {
+            OutageCause::Stochastic => OutageCause::ForcedSupernode,
+            OutageCause::ForcedSupernode => OutageCause::Stochastic,
+        };
         self.down_links.remove(&outage)
-            && !self
-                .down_links
-                .iter()
-                .any(|active| active.link == outage.link)
+            && !self.down_links.contains(&LinkOutage {
+                link: outage.link,
+                cause: other,
+            })
     }
 
     pub(super) fn link_is_active(&self, left: usize, right: usize) -> bool {
+        if self.down_links.is_empty() {
+            return true;
+        }
         let link = link_key(left, right);
-        !self.down_links.iter().any(|outage| outage.link == link)
+        !self.down_links.contains(&LinkOutage {
+            link,
+            cause: OutageCause::Stochastic,
+        }) && !self.down_links.contains(&LinkOutage {
+            link,
+            cause: OutageCause::ForcedSupernode,
+        })
     }
 
     pub(super) fn schedule_retry_if_needed(
@@ -131,6 +144,9 @@ impl Simulation {
     }
 
     pub(super) fn finish_delivery_retries(&mut self, node: usize, event_id: &str) {
+        if self.retry_counts.is_empty() {
+            return;
+        }
         self.retry_counts
             .retain(|(_, destination, candidate), _| *destination != node || candidate != event_id);
     }

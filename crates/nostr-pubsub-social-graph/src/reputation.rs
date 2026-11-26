@@ -11,7 +11,7 @@ use nostr_pubsub::{
 use nostr_social_graph::{Rating, RatingGraphConfig, SocialGraph};
 use nostr_social_memory::{RATING_KIND, rating_from_event};
 
-use crate::{SocialGraphPolicy, SocialGraphPolicyConfig};
+use crate::{SocialGraphPolicy, SocialGraphPolicyConfig, parse_verified_rating};
 
 pub const DEFAULT_PEER_RATING_SCOPE: &str = "fips.peer";
 pub const PEER_RATING_MAX_AGE: Duration = Duration::from_hours(720);
@@ -89,6 +89,7 @@ pub struct PeerReputation {
     scope: String,
     trusted_raters: BTreeSet<String>,
     rating_graph_config: RatingGraphConfig,
+    base_graph: SocialGraph,
     graph: Arc<RwLock<SocialGraph>>,
     latest: BTreeMap<PeerRatingKey, StoredPeerRating>,
     entries_by_rater: BTreeMap<String, usize>,
@@ -158,7 +159,8 @@ impl PeerReputation {
             .iter()
             .map(|rater| parse_pubkey(rater, "trusted peer reputation rater"))
             .collect::<Result<BTreeSet<_>>>()?;
-        let graph = Arc::new(RwLock::new(seeded_graph(&root, &trusted_raters)?));
+        let base_graph = seeded_graph(&root, &trusted_raters)?;
+        let graph = Arc::new(RwLock::new(base_graph.clone()));
         let rating_graph_config = RatingGraphConfig::for_scopes([config.scope.clone()]);
         let policy = Arc::new(SocialGraphPolicy::new(Arc::clone(&graph), config.policy));
         let policies = PeerReputationPolicies {
@@ -171,6 +173,7 @@ impl PeerReputation {
                 scope: config.scope,
                 trusted_raters,
                 rating_graph_config,
+                base_graph,
                 graph,
                 latest: BTreeMap::new(),
                 entries_by_rater: BTreeMap::new(),
@@ -240,6 +243,26 @@ impl PeerReputation {
         Ok(accepted)
     }
 
+    /// Ingests one already-verified rating event using the wall-clock Unix time.
+    pub fn ingest_verified_event(&mut self, event: &VerifiedEvent) -> Result<bool> {
+        self.ingest_verified_event_at(event, now_unix_secs())
+    }
+
+    /// Ingests one already-verified rating event at an explicit Unix timestamp
+    /// without re-verifying its Nostr signature.
+    pub fn ingest_verified_event_at(
+        &mut self,
+        event: &VerifiedEvent,
+        now_secs: u64,
+    ) -> Result<bool> {
+        let pruned = self.prune_memory(now_secs);
+        let (accepted, projection_may_change) = self.consider_verified_event(event, now_secs);
+        if pruned > 0 || projection_may_change {
+            self.rebuild()?;
+        }
+        Ok(accepted)
+    }
+
     /// Replays rating events using the wall-clock Unix time.
     pub fn replay<'a>(&mut self, events: impl IntoIterator<Item = &'a Event>) -> Result<usize> {
         self.replay_at(events, now_unix_secs())
@@ -267,6 +290,27 @@ impl PeerReputation {
         Ok(changed)
     }
 
+    /// Replays already-verified rating events at an explicit Unix timestamp.
+    pub fn replay_verified_at<'a>(
+        &mut self,
+        events: impl IntoIterator<Item = &'a VerifiedEvent>,
+        now_secs: u64,
+    ) -> Result<usize> {
+        let pruned = self.prune_memory(now_secs);
+        let mut changed = 0usize;
+        let mut projection_may_change = false;
+        for event in events {
+            let (accepted, event_may_change_projection) =
+                self.consider_verified_event(event, now_secs);
+            changed += usize::from(accepted);
+            projection_may_change |= event_may_change_projection;
+        }
+        if pruned > 0 || projection_may_change {
+            self.rebuild()?;
+        }
+        Ok(changed)
+    }
+
     /// Removes expired, far-future, and over-budget ratings, then rebuilds the
     /// shared policy projection when anything was forgotten.
     pub fn prune(&mut self, now_secs: u64) -> Result<usize> {
@@ -284,25 +328,45 @@ impl PeerReputation {
         }
         // `rating_from_event` verifies the event ID and signature before
         // parsing, so a second verification here would only duplicate CPU.
-        let Ok(mut rating) = rating_from_event(event) else {
+        let Ok(rating) = rating_from_event(event) else {
             return (false, false);
         };
+        self.consider_parsed_rating(event, rating, now_secs)
+    }
+
+    fn consider_verified_event(&mut self, event: &VerifiedEvent, now_secs: u64) -> (bool, bool) {
+        self.work.rating_events_considered = self.work.rating_events_considered.saturating_add(1);
+        if event.as_event().kind != Kind::Custom(RATING_KIND) {
+            return (false, false);
+        }
+        let Ok(rating) = parse_verified_rating(event) else {
+            return (false, false);
+        };
+        self.consider_parsed_rating(event.as_event(), rating, now_secs)
+    }
+
+    fn consider_parsed_rating(
+        &mut self,
+        event: &Event,
+        mut rating: Rating,
+        now_secs: u64,
+    ) -> (bool, bool) {
         if !rating_time_is_valid(rating.created_at, now_secs) {
             return (false, false);
         }
         if rating.scope.as_deref() != Some(self.scope.as_str()) {
             return (false, false);
         }
-        let Ok(rater) = PublicKey::parse(&rating.rater) else {
-            return (false, false);
-        };
-        if rater != event.pubkey {
+        let event_author = event.pubkey.to_hex();
+        if rating.rater != event_author
+            && PublicKey::parse(&rating.rater).ok() != Some(event.pubkey)
+        {
             return (false, false);
         }
         let Ok(subject) = PublicKey::parse(&rating.subject) else {
             return (false, false);
         };
-        rating.rater = rater.to_hex();
+        rating.rater = event_author;
         rating.subject = subject.to_hex();
         let projection_may_change = self.rater_is_authorized(&rating.rater);
         let key = PeerRatingKey {
@@ -445,16 +509,18 @@ impl PeerReputation {
             .work
             .graph_rebuild_rating_entries
             .saturating_add(u64::try_from(self.latest.len()).unwrap_or(u64::MAX));
-        let mut graph = seeded_graph(&self.root, &self.trusted_raters)?;
+        let mut graph = self.base_graph.clone();
         let ratings = self
             .latest
             .values()
             .filter(|stored| self.rater_is_authorized(&stored.rating.rater))
             .map(|stored| stored.rating.clone())
             .collect::<Vec<_>>();
-        graph
-            .apply_ratings(&ratings, &self.rating_graph_config)
-            .map_err(|error| validation(format!("failed to apply peer ratings: {error}")))?;
+        if !ratings.is_empty() {
+            graph
+                .apply_ratings(&ratings, &self.rating_graph_config)
+                .map_err(|error| validation(format!("failed to apply peer ratings: {error}")))?;
+        }
         *self
             .graph
             .write()
@@ -610,12 +676,71 @@ impl PeerRatingPublisher {
         let Some((candidate, rating)) = self.publication(event) else {
             return false;
         };
+        self.should_publish_candidate(&candidate, rating.sample_count.unwrap_or(0), now_ms)
+    }
+
+    /// Evaluates publication cadence for an already-verified rating event
+    /// without re-verifying its Nostr signature.
+    #[must_use]
+    pub fn should_publish_verified_event(&self, event: &VerifiedEvent, now_ms: u64) -> bool {
+        let Some((candidate, rating)) = self.publication_verified(event) else {
+            return false;
+        };
+        self.should_publish_candidate(&candidate, rating.sample_count.unwrap_or(0), now_ms)
+    }
+
+    /// Evaluates publication cadence before signing a new rating event.
+    ///
+    /// `score` is the normalized `Rating::normalized_score()` value (`-100..=100`).
+    #[must_use]
+    pub fn should_publish_rating(
+        &self,
+        subject: &str,
+        score: i64,
+        sample_count: u64,
+        now_ms: u64,
+    ) -> bool {
+        let Ok(subject) = parse_pubkey(subject, "rating subject") else {
+            return false;
+        };
+        let candidate = RatingPublication {
+            subject,
+            score,
+            class: rating_class(score),
+        };
+        self.should_publish_candidate(&candidate, sample_count, now_ms)
+    }
+
+    pub fn record_published_event(&mut self, event: &Event, now_ms: u64) -> bool {
+        let Some((publication, _)) = self.publication(event) else {
+            return false;
+        };
+        self.record(publication, now_ms);
+        true
+    }
+
+    /// Records a published already-verified rating event without re-verifying
+    /// its Nostr signature.
+    pub fn record_published_verified_event(&mut self, event: &VerifiedEvent, now_ms: u64) -> bool {
+        let Some((publication, _)) = self.publication_verified(event) else {
+            return false;
+        };
+        self.record(publication, now_ms);
+        true
+    }
+
+    fn should_publish_candidate(
+        &self,
+        candidate: &RatingPublication,
+        sample_count: u64,
+        now_ms: u64,
+    ) -> bool {
         let minimum_samples = if candidate.class == PeerRatingClass::Negative {
             self.config.min_negative_samples
         } else {
             self.config.min_non_negative_samples
         };
-        if rating.sample_count.unwrap_or(0) < minimum_samples {
+        if sample_count < minimum_samples {
             return false;
         }
         let Some(previous) = self.published.get(&candidate.subject) else {
@@ -632,14 +757,6 @@ impl PeerRatingPublisher {
                 && (candidate.class != previous.class
                     || candidate.score.abs_diff(previous.score)
                         >= self.config.material_score_delta.cast_unsigned()))
-    }
-
-    pub fn record_published_event(&mut self, event: &Event, now_ms: u64) -> bool {
-        let Some((publication, _)) = self.publication(event) else {
-            return false;
-        };
-        self.record(publication, now_ms);
-        true
     }
 
     /// Forgets publication cadence for peers that have not produced a local
@@ -677,6 +794,19 @@ impl PeerRatingPublisher {
         // The parser verifies the raw event ID and signature. Reuse its result
         // for publication metadata instead of parsing and verifying it again.
         let rating = rating_from_event(event).ok()?;
+        self.publication_from_rating(rating)
+    }
+
+    fn publication_verified(&self, event: &VerifiedEvent) -> Option<(RatingPublication, Rating)> {
+        let raw = event.as_event();
+        if raw.kind != Kind::Custom(RATING_KIND) || raw.pubkey.to_hex() != self.local_root {
+            return None;
+        }
+        let rating = parse_verified_rating(event).ok()?;
+        self.publication_from_rating(rating)
+    }
+
+    fn publication_from_rating(&self, rating: Rating) -> Option<(RatingPublication, Rating)> {
         if rating.scope.as_deref() != Some(self.scope.as_str())
             || parse_pubkey(&rating.rater, "rating rater").ok()? != self.local_root
         {
@@ -684,16 +814,11 @@ impl PeerRatingPublisher {
         }
         let subject = parse_pubkey(&rating.subject, "rating subject").ok()?;
         let score = rating.normalized_score().ok()?;
-        let class = match score.cmp(&0) {
-            std::cmp::Ordering::Less => PeerRatingClass::Negative,
-            std::cmp::Ordering::Equal => PeerRatingClass::Neutral,
-            std::cmp::Ordering::Greater => PeerRatingClass::Positive,
-        };
         Some((
             RatingPublication {
                 subject,
                 score,
-                class,
+                class: rating_class(score),
             },
             rating,
         ))
@@ -708,6 +833,14 @@ impl PeerRatingPublisher {
                 published_at_ms: now_ms,
             },
         );
+    }
+}
+
+fn rating_class(score: i64) -> PeerRatingClass {
+    match score.cmp(&0) {
+        std::cmp::Ordering::Less => PeerRatingClass::Negative,
+        std::cmp::Ordering::Equal => PeerRatingClass::Neutral,
+        std::cmp::Ordering::Greater => PeerRatingClass::Positive,
     }
 }
 

@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
+    io::{self, Write},
     str::FromStr,
 };
 
@@ -381,6 +382,28 @@ fn report_parts(decision: &PolicyDecision) -> (bool, i32, Option<String>) {
     }
 }
 
+pub(crate) fn json_encoded_len<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> std::result::Result<usize, serde_json::Error> {
+    #[derive(Default)]
+    struct ByteCounter(usize);
+
+    impl Write for ByteCounter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
 fn filters_match(filters: &[Filter], event: &Event) -> bool {
     filters.is_empty() || subscription_filters_match(filters, event)
 }
@@ -389,7 +412,29 @@ fn subscription_filters_match(filters: &[Filter], event: &Event) -> bool {
     !filters.is_empty()
         && filters
             .iter()
-            .any(|filter| filter.match_event(event, MatchEventOptions::new()))
+            .any(|filter| filter_matches_event(filter, event))
+}
+
+pub(crate) fn filter_matches_event(filter: &Filter, event: &Event) -> bool {
+    if !filter.match_event(event, MatchEventOptions::new().tags(false)) {
+        return false;
+    }
+    if filter.generic_tags.is_empty() {
+        return true;
+    }
+    if event.tags.is_empty() {
+        return false;
+    }
+    let indexes = event.tags.indexes();
+    filter.generic_tags.iter().all(|(tag_name, wanted)| {
+        indexes.get(tag_name).is_some_and(|present| {
+            if present.len() < wanted.len() {
+                present.iter().any(|value| wanted.contains(value))
+            } else {
+                wanted.iter().any(|value| present.contains(value))
+            }
+        })
+    })
 }
 
 #[cfg(test)]

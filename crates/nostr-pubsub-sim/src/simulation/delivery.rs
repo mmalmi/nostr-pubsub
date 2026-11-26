@@ -53,11 +53,19 @@ impl Simulation {
         receiver: usize,
         actions: Vec<InvWantAction>,
     ) -> Result<()> {
-        let forwarded = forwarded_event_ids(&actions);
+        let forwarded = actions
+            .iter()
+            .any(|action| matches!(action, InvWantAction::Deliver { .. }))
+            .then(|| forwarded_event_ids(&actions));
         for action in actions {
             match action {
                 InvWantAction::Deliver { source_peer, event } => {
-                    self.dispatch_delivery(receiver, &source_peer, &event, &forwarded)?;
+                    self.dispatch_delivery(
+                        receiver,
+                        &source_peer,
+                        &event,
+                        forwarded.as_ref().expect("deliver action computed forwarded set"),
+                    )?;
                 }
                 InvWantAction::Send { peer_id, message } => {
                     let destination = self.peer_index(&peer_id)?;
@@ -95,14 +103,14 @@ impl Simulation {
             )
             .then_some((metadata.payload_bytes, interested))
         });
-        if !self.nodes[receiver].local_events.contains_key(&event_id) {
+        let Some(verified) = self.nodes[receiver].local_events.get(&event_id).cloned() else {
             return Err(SimulationError::Pubsub(format!(
                 "delivered event {event_id} was not retained as verified"
             )));
-        }
+        };
         if self.reputation_events.contains_key(&event_id) {
             self.finish_delivery_retries(receiver, &event_id);
-            return self.receive_reputation_event(receiver, event);
+            return self.receive_reputation_event(receiver, &verified);
         }
 
         let accepted_at_ms = self.scheduler.now_ms();
