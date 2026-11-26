@@ -51,6 +51,10 @@ impl<'de> Deserialize<'de> for InvWantWireMessage {
                 let mut payload_bytes: Option<u32> = None;
                 let mut hop_limit: Option<u8> = None;
                 let mut event: Option<Box<Event>> = None;
+                // The normal encoder puts `type` first. Buffer only variant
+                // fields preceding it, because they may be irrelevant to the
+                // selected variant and must then be ignored regardless of type.
+                let mut pending = Vec::new();
 
                 while let Some(key) = map.next_key::<String>()? {
                     match (kind.as_deref(), key.as_str()) {
@@ -64,22 +68,25 @@ impl<'de> Deserialize<'de> for InvWantWireMessage {
                                 return Err(de::Error::duplicate_field("event_id"));
                             }
                         }
-                        (None | Some("inventory"), "event_kind") => {
+                        (None, "event_kind" | "payload_bytes" | "hop_limit" | "event") => {
+                            pending.push((key, map.next_value::<serde_json::Value>()?));
+                        }
+                        (Some("inventory"), "event_kind") => {
                             if event_kind.replace(map.next_value()?).is_some() {
                                 return Err(de::Error::duplicate_field("event_kind"));
                             }
                         }
-                        (None | Some("inventory"), "payload_bytes") => {
+                        (Some("inventory"), "payload_bytes") => {
                             if payload_bytes.replace(map.next_value()?).is_some() {
                                 return Err(de::Error::duplicate_field("payload_bytes"));
                             }
                         }
-                        (None | Some("inventory"), "hop_limit") => {
+                        (Some("inventory"), "hop_limit") => {
                             if hop_limit.replace(map.next_value()?).is_some() {
                                 return Err(de::Error::duplicate_field("hop_limit"));
                             }
                         }
-                        (None | Some("frame"), "event") => {
+                        (Some("frame"), "event") => {
                             if event.replace(map.next_value()?).is_some() {
                                 return Err(de::Error::duplicate_field("event"));
                             }
@@ -90,10 +97,26 @@ impl<'de> Deserialize<'de> for InvWantWireMessage {
                     }
                 }
 
-                match kind
-                    .as_deref()
-                    .ok_or_else(|| de::Error::missing_field("type"))?
-                {
+                let kind = kind.ok_or_else(|| de::Error::missing_field("type"))?;
+                for (key, value) in pending {
+                    match (kind.as_str(), key.as_str()) {
+                        ("inventory", "event_kind") => {
+                            read_pending(&mut event_kind, value, "event_kind")?;
+                        }
+                        ("inventory", "payload_bytes") => {
+                            read_pending(&mut payload_bytes, value, "payload_bytes")?;
+                        }
+                        ("inventory", "hop_limit") => {
+                            read_pending(&mut hop_limit, value, "hop_limit")?;
+                        }
+                        ("frame", "event") => {
+                            read_pending(&mut event, value, "event")?;
+                        }
+                        _ => {}
+                    }
+                }
+
+                match kind.as_str() {
                     "inventory" => Ok(InvWantWireMessage::Inventory {
                         event_id: event_id.ok_or_else(|| de::Error::missing_field("event_id"))?,
                         event_kind: event_kind
@@ -120,6 +143,18 @@ impl<'de> Deserialize<'de> for InvWantWireMessage {
 
         deserializer.deserialize_map(MessageVisitor)
     }
+}
+
+fn read_pending<T: de::DeserializeOwned, E: de::Error>(
+    slot: &mut Option<T>,
+    value: serde_json::Value,
+    field: &'static str,
+) -> std::result::Result<(), E> {
+    if slot.is_some() {
+        return Err(E::duplicate_field(field));
+    }
+    *slot = Some(serde_json::from_value(value).map_err(E::custom)?);
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -217,6 +252,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn irrelevant_variant_fields_do_not_depend_on_json_key_order() {
+        // Serde's original tagged enum ignores fields belonging to another
+        // variant. Moving the tag must not change the accepted wire messages.
+        for json in [
+            r#"{"type":"want","event_id":"abc","event":"extension"}"#,
+            r#"{"event":"extension","event_id":"abc","type":"want"}"#,
+            r#"{"event_kind":{},"payload_bytes":null,"hop_limit":[],"event_id":"abc","type":"want"}"#,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<InvWantWireMessage>(json).unwrap(),
+                InvWantWireMessage::Want {
+                    event_id: "abc".to_owned()
+                },
+                "{json}",
+            );
+        }
+        for json in [
+            r#"{"type":"frame","event_id":"abc","event":"invalid"}"#,
+            r#"{"event":"invalid","event_id":"abc","type":"frame"}"#,
+            r#"{"event_kind":{},"payload_bytes":1,"hop_limit":1,"event_id":"abc","type":"inventory"}"#,
+            r#"{"event_kind":1,"event_kind":2,"payload_bytes":1,"hop_limit":1,"event_id":"abc","type":"inventory"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<InvWantWireMessage>(json).is_err(),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
     fn streaming_codec_round_trips_and_accepts_reordered_keys() {
         let codec = InvWantCodec::new("nostr.pubsub.test", 1, 64 * 1024);
         let keys = Keys::generate();
@@ -258,12 +323,16 @@ mod tests {
 
         assert!(
             codec
-                .decode(br#"{"protocol":"nostr.pubsub.test","version":1,"message":{"type":"unknown"}}"#)
+                .decode(
+                    br#"{"protocol":"nostr.pubsub.test","version":1,"message":{"type":"unknown"}}"#
+                )
                 .is_err()
         );
         assert!(
             codec
-                .decode(br#"{"protocol":"nostr.pubsub.test","version":1,"message":{"type":"want"}}"#)
+                .decode(
+                    br#"{"protocol":"nostr.pubsub.test","version":1,"message":{"type":"want"}}"#
+                )
                 .is_err()
         );
     }

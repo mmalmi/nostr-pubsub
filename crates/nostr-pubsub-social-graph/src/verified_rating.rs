@@ -4,6 +4,7 @@ use nostr::Kind;
 use nostr_pubsub::{PubsubError, Result, VerifiedEvent};
 use nostr_social_graph::Rating;
 use nostr_social_memory::RATING_KIND;
+use uuid::Uuid;
 
 const SCHEMA_VERSION: &str = "1";
 const TYPE_RATING: &str = "rating";
@@ -183,7 +184,9 @@ fn normalize_predicate(value: &str) -> Result<&str> {
         )));
     }
     if RESERVED_TAGS.contains(&trimmed) {
-        return Err(validation(format!("{trimmed} is a reserved fact event tag")));
+        return Err(validation(format!(
+            "{trimmed} is a reserved fact event tag"
+        )));
     }
     Ok(trimmed)
 }
@@ -219,29 +222,9 @@ fn is_hyphenated_uuid(value: &str) -> bool {
 }
 
 fn parse_record_uuid(value: &str) -> Option<String> {
-    let rest = value
-        .strip_prefix("urn:uuid:")
-        .or_else(|| value.strip_prefix("URN:UUID:"))
-        .unwrap_or(value);
-    let inner = rest
-        .strip_prefix('{')
-        .and_then(|s| s.strip_suffix('}'))
-        .unwrap_or(rest);
-    if is_hyphenated_uuid(inner) {
-        return Some(inner.to_ascii_lowercase());
-    }
-    if is_hex_len(inner, 32) {
-        let lower = inner.to_ascii_lowercase();
-        return Some(format!(
-            "{}-{}-{}-{}-{}",
-            &lower[0..8],
-            &lower[8..12],
-            &lower[12..16],
-            &lower[16..20],
-            &lower[20..32],
-        ));
-    }
-    None
+    // Match the unverified social-memory parser exactly, using the same UUID
+    // dependency instead of accepting extra combinations of wrappers.
+    Uuid::parse_str(value).ok().map(|id| id.to_string())
 }
 
 fn scalar_iter<'a>(
@@ -296,22 +279,28 @@ fn scalar_values(facts: &[(&str, Vec<String>)], predicate: &str) -> Result<Vec<S
 }
 
 fn required_i64(facts: &[(&str, Vec<String>)], predicate: &str) -> Result<i64> {
-    required_scalar(facts, predicate)?
-        .parse()
-        .map_err(|error| validation(format!("invalid i64 social-memory fact {predicate}: {error}")))
+    required_scalar(facts, predicate)?.parse().map_err(|error| {
+        validation(format!(
+            "invalid i64 social-memory fact {predicate}: {error}"
+        ))
+    })
 }
 
 fn required_u64(facts: &[(&str, Vec<String>)], predicate: &str) -> Result<u64> {
-    required_scalar(facts, predicate)?
-        .parse()
-        .map_err(|error| validation(format!("invalid u64 social-memory fact {predicate}: {error}")))
+    required_scalar(facts, predicate)?.parse().map_err(|error| {
+        validation(format!(
+            "invalid u64 social-memory fact {predicate}: {error}"
+        ))
+    })
 }
 
 fn optional_u64(facts: &[(&str, Vec<String>)], predicate: &str) -> Result<Option<u64>> {
     optional_scalar(facts, predicate)?
         .map(|value| {
             value.parse().map_err(|error| {
-                validation(format!("invalid u64 social-memory fact {predicate}: {error}"))
+                validation(format!(
+                    "invalid u64 social-memory fact {predicate}: {error}"
+                ))
             })
         })
         .transpose()
@@ -329,6 +318,52 @@ mod tests {
     use nostr_social_memory::{RATING_KIND, RatingEventExt, rating_from_event};
 
     use super::parse_verified_rating;
+
+    #[test]
+    fn verified_rating_preserves_record_uuid_validation() {
+        let keys = Keys::generate();
+        let rating = Rating::new(
+            keys.public_key().to_hex(),
+            keys.public_key().to_hex(),
+            1,
+            0,
+            2,
+        );
+        let original = rating.to_event(&keys).unwrap();
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let simple = id.replace('-', "");
+        for subject in [
+            id.to_owned(),
+            id.to_uppercase(),
+            simple.clone(),
+            format!("{{{id}}}"),
+            format!("urn:uuid:{id}"),
+            format!("{{{simple}}}"),
+            format!("urn:uuid:{simple}"),
+            format!("urn:uuid:{{{id}}}"),
+            format!("URN:UUID:{id}"),
+        ] {
+            let tags = original.tags.iter().map(|tag| {
+                let mut parts = tag.as_slice().to_vec();
+                if parts.first().is_some_and(|name| name == "i")
+                    && parts.get(2).is_some_and(|marker| marker == "subject")
+                {
+                    parts[1] = subject.clone();
+                }
+                Tag::parse(parts).unwrap()
+            });
+            let event = EventBuilder::new(Kind::from(RATING_KIND), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .unwrap();
+            let verified = VerifiedEvent::try_from(event.clone()).unwrap();
+            assert_eq!(
+                parse_verified_rating(&verified).ok(),
+                rating_from_event(&event).ok(),
+                "record subject: {subject}",
+            );
+        }
+    }
 
     #[test]
     fn parse_verified_rating_matches_rating_from_event_for_valid_and_invalid_events() {
@@ -409,15 +444,9 @@ mod tests {
                 .sign_with_keys(&keys)
                 .unwrap(),
             EventBuilder::new(Kind::from(RATING_KIND), "")
-                .tags(
-                    valid_event
-                        .tags
-                        .iter()
-                        .cloned()
-                        .chain(std::iter::once(
-                            Tag::parse(["e", &"ab".repeat(32), "", "bad"]).unwrap(),
-                        )),
-                )
+                .tags(valid_event.tags.iter().cloned().chain(std::iter::once(
+                    Tag::parse(["e", &"ab".repeat(32), "", "bad"]).unwrap(),
+                )))
                 .sign_with_keys(&keys)
                 .unwrap(),
         ];

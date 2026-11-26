@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "async-trait",
  "nostr",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-social-graph"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "nostr",
@@ -2610,6 +2610,7 @@ dependencies = [
  "nostr-social-memory",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
