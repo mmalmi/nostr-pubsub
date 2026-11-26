@@ -26,7 +26,7 @@ nostr-sdk = "0.44.1"
 nostr-pubsub = { version = "0.1.23", path = "crates/nostr-pubsub" }
 nostr-pubsub-reconcile = { version = "0.1.4", path = "crates/nostr-pubsub-reconcile" }
 nostr-pubsub-social-graph = { version = "0.3.2", path = "crates/nostr-pubsub-social-graph" }
-nostr-social-graph = "0.2.1"
+nostr-social-graph = "0.2.4"
 nostr-social-memory = "0.2.1"
 nostr-social-graph-hashtree = "0.2.0"
 serde = { version = "1", features = ["derive"] }
