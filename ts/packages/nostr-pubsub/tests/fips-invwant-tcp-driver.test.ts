@@ -184,6 +184,20 @@ describe('reliable Inv/WANT TCP/FIPS driver', () => {
       await driver.dispose();
     }
   });
+
+  it('coalesces queued small records into bounded TCP writes during multi-event replay', async () => {
+    const pair = driverPair();
+    try {
+      const events = Array.from({ length: 32 }, (_, i) => signedEvent(`burst-${i}`, i + 10));
+      for (const event of events) pair.alice.seed(event, 1);
+      await pair.alice.connectPeer('bob', 2);
+      const outcome = await pump(pair, 3, (state) => state.bobIds.size === events.length);
+      expect(outcome.bobIds.size).toBe(events.length);
+      expect(outcome.bobDatagrams).toBeLessThan(events.length * 2);
+    } finally {
+      await pair.dispose();
+    }
+  });
 });
 
 interface DriverPair {
@@ -256,6 +270,8 @@ interface PumpOutcome {
   bobConnected: number;
   aliceStreamBytes: number;
   bobStreamBytes: number;
+  aliceDatagrams: number;
+  bobDatagrams: number;
   aliceIds: Set<string>;
   bobIds: Set<string>;
 }
@@ -270,6 +286,8 @@ async function pump(
     bobConnected: 0,
     aliceStreamBytes: 0,
     bobStreamBytes: 0,
+    aliceDatagrams: 0,
+    bobDatagrams: 0,
     aliceIds: new Set(),
     bobIds: new Set(),
   };
@@ -295,6 +313,7 @@ function merge(
 ): void {
   outcome[`${side}Connected`] = report.connectedPeers;
   outcome[`${side}StreamBytes`] += report.streamBytesRead;
+  outcome[`${side}Datagrams`] += report.fipsDatagrams;
   for (const delivery of report.deliveries) outcome[`${side}Ids`].add(delivery.event.id);
 }
 

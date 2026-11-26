@@ -2,7 +2,7 @@ import type { NostrEvent, NostrFilter, QueryOptions } from './types.js';
 import type { RuntimeEventStore, RuntimeOutboxEntry } from './runtime-types.js';
 export declare function selectStoredEvents(events: Iterable<NostrEvent>, filters: NostrFilter[], options?: QueryOptions): NostrEvent[];
 export declare function eventOrder(a: NostrEvent, b: NostrEvent): number;
-export declare function expired(event: NostrEvent): boolean;
+export declare function expired(event: NostrEvent, nowSeconds?: number): boolean;
 export declare function abortError(reason?: unknown): DOMException;
 export declare function replacementFilter(event: NostrEvent): NostrFilter | undefined;
 export declare function eventAddress(event: NostrEvent): string | undefined;
@@ -15,18 +15,21 @@ export declare class MemoryEventStore implements RuntimeEventStore {
     readonly maxEvents: number;
     readonly maxPending: number;
     private readonly events;
-    /** The stored events in `eventOrder`, kept current so a query need not sort the store; rebuilt when unset. */
-    private ordered?;
+    private readonly index;
+    /** Non-empty blocks kept in `eventOrder` so live inserts and evictions avoid full-store shifts. */
+    private blocks;
     private readonly pending;
     private pendingScopeCount;
     constructor(maxEvents?: number, maxPending?: number);
     query(filters: NostrFilter[], options?: QueryOptions): Promise<NostrEvent[]>;
     put(event: NostrEvent): Promise<void>;
     delete(ids: string[]): Promise<void>;
-    private sorted;
+    private queryFilter;
+    private selectCandidates;
+    private oldestEvictable;
     private remove;
-    /** Swap or drop one stored object in place; false when the order no longer holds it where expected. */
-    private replaceOrdered;
+    private findBlock;
+    private insertBlock;
     updatePending(id: string, update: (row: RuntimeOutboxEntry | undefined) => RuntimeOutboxEntry | undefined): Promise<void>;
     listPending(): Promise<RuntimeOutboxEntry[]>;
     putPending(entry: RuntimeOutboxEntry): Promise<void>;

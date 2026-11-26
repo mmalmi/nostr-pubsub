@@ -1,5 +1,5 @@
 import type { SubCloser } from 'nostr-tools/abstract-pool';
-import { type NostrEvent, type NostrFilter, type QueryOptions } from './types.js';
+import { type NostrEvent, type NostrEventVerifier, type NostrFilter, type QueryOptions } from './types.js';
 import type { NostrRuntimeOptions, RuntimeQueryResult, RuntimeRelayStats } from './runtime-types.js';
 type Scope = {
     relays?: readonly string[];
@@ -46,7 +46,7 @@ export declare class RuntimeRelays {
     private serial;
     private readonly maxFilters;
     private readonly maxBytes;
-    constructor(options: NostrRuntimeOptions);
+    constructor(options: NostrRuntimeOptions, verifier?: NostrEventVerifier);
     urls(): readonly string[];
     stats(): RuntimeRelayStats[];
     count(): number;
@@ -69,5 +69,7 @@ export declare class RuntimeRelays {
     private closeBatch;
 }
 export declare function filterKey(filter: NostrFilter): string;
+/** Bound duplicate verification work without trusting event IDs or public verified markers. */
+export declare function boundedVerifier(verify: (event: NostrEvent) => boolean): (event: NostrEvent) => boolean;
 export {};
 //# sourceMappingURL=runtime-relays.d.ts.map

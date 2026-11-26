@@ -151,3 +151,30 @@ it('waits for cache replay when all selected sources finish in the grace period'
     expect(await result).toMatchObject({ events: [cached], complete: true });
   } finally { gate.resolve(); await runtime.close(); }
 });
+
+it('waits for slow local cache replay when settle completes while another source is still pending', async () => {
+  const cached = note(9);
+  const gate = Promise.withResolvers<void>();
+  const store = new MemoryEventStore();
+  vi.spyOn(store, 'query').mockImplementation(async () => { await gate.promise; return [cached]; });
+  const stalled: RuntimeSource = {
+    id: 'slow-relay',
+    query: (_filters, options) => new Promise(resolve => {
+      options?.signal?.addEventListener('abort', () => resolve({ events: [], complete: false }), { once: true });
+    }),
+  };
+  const runtime = createNostrRuntime({
+    store,
+    sources: [{ id: source.id, query: async () => ({ events: [], complete: true }) }, stalled],
+  });
+  try {
+    const result = runtime.query([{ kinds: [1] }], {
+      settle: { sources: 1, graceMs: 0 },
+      persist: 'background',
+      deadline: Date.now() + 30 * 86400_000,
+    });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    gate.resolve();
+    expect(await result).toMatchObject({ events: [cached], complete: false, reason: 'eose' });
+  } finally { gate.resolve(); await runtime.close(); }
+});

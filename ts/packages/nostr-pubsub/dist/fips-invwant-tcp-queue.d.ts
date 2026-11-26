@@ -13,7 +13,7 @@ export declare class InvWantRecordQueues {
     accept(peerId: string, bytes: number): void;
     has(peerId: string): boolean;
     delete(peerId: string): void;
-    restart(peerId: string): void;
     clear(): void;
+    restart(peerId: string): void;
 }
 //# sourceMappingURL=fips-invwant-tcp-queue.d.ts.map

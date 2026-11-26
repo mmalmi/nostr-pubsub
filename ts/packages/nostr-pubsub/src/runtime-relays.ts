@@ -3,7 +3,7 @@ import type { SubCloser } from 'nostr-tools/abstract-pool';
 import { verifyEvent } from 'nostr-tools/pure';
 import { matchFilter, matchFilters } from 'nostr-tools/filter';
 import { createSimplePoolNostrRelayVerificationBoundary } from './simple-pool-relay-transport.js';
-import { verifyNostrEvent, validateQueryOptions, type NostrEvent, type NostrFilter, type NostrVerifiedEvent, type QueryOptions } from './types.js';
+import { verifyNostrEvent, validateQueryOptions, type NostrEvent, type NostrEventVerifier, type NostrFilter, type NostrVerifiedEvent, type QueryOptions } from './types.js';
 import type { NostrRuntimeOptions, RuntimeQueryResult, RuntimeRelayStats } from './runtime-types.js';
 import { RuntimeReconciliation } from './runtime-reconciliation.js';
 import { abortError, expired, selectStoredEvents } from './runtime-store.js';
@@ -14,6 +14,7 @@ type Link = { generation: number; close?: () => void; timer?: ReturnType<typeof 
 type Batch = { entries: Entry[]; links: Map<string, Link>; closed: boolean; reopenTimer?: ReturnType<typeof setTimeout> };
 const MAX_TRANSIENT_RESULTS = 256;
 const MAX_TIMER_MS = 2_147_483_647;
+const utf8Encoder = new TextEncoder();
 
 /** Batches OR filters without merging their fields, preserving recipient/author intersections. */
 export class RuntimeRelays {
@@ -29,9 +30,9 @@ export class RuntimeRelays {
   private serial = 0;
   private readonly maxFilters: number;
   private readonly maxBytes: number;
-  constructor(private readonly options: NostrRuntimeOptions) {
+  constructor(private readonly options: NostrRuntimeOptions, verifier?: NostrEventVerifier) {
     if (options.reconciliation && options.store) this.reconciliation = new RuntimeReconciliation(options.reconciliation, options.store);
-    this.boundary = createSimplePoolNostrRelayVerificationBoundary(boundedVerifier(options.verifyEvent ?? verifyEvent));
+    this.boundary = createSimplePoolNostrRelayVerificationBoundary(verifier ?? boundedVerifier(options.verifyEvent ?? verifyEvent));
     this.relays = normalizeRelays(options.relays ?? []);
     this.maxFilters = positive(options.maxFiltersPerBatch, 20);
     this.maxBytes = positive(options.maxFilterBytesPerBatch, 32768);
@@ -98,7 +99,7 @@ export class RuntimeRelays {
   }
   subscribe(filters: NostrFilter[], event: Entry['event'], state: Entry['state'], { relays, isolated = false, transient = false }: Scope = {}): SubCloser {
     if (this.stopped) throw new Error('Nostr runtime is closed');
-    if (filters.length > this.maxFilters || bytes(filters) > this.maxBytes) throw new RangeError('Nostr subscription exceeds filter batch bounds');
+    if (filters.length > this.maxFilters || jsonBytes(filters) > this.maxBytes) throw new RangeError('Nostr subscription exceeds filter batch bounds');
     const entry: Entry = { isolated, transient, relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
     this.pending.push(entry);
     if (!this.timer) this.timer = setTimeout(() => this.flush(), this.options.batchWindowMs ?? 10);
@@ -108,9 +109,10 @@ export class RuntimeRelays {
       const batch = entry.batch;
       if (!batch) return;
       if (batch.entries.every((entry) => entry.closed)) { this.closeBatch(batch); return; }
-      // UI unsubscriptions arrive as separate worker tasks. A microtask cannot
-      // coalesce them, and reopening after each removal creates a REQ storm.
-      if (!batch.reopenTimer) batch.reopenTimer = setTimeout(() => {
+      // UI unsubscriptions arrive as separate worker tasks. Debounce teardown
+      // within the batch window so mid-burst closes do not cause a REQ storm.
+      if (batch.reopenTimer) clearTimeout(batch.reopenTimer);
+      batch.reopenTimer = setTimeout(() => {
         batch.reopenTimer = undefined;
         if (!batch.closed) this.reopen(batch);
       }, this.options.batchWindowMs ?? 10);
@@ -155,15 +157,26 @@ export class RuntimeRelays {
     this.timer = undefined;
     const entries = this.pending.filter((entry) => !entry.closed);
     this.pending = [];
-    let group: Entry[] = [];
+    const groups = new Map<string, { entries: Entry[]; keys: Set<string>; bytes: number }>();
     for (const entry of entries) {
-      const candidate = uniqueFilters([...group, entry]);
-      if (group.length && (entry.isolated || group[0].isolated || JSON.stringify(group[0]!.relays) !== JSON.stringify(entry.relays) || candidate.length > this.maxFilters || bytes(candidate) > this.maxBytes)) {
-        this.startBatch(group); group = [];
+      if (entry.isolated) { this.startBatch([entry]); continue; }
+      const scope = entry.relays === undefined ? '' : JSON.stringify([...entry.relays].sort());
+      let group = groups.get(scope) ?? { entries: [], keys: new Set<string>(), bytes: 2 };
+      const encoded = new Map(entry.filters.map((filter) => [filterKey(filter), jsonBytes(filter)]));
+      let nextBytes = group.bytes, count = group.keys.size;
+      for (const [key, size] of encoded) if (!group.keys.has(key)) { nextBytes += size + (count > 0 ? 1 : 0); count++; }
+      if (group.entries.length && (count > this.maxFilters || nextBytes > this.maxBytes)) {
+        this.startBatch(group.entries);
+        group = { entries: [], keys: new Set(), bytes: 2 };
       }
-      group.push(entry);
+      for (const [key, size] of encoded) if (!group.keys.has(key)) {
+        group.bytes += size + (group.keys.size ? 1 : 0);
+        group.keys.add(key);
+      }
+      group.entries.push(entry);
+      groups.set(scope, group);
     }
-    if (group.length) this.startBatch(group);
+    for (const group of groups.values()) this.startBatch(group.entries);
   }
   private startBatch(entries: Entry[]): void {
     const batch: Batch = { entries, links: new Map(), closed: false };
@@ -215,7 +228,7 @@ export class RuntimeRelays {
         onevent: deliver,
         oneose: () => {
           if (!current()) return;
-          link.eosed = true; link.attempts = 0;
+          link.eosed = true; link.attempts = 0; link.authenticating = false;
           for (const entry of batch.entries) if (!entry.closed) entry.state(url, true);
         },
         onclose: (reason) => {
@@ -246,7 +259,7 @@ export class RuntimeRelays {
     for (const entry of batch.entries) if (!entry.closed) entry.state(url, false, reason);
     if (batch.closed) return;
     const delay = Math.min(30000, (this.options.reconnectDelayMs ?? 500) * 2 ** Math.min(link.attempts++, 6));
-    link.timer = setTimeout(() => { link.timer = undefined; void this.connect(batch, url, link); }, delay);
+    link.timer = setTimeout(() => { link.timer = undefined; link.authenticating = false; void this.connect(batch, url, link); }, delay);
   }
   private closeLink(link: Link): void {
     link.generation++;
@@ -270,7 +283,7 @@ function uniqueFilters(entries: Entry[]): NostrFilter[] {
 export function filterKey(filter: NostrFilter): string {
   return JSON.stringify(Object.fromEntries(Object.entries(filter).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b))));
 }
-function bytes(filters: NostrFilter[]): number { return new TextEncoder().encode(JSON.stringify(filters)).byteLength; }
+function jsonBytes(value: unknown): number { return utf8Encoder.encode(JSON.stringify(value)).byteLength; }
 function positive(value: number | undefined, fallback: number): number {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result < 1) throw new RangeError('Invalid runtime bounds');
@@ -286,12 +299,12 @@ function normalizeRelays(urls: readonly string[]): string[] {
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 /** Bound duplicate verification work without trusting event IDs or public verified markers. */
-function boundedVerifier(verify: (event: NostrEvent) => boolean): (event: NostrEvent) => boolean {
+export function boundedVerifier(verify: (event: NostrEvent) => boolean): (event: NostrEvent) => boolean {
   const known = new Map<string, string>();
   let retainedBytes = 0;
   return (event) => {
     const key = JSON.stringify([event.id, event.pubkey, event.sig, event.kind, event.created_at, event.tags, event.content]);
-    if (known.get(event.id) === key) return true;
+    if (known.get(event.id) === key) { known.delete(event.id); known.set(event.id, key); return true; }
     if (!verify(event)) return false;
     const previous = known.get(event.id);
     if (previous) retainedBytes -= previous.length * 2;

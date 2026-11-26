@@ -7,6 +7,7 @@ import { RuntimeReconciliation } from './runtime-reconciliation.js';
 import { abortError, expired, selectStoredEvents } from './runtime-store.js';
 const MAX_TRANSIENT_RESULTS = 256;
 const MAX_TIMER_MS = 2_147_483_647;
+const utf8Encoder = new TextEncoder();
 /** Batches OR filters without merging their fields, preserving recipient/author intersections. */
 export class RuntimeRelays {
     options;
@@ -22,11 +23,11 @@ export class RuntimeRelays {
     serial = 0;
     maxFilters;
     maxBytes;
-    constructor(options) {
+    constructor(options, verifier) {
         this.options = options;
         if (options.reconciliation && options.store)
             this.reconciliation = new RuntimeReconciliation(options.reconciliation, options.store);
-        this.boundary = createSimplePoolNostrRelayVerificationBoundary(boundedVerifier(options.verifyEvent ?? verifyEvent));
+        this.boundary = createSimplePoolNostrRelayVerificationBoundary(verifier ?? boundedVerifier(options.verifyEvent ?? verifyEvent));
         this.relays = normalizeRelays(options.relays ?? []);
         this.maxFilters = positive(options.maxFiltersPerBatch, 20);
         this.maxBytes = positive(options.maxFilterBytesPerBatch, 32768);
@@ -99,7 +100,7 @@ export class RuntimeRelays {
     subscribe(filters, event, state, { relays, isolated = false, transient = false } = {}) {
         if (this.stopped)
             throw new Error('Nostr runtime is closed');
-        if (filters.length > this.maxFilters || bytes(filters) > this.maxBytes)
+        if (filters.length > this.maxFilters || jsonBytes(filters) > this.maxBytes)
             throw new RangeError('Nostr subscription exceeds filter batch bounds');
         const entry = { isolated, transient, relays: relays === undefined ? undefined : normalizeRelays(relays), filters: structuredClone(filters), event, state, closed: false };
         this.pending.push(entry);
@@ -116,14 +117,15 @@ export class RuntimeRelays {
                     this.closeBatch(batch);
                     return;
                 }
-                // UI unsubscriptions arrive as separate worker tasks. A microtask cannot
-                // coalesce them, and reopening after each removal creates a REQ storm.
-                if (!batch.reopenTimer)
-                    batch.reopenTimer = setTimeout(() => {
-                        batch.reopenTimer = undefined;
-                        if (!batch.closed)
-                            this.reopen(batch);
-                    }, this.options.batchWindowMs ?? 10);
+                // UI unsubscriptions arrive as separate worker tasks. Debounce teardown
+                // within the batch window so mid-burst closes do not cause a REQ storm.
+                if (batch.reopenTimer)
+                    clearTimeout(batch.reopenTimer);
+                batch.reopenTimer = setTimeout(() => {
+                    batch.reopenTimer = undefined;
+                    if (!batch.closed)
+                        this.reopen(batch);
+                }, this.options.batchWindowMs ?? 10);
             } };
     }
     setRelays(urls) {
@@ -173,17 +175,35 @@ export class RuntimeRelays {
         this.timer = undefined;
         const entries = this.pending.filter((entry) => !entry.closed);
         this.pending = [];
-        let group = [];
+        const groups = new Map();
         for (const entry of entries) {
-            const candidate = uniqueFilters([...group, entry]);
-            if (group.length && (entry.isolated || group[0].isolated || JSON.stringify(group[0].relays) !== JSON.stringify(entry.relays) || candidate.length > this.maxFilters || bytes(candidate) > this.maxBytes)) {
-                this.startBatch(group);
-                group = [];
+            if (entry.isolated) {
+                this.startBatch([entry]);
+                continue;
             }
-            group.push(entry);
+            const scope = entry.relays === undefined ? '' : JSON.stringify([...entry.relays].sort());
+            let group = groups.get(scope) ?? { entries: [], keys: new Set(), bytes: 2 };
+            const encoded = new Map(entry.filters.map((filter) => [filterKey(filter), jsonBytes(filter)]));
+            let nextBytes = group.bytes, count = group.keys.size;
+            for (const [key, size] of encoded)
+                if (!group.keys.has(key)) {
+                    nextBytes += size + (count > 0 ? 1 : 0);
+                    count++;
+                }
+            if (group.entries.length && (count > this.maxFilters || nextBytes > this.maxBytes)) {
+                this.startBatch(group.entries);
+                group = { entries: [], keys: new Set(), bytes: 2 };
+            }
+            for (const [key, size] of encoded)
+                if (!group.keys.has(key)) {
+                    group.bytes += size + (group.keys.size ? 1 : 0);
+                    group.keys.add(key);
+                }
+            group.entries.push(entry);
+            groups.set(scope, group);
         }
-        if (group.length)
-            this.startBatch(group);
+        for (const group of groups.values())
+            this.startBatch(group.entries);
     }
     startBatch(entries) {
         const batch = { entries, links: new Map(), closed: false };
@@ -249,6 +269,7 @@ export class RuntimeRelays {
                         return;
                     link.eosed = true;
                     link.attempts = 0;
+                    link.authenticating = false;
                     for (const entry of batch.entries)
                         if (!entry.closed)
                             entry.state(url, true);
@@ -294,7 +315,7 @@ export class RuntimeRelays {
         if (batch.closed)
             return;
         const delay = Math.min(30000, (this.options.reconnectDelayMs ?? 500) * 2 ** Math.min(link.attempts++, 6));
-        link.timer = setTimeout(() => { link.timer = undefined; void this.connect(batch, url, link); }, delay);
+        link.timer = setTimeout(() => { link.timer = undefined; link.authenticating = false; void this.connect(batch, url, link); }, delay);
     }
     closeLink(link) {
         link.generation++;
@@ -327,7 +348,7 @@ function uniqueFilters(entries) {
 export function filterKey(filter) {
     return JSON.stringify(Object.fromEntries(Object.entries(filter).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b))));
 }
-function bytes(filters) { return new TextEncoder().encode(JSON.stringify(filters)).byteLength; }
+function jsonBytes(value) { return utf8Encoder.encode(JSON.stringify(value)).byteLength; }
 function positive(value, fallback) {
     const result = value ?? fallback;
     if (!Number.isSafeInteger(result) || result < 1)
@@ -344,13 +365,16 @@ function normalizeRelays(urls) {
 }
 function errorText(error) { return error instanceof Error ? error.message : String(error); }
 /** Bound duplicate verification work without trusting event IDs or public verified markers. */
-function boundedVerifier(verify) {
+export function boundedVerifier(verify) {
     const known = new Map();
     let retainedBytes = 0;
     return (event) => {
         const key = JSON.stringify([event.id, event.pubkey, event.sig, event.kind, event.created_at, event.tags, event.content]);
-        if (known.get(event.id) === key)
+        if (known.get(event.id) === key) {
+            known.delete(event.id);
+            known.set(event.id, key);
             return true;
+        }
         if (!verify(event))
             return false;
         const previous = known.get(event.id);

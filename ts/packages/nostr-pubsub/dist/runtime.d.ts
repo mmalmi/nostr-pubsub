@@ -4,6 +4,7 @@ import type { NostrRuntimeOptions, RuntimeEventStore, RuntimeMetrics, RuntimePub
 export declare class NostrRuntime {
     private readonly options;
     readonly store: RuntimeEventStore;
+    private readonly verifier;
     private readonly relays;
     private readonly sources;
     private readonly listeners;

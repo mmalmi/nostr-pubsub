@@ -70,6 +70,62 @@ describe('MemoryEventStore', () => {
       expect(await store.query([{}], { limit: 2 })).toEqual(selectStoredEvents(reference.values(), [{}], { limit: 2 }));
     }
   });
+
+  it('matches a reference scan across multi-block splits, indexed lookups and edge filters', async () => {
+    const next = sequence(42);
+    const capacity = 600;
+    const store = new MemoryEventStore(capacity);
+    const reference = new Map<string, NostrEvent>();
+    const authors = Array.from({ length: 12 }, (_, i) => i.toString(16).padStart(64, 'b'));
+    const mk = (index: number, kind: number, time: number, expiration?: number): NostrEvent => ({
+      id: index.toString(16).padStart(64, '0'),
+      pubkey: authors[index % authors.length]!,
+      kind,
+      created_at: time,
+      content: `block-${index}`,
+      tags: [...(expiration !== undefined ? [['expiration', String(expiration)]] : []), ['p', authors[(index + 1) % authors.length]!]],
+      sig: '0'.repeat(128),
+    });
+
+    for (let step = 0; step < 900; step++) {
+      const index = next(800);
+      const kind = [0, 1, 1, 1, 5, 30078][next(6)]!;
+      const ev = mk(index, kind, next(40), next(15) === 0 ? 1 : undefined);
+      if (!reference.has(ev.id) && reference.size >= capacity) {
+        const removable = [...reference.values()].filter((e) => e.kind !== 5).sort(eventOrder).pop();
+        if (removable) reference.delete(removable.id);
+      }
+      reference.set(ev.id, ev);
+      await store.put(ev);
+      if (step % 7 === 0) {
+        const dropId = mk(next(800), 1, 0).id;
+        reference.delete(dropId);
+        await store.delete([dropId]);
+      }
+    }
+
+    const ids = [...reference.keys()].slice(0, 6);
+    const queries: NostrFilter[][] = [
+      [{ ids: [ids[0]!, ids[0]!, ids[2]!, 'f'.repeat(64)] }],
+      [{ ids: [ids[0]!, ids[1]!, ids[2]!], limit: 2 }],
+      [{ ids: [] }],
+      [{ kinds: [] }],
+      [{ authors: [] }],
+      [{ kinds: [1], limit: 0 }],
+      [{ kinds: [0], authors: authors.slice(0, 4) }],
+      [{ authors: [authors[0]!, authors[0]!, authors[1]!], kinds: [1], limit: 15 }],
+      [{ authors: [authors[2]!] }],
+      [{ kinds: [5] }],
+      [{ kinds: [1], since: 0, until: 0 }],
+      [{ kinds: [1], since: 10, until: 25, limit: 30 }],
+      [{ kinds: [1], '#p': [authors[3]!], limit: 10 }],
+      [{ kinds: [0], authors: [authors[0]!] }, { kinds: [30078], limit: 5 }],
+    ];
+    for (const filters of queries) {
+      expect(await store.query(filters), JSON.stringify(filters)).toEqual(selectStoredEvents(reference.values(), filters));
+    }
+    expect(await store.query([{ kinds: [1] }], { limit: 25 })).toEqual(selectStoredEvents(reference.values(), [{ kinds: [1] }], { limit: 25 }));
+  });
 });
 
 describe('compareUtf8', () => {

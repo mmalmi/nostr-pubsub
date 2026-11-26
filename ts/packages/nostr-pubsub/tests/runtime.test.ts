@@ -294,6 +294,75 @@ describe('Nostr runtime over real relay sockets', () => {
     expect(server.authEvents[0]?.tags).toContainEqual(['relay', url]);
     expect(server.authEvents[0]?.tags).toContainEqual(['challenge', 'runtime-test-challenge']);
   });
+  it('re-authenticates live subscriptions after an authenticated relay disconnects and reconnects', async () => {
+    const server = await relay(); server.requireAuth = true;
+    const url = await server.url();
+    const client = runtime({ relays: [url], signAuthEvent: async (_, template) => finalizeEvent(template, secret) });
+    const received: string[] = []; let eosed = false;
+    client.subscribe([{ kinds: [1] }], { onEvent: (e) => received.push(e.id), onEose: () => { eosed = true; } }, { cache: 'network-only' });
+    await until(() => eosed);
+    const before = event('before disconnect', 1, 200);
+    server.emit(before);
+    await until(() => received.includes(before.id));
+    server.disconnect();
+    await until(() => server.authEvents.length >= 2);
+    const after = event('after disconnect', 1, 201);
+    server.emit(after);
+    await until(() => received.includes(after.id));
+    expect(received).toEqual([before.id, after.id]);
+  });
+  it('packs interleaved default and scoped relay queries without fragmenting batches', async () => {
+    const primary = await relay(); const secondary = await relay();
+    const primaryUrl = await primary.url(); const secondaryUrl = await secondary.url();
+    const client = runtime({ relays: [primaryUrl], batchWindowMs: 10 });
+    const primaryEvents = Array.from({ length: 10 }, (_, i) => event(`p-${i}`, 1, 100 + i, [['p', `default-${i}`]]));
+    const secondaryEvents = Array.from({ length: 10 }, (_, i) => event(`s-${i}`, 1, 200 + i, [['p', `scoped-${i}`]]));
+    primary.events.push(...primaryEvents); secondary.events.push(...secondaryEvents);
+    const queries = primaryEvents.flatMap((pe, i) => [
+      client.query([{ kinds: [1], '#p': [`default-${i}`] }], { cache: 'network-only' }),
+      client.query([{ kinds: [1], '#p': [`scoped-${i}`] }], { cache: 'network-only', relays: [secondaryUrl] }),
+    ]);
+    queries.push(client.query([{ kinds: [1], '#p': ['default-0'] }], { cache: 'network-only', isolated: true }));
+    const results = await Promise.all(queries);
+    expect(results.every((r) => r.complete)).toBe(true);
+    expect(primary.requests).toHaveLength(2); // 1 shared batch + 1 isolated query
+    expect(secondary.requests).toHaveLength(1);
+    expect(results[0]!.events.map((e) => e.id)).toEqual([primaryEvents[0]!.id]);
+    expect(results[1]!.events.map((e) => e.id)).toEqual([secondaryEvents[0]!.id]);
+  });
+  it('reuses signature admission across cache and durable source reads while still rejecting tampered rows', async () => {
+    let verifications = 0;
+    const notes = [event('cached-1', 1, 100), event('cached-2', 1, 101)];
+    const durable = event('durable-1', 1, 102);
+    let tamperDurable = false;
+    const client = runtime({
+      relays: [],
+      verifyEvent: (candidate) => { verifications++; return verifyEvent(candidate); },
+      sources: [{
+        id: 'index', durable: true,
+        query: async () => ({
+          events: [{ event: tamperDurable ? { ...durable, content: 'tampered' } : durable, source: { id: 'index', kind: 'local-index' }, priority: 0 }],
+          complete: true,
+        }),
+      }],
+    });
+    for (const note of notes) await client.ingest(note);
+    expect(verifications).toBe(2);
+    const cacheOnly = await client.query([{ kinds: [1] }], { cache: 'cache-only' });
+    expect(cacheOnly.events.map((e) => e.id).sort()).toEqual(notes.map((e) => e.id).sort());
+    expect(verifications).toBe(2);
+    const firstMixed = await client.query([{ kinds: [1] }], { persist: 'background' });
+    expect(firstMixed.events).toHaveLength(3);
+    expect(verifications).toBe(3);
+    const secondMixed = await client.query([{ kinds: [1] }], { persist: 'background' });
+    expect(secondMixed.events).toHaveLength(3);
+    expect(verifications).toBe(3);
+    tamperDurable = true;
+    const tampered = await client.query([{ kinds: [1] }], { persist: 'background' });
+    expect(tampered.complete).toBe(false);
+    expect(tampered.events.map((e) => e.id).sort()).toEqual(notes.map((e) => e.id).sort());
+    expect(verifications).toBe(4);
+  });
   it('reuses signature admission across overlapping relay batches and rejects mutated duplicates', async () => {
     const server = await relay(); let verifications = 0;
     const client = runtime({ relays: [await server.url()], maxFiltersPerBatch: 1,

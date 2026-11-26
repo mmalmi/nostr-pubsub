@@ -1,22 +1,25 @@
 import { pendingPublications, publicationOptions, updatePublicationScope } from './runtime-outbox.js';
 import { RelayRateLimitError } from './relay-rate-limit.js';
 import { matchFilters } from 'nostr-tools/filter';
-import { verifyNostrEvent, validateQueryOptions, type NostrEvent, type NostrFilter, type NostrVerifiedEvent, type QueryOptions } from './types.js';
+import { verifyEvent } from 'nostr-tools/pure';
+import { verifyNostrEvent, validateQueryOptions, type NostrEvent, type NostrEventVerifier, type NostrFilter, type NostrVerifiedEvent, type QueryOptions } from './types.js';
 import { localIndexSource } from './source.js';
 import { MemoryEventStore, abortError, expired, selectStoredEvents, admitRuntimeEvent } from './runtime-store.js';
 import { RuntimeInterests } from './runtime-interests.js';
-import { RuntimeRelays } from './runtime-relays.js';
+import { RuntimeRelays, boundedVerifier } from './runtime-relays.js';
 import type {
   NostrRuntimeOptions, RuntimeCompletion, RuntimeEventInfo, RuntimeEventStore, RuntimeMetrics,
   RuntimePublishOptions, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeSource,
   RuntimeSubscribeOptions, RuntimeSubscription, RuntimeSubscriptionHandlers,
 } from './runtime-types.js';
 
+const MAX_TIMER_MS = 2_147_483_647;
+
 type Listener = {
   filters: NostrFilter[]; handlers: RuntimeSubscriptionHandlers; options: RuntimeSubscribeOptions;
   seen: Set<string>; closers: Map<string, () => void>; statuses: Map<string, { complete: boolean; error?: string }>;
   pending: Set<string>; timer?: ReturnType<typeof setTimeout>; settleTimer?: ReturnType<typeof setTimeout>;
-  stopped: boolean; notified: boolean; remainingIds?: Set<string>; replayed: boolean;
+  stopped: boolean; notified: boolean; remainingIds?: Set<string>; replayed: boolean; settled?: boolean;
   scopedRelays?: readonly string[];
   controller: AbortController; abort?: () => void; admissionError?: string;
 };
@@ -24,6 +27,7 @@ type Listener = {
 /** One signer-neutral owner of relay connections, live interests, local events and an outbox. */
 export class NostrRuntime {
   readonly store: RuntimeEventStore;
+  private readonly verifier: NostrEventVerifier;
   private readonly relays: RuntimeRelays;
   private readonly sources = new Map<string, RuntimeSource>();
   private readonly listeners = new Set<Listener>();
@@ -36,8 +40,9 @@ export class NostrRuntime {
   private retrying = false;
   private readonly counters = { receivedEvents: 0, deliveredEvents: 0, duplicateEvents: 0, verificationFailures: 0 };
   constructor(private readonly options: NostrRuntimeOptions = {}) {
+    this.verifier = boundedVerifier(options.verifyEvent ?? verifyEvent);
     this.store = options.store ?? new MemoryEventStore();
-    this.relays = new RuntimeRelays({ ...options, store: this.store });
+    this.relays = new RuntimeRelays({ ...options, store: this.store }, this.verifier);
     for (const source of options.sources ?? []) this.sources.set(source.id, source);
     this.scheduleRetry();
   }
@@ -200,7 +205,7 @@ export class NostrRuntime {
     await this.store.close?.();
   }
   private async startListener(listener: Listener): Promise<void> {
-    const timeout = Math.max(0, (listener.options.deadline ?? Date.now() + (this.options.historyTimeoutMs ?? 10000)) - Date.now());
+    const timeout = Math.min(MAX_TIMER_MS, Math.max(0, (listener.options.deadline ?? Date.now() + (this.options.historyTimeoutMs ?? 10000)) - Date.now()));
     listener.timer = setTimeout(() => this.complete(listener, 'timeout'), timeout);
     // Open live routes before cache replay so an event cannot fall between the two.
     if (listener.options.cache !== 'cache-only') {
@@ -217,14 +222,14 @@ export class NostrRuntime {
       const events = await this.store.query(listener.filters, { signal: listener.controller.signal, deadline: listener.options.deadline });
       for (const raw of events) {
         if (listener.stopped) return;
-        try { this.deliver(listener, verifyNostrEvent(raw, this.options.verifyEvent), { source: 'local-cache', cached: true }); }
+        try { this.deliver(listener, verifyNostrEvent(raw, this.verifier), { source: 'local-cache', cached: true }); }
         catch (error) { this.report(listener, error); }
       }
     }
     if (listener.options.cache === 'cache-only') this.complete(listener, 'cache');
   }
   private verify(raw: NostrEvent): NostrVerifiedEvent {
-    try { return verifyNostrEvent(raw, this.options.verifyEvent); }
+    try { return verifyNostrEvent(raw, this.verifier); }
     catch (error) { this.counters.verificationFailures++; throw error; }
   }
   /** Return a write only when history must wait for admission. */
@@ -316,8 +321,9 @@ export class NostrRuntime {
     const settle = listener.options.settle;
     if (settle?.sources && !listener.settleTimer && !listener.notified && listener.statuses.size >= settle.sources) {
       listener.settleTimer = setTimeout(() => {
-        // If all sources finished, ordinary completion still owns cache replay and awaited writes.
-        if (listener.pending.size) this.complete(listener, 'eose');
+        listener.settled = true;
+        // Wait for cache replay and awaited writes before exposing settled history.
+        void this.maybeComplete(listener);
       }, Math.max(0, settle.graceMs ?? 300));
     }
     // Wait for ordered admission/cache writes before exposing EOSE.
@@ -327,14 +333,15 @@ export class NostrRuntime {
     if (listener.remainingIds?.size === 0) return; // Exact-ID completion is already queued.
     // New arrivals can extend the write chain while an older admission is pending.
     // Drain the current chain before reporting EOSE, including arrivals during cache replay.
-    while (listener.replayed && !listener.stopped && !listener.notified && listener.pending.size === 0) {
+    while (listener.replayed && !listener.stopped && !listener.notified && (listener.pending.size === 0 || listener.settled)) {
       const writes = this.writes;
       // Background persistence reports history without draining unrelated writes.
       if (listener.options.persist !== 'background') {
         await writes;
         if (writes !== this.writes) continue;
       }
-      if (listener.stopped || listener.notified || listener.pending.size) return;
+      if (listener.stopped || listener.notified || (listener.pending.size && !listener.settled)) return;
+      if (listener.pending.size) { this.complete(listener, 'eose'); return; }
       const states = [...listener.statuses.values()];
       this.complete(listener, states.length && states.every((state) => state.complete) ? 'eose'
         : states.some((state) => state.error) || !states.length ? 'unavailable' : 'timeout');
@@ -368,7 +375,7 @@ export class NostrRuntime {
     listener.closers.clear(); this.listeners.delete(listener); this.interests.remove(listener);
   }
   private async publishOnce(raw: NostrEvent, options: RuntimePublishOptions, onQueued: (result: RuntimePublishResult) => void): Promise<RuntimePublishResult> {
-    const event = verifyNostrEvent(raw, this.options.verifyEvent);
+    const event = verifyNostrEvent(raw, this.verifier);
     const queue = !options.requireAck && options.queue !== false;
     const echo = !options.requireAck && options.localEcho !== false;
     if (queue) await updatePublicationScope(this.store, event, options, 'queue');

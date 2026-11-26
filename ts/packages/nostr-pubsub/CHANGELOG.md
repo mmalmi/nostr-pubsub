@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.42
+
+Index `MemoryEventStore` by ID, author, kind, and author+kind in block-ordered query storage with inline cached expiration checks, eliminating full-store scans and front-of-array shifts during event admission and cache queries. Share the runtime's bounded complete-body signature verification cache across local cache replays, durable sources, and relay deliveries while still rejecting any tampered row.
+
+Fix NIP-42 `auth-required` live subscriptions failing to re-authenticate after a relay disconnect/reconnect, wait for local cache replay before `settle` completes a read, clamp far-future query deadlines against 32-bit timer overflow, group interleaved relay scopes into minimal batched `REQ`s with debounced teardown, and coalesce queued FIPS-TCP records into bounded writes during peer replay bursts.
+
 ## 0.5.41
 
 Combined index and relay reads now deliver relay events to background readers even when another subscription is still writing them. Indexes added at runtime honor their filter support. Exact-ID completion tracks unexpired results across the whole read, and empty background queries release their subscriptions. A corrupt index row marks its source incomplete while valid rows remain available.
