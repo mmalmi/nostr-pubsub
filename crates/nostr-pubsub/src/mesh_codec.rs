@@ -3,6 +3,7 @@ use std::fmt;
 use nostr::Event;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::{PubsubError, Result};
 
@@ -69,7 +70,7 @@ impl<'de> Deserialize<'de> for InvWantWireMessage {
                             }
                         }
                         (None, "event_kind" | "payload_bytes" | "hop_limit" | "event") => {
-                            pending.push((key, map.next_value::<serde_json::Value>()?));
+                            pending.push((key, map.next_value::<Box<RawValue>>()?));
                         }
                         (Some("inventory"), "event_kind") => {
                             if event_kind.replace(map.next_value()?).is_some() {
@@ -101,16 +102,16 @@ impl<'de> Deserialize<'de> for InvWantWireMessage {
                 for (key, value) in pending {
                     match (kind.as_str(), key.as_str()) {
                         ("inventory", "event_kind") => {
-                            read_pending(&mut event_kind, value, "event_kind")?;
+                            read_pending(&mut event_kind, &value, "event_kind")?;
                         }
                         ("inventory", "payload_bytes") => {
-                            read_pending(&mut payload_bytes, value, "payload_bytes")?;
+                            read_pending(&mut payload_bytes, &value, "payload_bytes")?;
                         }
                         ("inventory", "hop_limit") => {
-                            read_pending(&mut hop_limit, value, "hop_limit")?;
+                            read_pending(&mut hop_limit, &value, "hop_limit")?;
                         }
                         ("frame", "event") => {
-                            read_pending(&mut event, value, "event")?;
+                            read_pending(&mut event, &value, "event")?;
                         }
                         _ => {}
                     }
@@ -147,13 +148,13 @@ impl<'de> Deserialize<'de> for InvWantWireMessage {
 
 fn read_pending<T: de::DeserializeOwned, E: de::Error>(
     slot: &mut Option<T>,
-    value: serde_json::Value,
+    value: &RawValue,
     field: &'static str,
 ) -> std::result::Result<(), E> {
     if slot.is_some() {
         return Err(E::duplicate_field(field));
     }
-    *slot = Some(serde_json::from_value(value).map_err(E::custom)?);
+    *slot = Some(serde_json::from_str(value.get()).map_err(E::custom)?);
     Ok(())
 }
 
@@ -259,6 +260,7 @@ mod tests {
             r#"{"type":"want","event_id":"abc","event":"extension"}"#,
             r#"{"event":"extension","event_id":"abc","type":"want"}"#,
             r#"{"event_kind":{},"payload_bytes":null,"hop_limit":[],"event_id":"abc","type":"want"}"#,
+            r#"{"event_kind":1e999,"event_id":"abc","type":"want"}"#,
         ] {
             assert_eq!(
                 serde_json::from_str::<InvWantWireMessage>(json).unwrap(),
