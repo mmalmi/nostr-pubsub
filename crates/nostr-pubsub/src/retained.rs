@@ -39,7 +39,12 @@ impl RetainedEvents {
     }
 
     /// Recheck disk contents; neither a stored ID nor a signature flag is trusted.
+    ///
+    /// At most `max_events` candidate winners and 256 batch entries are retained
+    /// while reading. The final snapshot byte limit is applied after all
+    /// replacements, so a smaller replacement can free space for an older row.
     pub fn restore(&mut self, events: impl IntoIterator<Item = Event>, now: u64) {
+        let batch_limit = self.policy.max_events.min(256);
         let mut accepted = Vec::new();
         for event in events {
             let Ok(event) = VerifiedEvent::try_from(event) else {
@@ -54,14 +59,24 @@ impl RetainedEvents {
             };
             if encoded_len <= MAX_RETAINED_EVENT_BYTES {
                 accepted.push((event, encoded_len));
+                if accepted.len() == batch_limit {
+                    self.restore_batch(&mut accepted, now);
+                }
             }
         }
+        self.restore_batch(&mut accepted, now);
+        // Delay byte eviction until all replacements have been considered: a
+        // later smaller event can free room for an older unrelated event.
+        self.enforce_bounds();
+    }
+
+    fn restore_batch(&mut self, accepted: &mut Vec<(VerifiedEvent, usize)>, now: u64) {
         if accepted.is_empty() {
             return;
         }
         self.events
             .retain(|(old, _)| retained_event_is_current(old.as_event(), now));
-        self.events.extend(accepted);
+        self.events.append(accepted);
         self.events
             .sort_by(|(a, _), (b, _)| newest_first(a.as_event(), b.as_event()));
         let mut seen_ids = HashSet::with_capacity(self.events.len());
@@ -76,7 +91,14 @@ impl RetainedEvents {
                 .is_none_or(|coord| seen_coords.insert(coord))
         });
         self.bytes = self.events.iter().map(|(_, size)| *size + 1).sum();
-        self.enforce_bounds();
+        // Keeping only the newest count-limited coordinate winners is safe
+        // across batches. Candidates are bounded by max_events (at most 4096)
+        // and the 64 KiB event limit, plus at most 256 incoming batch entries.
+        while self.events.len() > self.policy.max_events {
+            if let Some((_, size)) = self.events.pop() {
+                self.bytes -= size + 1;
+            }
+        }
     }
 
     /// Whether `insert` would refuse the event before changing anything.
@@ -115,9 +137,9 @@ impl RetainedEvents {
             retained_event_is_current(old.as_event(), now)
                 && (coordinate.is_none() || event_coordinate(old.as_event()) != coordinate)
         });
-        let index = self
-            .events
-            .partition_point(|(existing, _)| newest_first(existing.as_event(), raw) == Ordering::Less);
+        let index = self.events.partition_point(|(existing, _)| {
+            newest_first(existing.as_event(), raw) == Ordering::Less
+        });
         self.events.insert(index, (event, encoded_len));
         self.bytes = self.events.iter().map(|(_, size)| *size + 1).sum();
         self.enforce_bounds();

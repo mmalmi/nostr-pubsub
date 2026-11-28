@@ -23,7 +23,7 @@ nvpn-fips-tcp = { version = "=0.2.6" }
 nvpn-fips-tcp-endpoint = { version = "=0.2.58" }
 nostr = { version = "0.44.3", features = ["nip44"] }
 nostr-sdk = "0.44.1"
-nostr-pubsub = { version = "0.1.23", path = "crates/nostr-pubsub" }
+nostr-pubsub = { version = "0.1.24", path = "crates/nostr-pubsub" }
 nostr-pubsub-reconcile = { version = "0.1.4", path = "crates/nostr-pubsub-reconcile" }
 nostr-pubsub-social-graph = { version = "0.3.2", path = "crates/nostr-pubsub-social-graph" }
 nostr-social-graph = "0.2.4"

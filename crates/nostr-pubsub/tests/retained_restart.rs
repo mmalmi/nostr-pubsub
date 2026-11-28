@@ -150,3 +150,48 @@ fn malformed_expiration_cannot_turn_a_signed_event_into_a_permanent_record() {
         );
     }
 }
+
+#[test]
+fn restore_keeps_older_rows_when_a_late_small_replacement_frees_bytes() {
+    use nostr_pubsub::MAX_RETAINED_SNAPSHOT_BYTES;
+    let keys = Keys::generate();
+    let old = advert(&keys, 1000, "mesh", &"a".repeat(60_000));
+    let replacement = advert(&keys, 1200, "mesh", "small");
+    let older = EventBuilder::text_note("older unrelated row")
+        .custom_created_at(Timestamp::from(999))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let mut rows = vec![old.clone(), older.clone()];
+    let mut serialized_bytes: usize = rows
+        .iter()
+        .map(|row| serde_json::to_vec(row).unwrap().len() + 1)
+        .sum();
+    // Exceed the byte limit by less than the large replacement's savings.
+    // The final correct snapshot fits, even though the intermediate input does not.
+    for index in 0..400 {
+        let row = EventBuilder::text_note(format!("{index}:{}", "f".repeat(60_000)))
+            .custom_created_at(Timestamp::from(1001))
+            .sign_with_keys(&keys)
+            .unwrap();
+        serialized_bytes += serde_json::to_vec(&row).unwrap().len() + 1;
+        rows.push(row);
+        if serialized_bytes + 128 > MAX_RETAINED_SNAPSHOT_BYTES {
+            break;
+        }
+    }
+    assert!(serialized_bytes + 128 > MAX_RETAINED_SNAPSHOT_BYTES);
+    let final_bytes = serialized_bytes - serde_json::to_vec(&old).unwrap().len()
+        + serde_json::to_vec(&replacement).unwrap().len()
+        + 128;
+    assert!(final_bytes <= MAX_RETAINED_SNAPSHOT_BYTES);
+    let expected_count = rows.len();
+    rows.push(replacement.clone());
+    let mut cache =
+        RetainedEvents::new(EventRetentionPolicy::new(4096, vec![Filter::new()])).unwrap();
+    cache.restore(rows, 1200);
+    let actual = cache.snapshot(1200);
+    assert_eq!(actual.len(), expected_count);
+    assert!(actual.contains(&older));
+    assert!(actual.contains(&replacement));
+    assert!(!actual.contains(&old));
+}

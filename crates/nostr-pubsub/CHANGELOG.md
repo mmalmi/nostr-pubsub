@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.24 - 2026-11-28
+
+- Bound temporary memory when restoring a lazy event stream. Keep the newest coordinate winners in small batches and apply the final byte limit after replacements are known, preserving snapshot contents.
+
 ## 0.1.21 - 2026-11-10
 
 - Make `InvWantMesh` expiry cheaper: a pass now touches only the tables that lost entries and removes route state directly, instead of rescanning every dedup table per message. Steady relaying of signed events measured about ten times less mesh time per event; limits, ordering and wire behavior are unchanged.
